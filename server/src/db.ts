@@ -54,7 +54,7 @@ export const agentRunSchema = z.object({
 
 export const assistantPreferencesSchema = z.object({
   assistantName: z.string().trim().min(1).max(32).default('AGA'),
-  wakeWord: z.string().trim().min(1).max(24).default('aga'),
+  wakeWord: z.string().trim().min(1).max(32).default('hey aga'),
   voiceStyle: z.enum(['warm', 'bright', 'calm', 'coach', 'story']).default('warm'),
   voiceName: z.string().trim().max(120).optional().nullable(),
   autoListen: z.boolean().default(true),

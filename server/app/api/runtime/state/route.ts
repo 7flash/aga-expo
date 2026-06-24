@@ -1,5 +1,6 @@
 import { z } from 'sqlite-zod-orm';
 import { getRuntimeState, saveRuntimeState } from '../../../../src/db';
+import { createInitialAgaState } from '../../../../src/aga/stateMachine';
 import { measured } from '../../../../src/measure';
 
 const runtimeSchema = z.object({
@@ -7,11 +8,13 @@ const runtimeSchema = z.object({
 });
 
 const fallback = {
-  mode: 'idle',
+  mode: 'armed',
+  agaState: createInitialAgaState(),
   lastMediaProvider: null,
   lastMediaTitle: null,
   lastTranslationTarget: 'English',
   lastRecovery: null,
+  lastWakePhrase: 'hey aga',
 };
 
 export async function GET() {

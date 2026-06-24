@@ -5,16 +5,16 @@ type Role = 'user' | 'assistant';
 type VoiceStyle = 'warm' | 'bright' | 'calm' | 'coach' | 'story';
 type AssistantMode =
   | 'idle'
-  | 'wake-listening'
-  | 'command-listening'
+  | 'armed'
+  | 'wake_confirmed'
+  | 'listening'
   | 'thinking'
   | 'speaking'
-  | 'translate'
-  | 'youtube'
-  | 'music'
-  | 'config'
-  | 'recovery'
-  | 'agent';
+  | 'playing_media'
+  | 'translating'
+  | 'agent_running'
+  | 'recovering'
+  | 'offline';
 
 type ChatMessage = {
   id: string;
@@ -75,6 +75,21 @@ type ServerIntent = {
   spokenSummary: string;
 };
 
+type AgaAction = {
+  type: string;
+  payload?: Record<string, unknown>;
+  confidence?: number;
+  spokenSummary?: string;
+};
+
+type AssistantTurnResponse = {
+  conversationId: number;
+  speech: string;
+  actions: AgaAction[];
+  intent?: ServerIntent;
+  error?: string;
+};
+
 type ChatState = {
   conversationId: number | null;
   messages: ChatMessage[];
@@ -114,7 +129,7 @@ declare global {
 
 const defaultPreferences: Preferences = {
   assistantName: 'AGA',
-  wakeWord: 'aga',
+  wakeWord: 'hey aga',
   voiceStyle: 'warm',
   voiceName: null,
   autoListen: true,
@@ -136,7 +151,7 @@ const state: ChatState = {
       role: 'assistant',
       createdAt: new Date().toISOString(),
       content:
-        'Hi, I’m AGA. Say “AGA” and then ask a question, play music, open a YouTube video, or start live translation.',
+        'Hi, I’m AGA. Say “Hey AGA” and then ask a question, play music, open a YouTube video, or start live translation.',
     },
   ],
   transcript: '',
@@ -194,11 +209,11 @@ let animationFrame = 0;
 let clock: THREE.Clock | null = null;
 
 const commandHints = [
-  '“AGA, play calm music”',
-  '“AGA, open YouTube lofi study”',
-  '“AGA, translate to Indonesian”',
-  '“AGA, health check”',
-  '“AGA, run an agent to plan this”',
+  '“Hey AGA, play calm music”',
+  '“Hey AGA, open YouTube lofi study”',
+  '“Hey AGA, translate to Indonesian”',
+  '“Hey AGA, health check”',
+  '“Hey AGA, run an agent to plan this”',
 ];
 
 function createMessage(role: Role, content: string): ChatMessage {
@@ -249,7 +264,7 @@ function getAudioPlayer() {
     audioPlayer.preload = 'auto';
     audioPlayer.autoplay = false;
     audioPlayer.onplay = () => {
-      state.mode = 'music';
+      state.mode = 'playing_media';
       update();
     };
     audioPlayer.onpause = () => update();
@@ -264,6 +279,14 @@ function logVoiceEvent(kind: string, payload: unknown = {}) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ kind, payload }),
+  }).catch(() => undefined);
+}
+
+function postAudioEvent(type: string, payload: Record<string, unknown> = {}) {
+  void fetch('/api/audio/events', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type, payload }),
   }).catch(() => undefined);
 }
 
@@ -334,11 +357,11 @@ function lastAssistantText() {
 }
 
 function setRecovery(reason: string) {
-  state.mode = 'recovery';
+  state.mode = 'recovering';
   state.lastRecovery = reason;
   state.watchdogCount += 1;
-  logVoiceEvent('recovery', { reason, count: state.watchdogCount });
-  void patchRuntimeState({ mode: 'recovery', lastRecovery: reason });
+  logVoiceEvent('recovering', { reason, count: state.watchdogCount });
+  void patchRuntimeState({ mode: 'recovering', lastRecovery: reason });
   update();
 }
 
@@ -365,7 +388,7 @@ function handleRecoveryCommand(command: string) {
     state.loading = false;
     state.translationActive = false;
     window.speechSynthesis?.cancel?.();
-    state.mode = 'idle';
+    state.mode = 'armed';
     state.messages.push(createMessage('assistant', 'Cancelled. I am back in listening mode.'));
     speak('Cancelled. I am back in listening mode.', { force: true });
     update();
@@ -427,14 +450,14 @@ async function runHealthCheck() {
     speak(reply, { force: true });
   } finally {
     state.loading = false;
-    state.mode = state.translationActive ? 'translate' : 'idle';
+    state.mode = state.translationActive ? 'translating' : 'armed';
     update();
   }
 }
 
 async function runAgent(command: string) {
   state.loading = true;
-  state.mode = 'agent';
+  state.mode = 'agent_running';
   state.agentStatus = 'Running an on-demand agent task';
   state.messages.push(createMessage('user', command));
   update();
@@ -461,7 +484,7 @@ async function runAgent(command: string) {
     speak(reply, { force: true });
   } finally {
     state.loading = false;
-    state.mode = state.translationActive ? 'translate' : 'idle';
+    state.mode = state.translationActive ? 'translating' : 'armed';
     update();
   }
 }
@@ -539,13 +562,15 @@ function speak(text: string, options: { interrupt?: boolean; force?: boolean } =
   utterance.onstart = () => {
     lastSpoken = normalize(spokenText);
     state.speaking = true;
-    state.mode = state.translationActive ? 'translate' : 'speaking';
+    state.mode = state.translationActive ? 'translating' : 'speaking';
+    postAudioEvent('speech_start_output', { text: spokenText.slice(0, 120) });
     update();
   };
 
   utterance.onend = () => {
     state.speaking = false;
-    state.mode = state.translationActive ? 'translate' : 'idle';
+    state.mode = state.translationActive ? 'translating' : 'armed';
+    postAudioEvent('speech_done');
     update();
   };
 
@@ -573,7 +598,8 @@ function ensureRecognition() {
     recognitionStarting = false;
     state.listening = true;
     state.error = null;
-    if (state.mode === 'idle') state.mode = Date.now() < state.awakeUntil ? 'command-listening' : 'wake-listening';
+    if (state.mode === 'idle') state.mode = Date.now() < state.awakeUntil ? 'listening' : 'armed';
+    postAudioEvent('speech_start');
     update();
   };
 
@@ -689,6 +715,7 @@ async function handleFinalTranscript(text: string) {
   lastHandledTranscript = normalizedText;
   state.passiveHeard = text;
   logVoiceEvent('voice.final', { text, mode: state.mode, translationActive: state.translationActive });
+  postAudioEvent('speech_end', { text });
 
   if (state.translationActive && !/\b(stop|end|cancel)\s+(translation|translate|interpreter)\b/i.test(normalizedText)) {
     await translateSegment(text);
@@ -697,6 +724,7 @@ async function handleFinalTranscript(text: string) {
 
   const commandFromWake = commandAfterWake(text);
   const stillAwake = Date.now() < state.awakeUntil;
+  if (commandFromWake !== null) postAudioEvent('wake', { phrase: state.preferences.wakeWord, command: commandFromWake });
 
   if (commandFromWake === null && !stillAwake) {
     update();
@@ -752,7 +780,7 @@ async function runCommand(command: string) {
 
   if (serverIntent?.name === 'agent_task') {
     if (state.preferences.agentMode === 'off') {
-      const reply = 'Agent mode is off. Say AGA, change personality, or enable agents in preferences when you want that back.';
+      const reply = 'Agent mode is off. Say Hey AGA, change personality, or enable agents in preferences when you want that back.';
       state.messages.push(createMessage('assistant', reply));
       speak(reply, { force: true });
       return;
@@ -763,8 +791,8 @@ async function runCommand(command: string) {
 
   if (serverIntent?.name === 'stop_translation' || /\b(stop|end|cancel)\s+(translation|translate|interpreter)\b/.test(normalizedCommand)) {
     state.translationActive = false;
-    state.mode = 'idle';
-    void patchRuntimeState({ mode: 'idle', lastTranslationTarget: state.preferences.translationTarget });
+    state.mode = 'armed';
+    void patchRuntimeState({ mode: 'armed', lastTranslationTarget: state.preferences.translationTarget });
     state.messages.push(createMessage('assistant', 'Translation mode is off.'));
     speak('Translation mode is off.');
     update();
@@ -775,10 +803,11 @@ async function runCommand(command: string) {
   const language = intentLanguage || parseLanguage(command);
   if (language) {
     state.translationActive = true;
-    state.mode = 'translate';
+    state.mode = 'translating';
+    postAudioEvent('translate_start', { targetLanguage: language });
     await patchPreferences({ translationTarget: language });
-    void patchRuntimeState({ mode: 'translate', lastTranslationTarget: language });
-    const reply = `Live translation is on. I’ll translate incoming speech to ${language}. Say “AGA, stop translation” to end it.`;
+    void patchRuntimeState({ mode: 'translating', lastTranslationTarget: language });
+    const reply = `Live translation is on. I’ll translate incoming speech to ${language}. Say “Hey AGA, stop translation” to end it.`;
     state.messages.push(createMessage('assistant', reply));
     speak(reply);
     update();
@@ -848,7 +877,7 @@ async function runCommand(command: string) {
 
   if (serverIntent?.name === 'help' || /\b(help|what can you do|commands|what can i say)\b/.test(normalizedCommand)) {
     const reply =
-      'You can say: AGA, ask a question; AGA, play music; AGA, open YouTube; AGA, translate to Indonesian; AGA, pause; AGA, repeat; AGA, restart listening; AGA, health check; or AGA, run an agent task.';
+      'You can say: Hey AGA, ask a question; play music; open YouTube; translate to Indonesian; pause; repeat; restart listening; health check; or run an agent task.';
     state.messages.push(createMessage('assistant', reply));
     speak(reply, { force: true });
     update();
@@ -856,7 +885,7 @@ async function runCommand(command: string) {
   }
 
   if (serverIntent?.name === 'reset_conversation' || (/\b(clear|reset)\b/.test(normalizedCommand) && /\b(chat|conversation|screen)\b/.test(normalizedCommand))) {
-    state.messages = [createMessage('assistant', 'Fresh conversation started. Say “AGA” whenever you need me.')];
+    state.messages = [createMessage('assistant', 'Fresh conversation started. Say “Hey AGA” whenever you need me.')];
     state.conversationId = null;
     speak('Fresh conversation started.');
     update();
@@ -885,7 +914,7 @@ async function configureVoice(command: string) {
   });
 
   const reply = `Voice updated. Style is ${voiceStyle ?? state.preferences.voiceStyle}${namedVoice ? ` with ${namedVoice.name}` : ''}.`;
-  state.mode = 'config';
+  state.mode = 'speaking';
   state.messages.push(createMessage('assistant', reply));
   speak(reply, { force: true });
 }
@@ -911,6 +940,7 @@ function controlMedia(command: string, volumePercent = Number.NaN) {
     youtubePlayer?.stopVideo?.();
     audio?.pause();
     if (audio) audio.currentTime = 0;
+    postAudioEvent('media_stop');
     speak('Stopped.');
     return true;
   }
@@ -965,6 +995,106 @@ function controlMedia(command: string, volumePercent = Number.NaN) {
   return false;
 }
 
+
+async function requestAssistantTurn(text: string): Promise<AssistantTurnResponse> {
+  const response = await fetch('/api/assistant/turn', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      conversationId: state.conversationId,
+      message: text,
+      allowModelActions: true,
+      clientState: {
+        mode: state.mode,
+        translationActive: state.translationActive,
+        mediaActive: Boolean(state.video || state.musicQueue[state.musicIndex]),
+      },
+    }),
+  });
+
+  const data = await response.json();
+  if (!response.ok) throw new Error(data?.error ?? 'AGA could not complete the turn.');
+  return data as AssistantTurnResponse;
+}
+
+async function executeAgaAction(action: AgaAction, sourceCommand: string) {
+  const payload = action.payload ?? {};
+
+  switch (action.type) {
+    case 'youtube.play':
+      await playYouTube(String(payload.query ?? sourceCommand));
+      return true;
+    case 'music.play':
+      await playMusic(String(payload.query ?? sourceCommand));
+      return true;
+    case 'youtube.control':
+    case 'music.control':
+      return controlMedia(String(payload.command ?? sourceCommand), Number(payload.volume ?? Number.NaN));
+    case 'translate.start': {
+      const target = String(payload.targetLanguage ?? state.preferences.translationTarget ?? 'English');
+      state.translationActive = true;
+      state.mode = 'translating';
+      postAudioEvent('translate_start', { targetLanguage: target });
+      await patchPreferences({ translationTarget: target, translationSource: String(payload.sourceLanguage ?? 'auto') });
+      void patchRuntimeState({ mode: 'translating', lastTranslationTarget: target });
+      update();
+      return true;
+    }
+    case 'translate.stop':
+      state.translationActive = false;
+      state.mode = 'armed';
+      postAudioEvent('translate_stop');
+      void patchRuntimeState({ mode: 'armed', lastTranslationTarget: state.preferences.translationTarget });
+      update();
+      return true;
+    case 'persona.set':
+      if (typeof payload.wakeWord === 'string') await patchPreferences({ wakeWord: payload.wakeWord });
+      if (typeof payload.assistantName === 'string') await patchPreferences({ assistantName: payload.assistantName });
+      if (typeof payload.text === 'string') await configureVoice(payload.text);
+      return true;
+    case 'agent.spawn':
+      await runAgent(String(payload.goal ?? sourceCommand));
+      return true;
+    case 'system.health':
+      await runHealthCheck();
+      return true;
+    case 'system.help': {
+      const reply = 'You can say: Hey AGA, ask a question; play music; open YouTube; translate to Indonesian; pause; repeat; restart listening; health check; or run an agent task.';
+      state.messages.push(createMessage('assistant', reply));
+      speak(reply, { force: true });
+      update();
+      return true;
+    }
+    case 'system.listen':
+      shouldKeepListening = true;
+      await patchPreferences({ autoListen: true });
+      startListening();
+      return true;
+    case 'system.stop_listening':
+      stopListening();
+      await patchPreferences({ autoListen: false });
+      return true;
+    case 'conversation.reset':
+      state.messages = [createMessage('assistant', 'Fresh conversation started. Say “Hey AGA” whenever you need me.')];
+      state.conversationId = null;
+      update();
+      return true;
+    case 'system.recover':
+      setRecovery(String(payload.reason ?? 'assistant requested recovery'));
+      return true;
+    default:
+      return false;
+  }
+}
+
+async function executeAgaActions(actions: AgaAction[], sourceCommand: string) {
+  let handled = false;
+  for (const item of actions ?? []) {
+    handled = (await executeAgaAction(item, sourceCommand)) || handled;
+  }
+  return handled;
+}
+
 async function sendChatMessage(text: string) {
   const cleanText = text.trim();
   if (!cleanText || state.loading) return;
@@ -977,32 +1107,25 @@ async function sendChatMessage(text: string) {
   update();
 
   try {
-    const response = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        conversationId: state.conversationId,
-        message: cleanText,
-      }),
-    });
+    const data = await requestAssistantTurn(cleanText);
+    state.conversationId = data.conversationId;
 
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data?.error ?? 'AGA could not reply.');
+    const speech = String(data.speech ?? '').trim();
+    if (speech) {
+      state.messages.push(createMessage('assistant', speech));
+      speak(speech);
     }
 
-    state.conversationId = data.conversationId;
-    state.messages.push(createMessage('assistant', data.reply));
-    speak(data.reply);
+    await executeAgaActions(data.actions ?? [], cleanText);
   } catch (error) {
     state.error = error instanceof Error ? error.message : 'Something went wrong.';
     const fallback = `Sorry, I hit a glitch: ${state.error}`;
     state.messages.push(createMessage('assistant', fallback));
-    speak(fallback);
+    speak(fallback, { force: true });
+    setRecovery(state.error);
   } finally {
     state.loading = false;
-    state.mode = state.translationActive ? 'translate' : 'idle';
+    state.mode = state.translationActive ? 'translating' : 'armed';
     update();
   }
 }
@@ -1012,7 +1135,7 @@ async function translateSegment(text: string) {
   if (!cleanText || state.loading) return;
 
   state.loading = true;
-  state.mode = 'translate';
+  state.mode = 'translating';
   update();
 
   try {
@@ -1040,13 +1163,14 @@ async function translateSegment(text: string) {
     speak('Translation failed. I will keep listening.');
   } finally {
     state.loading = false;
-    state.mode = 'translate';
+    state.mode = 'translating';
     update();
   }
 }
 
 async function playMusic(query: string) {
-  state.mode = 'music';
+  state.mode = 'playing_media';
+  postAudioEvent('media_start', { provider: 'music', query });
   state.loading = true;
   state.musicQuery = query;
   state.error = null;
@@ -1098,7 +1222,7 @@ async function playCurrentTrack() {
     try {
       await audio.play();
     } catch {
-      state.error = 'Autoplay was blocked. Say AGA, resume after the first user interaction.';
+      state.error = 'Autoplay was blocked. Say Hey AGA, resume after the first user interaction.';
     }
   }
 
@@ -1174,7 +1298,8 @@ async function syncYouTubePlayer() {
 }
 
 async function playYouTube(query: string) {
-  state.mode = 'youtube';
+  state.mode = 'playing_media';
+  postAudioEvent('media_start', { provider: 'youtube', query });
   state.loading = true;
   state.youtubeQuery = query;
   state.error = null;
@@ -1216,13 +1341,17 @@ async function playYouTube(query: string) {
 }
 
 function statusLabel() {
-  if (state.mode === 'recovery') return 'Recovering';
-  if (state.mode === 'agent') return 'Agent';
-  if (state.translationActive) return 'Translating';
-  if (state.loading) return 'Thinking';
-  if (state.speaking) return 'Speaking';
-  if (state.listening) return Date.now() < state.awakeUntil ? 'Awake' : 'Wake listening';
-  return 'Sleeping';
+  if (state.mode === 'recovering') return 'Recovering';
+  if (state.mode === 'agent_running') return 'Agent running';
+  if (state.mode === 'offline') return 'Offline';
+  if (state.translationActive || state.mode === 'translating') return 'Translating';
+  if (state.mode === 'playing_media') return 'Playing media';
+  if (state.loading || state.mode === 'thinking') return 'Thinking';
+  if (state.speaking || state.mode === 'speaking') return 'Speaking';
+  if (state.listening || state.mode === 'listening') return Date.now() < state.awakeUntil ? 'Awake' : 'Listening for wake phrase';
+  if (state.mode === 'wake_confirmed') return 'Wake confirmed';
+  if (state.mode === 'armed') return 'Armed';
+  return 'Idle';
 }
 
 function scrollMessagesToBottom() {
@@ -1264,6 +1393,38 @@ function TypingBubble() {
   );
 }
 
+
+const stateRail: Array<{ mode: AssistantMode; label: string }> = [
+  { mode: 'armed', label: 'Wake' },
+  { mode: 'listening', label: 'Listen' },
+  { mode: 'thinking', label: 'Think' },
+  { mode: 'speaking', label: 'Speak' },
+  { mode: 'playing_media', label: 'Media' },
+  { mode: 'translating', label: 'Translate' },
+];
+
+function StateRail() {
+  return (
+    <div class="state-rail" aria-label="AGA state machine">
+      {stateRail.map((item) => {
+        const active =
+          state.mode === item.mode ||
+          (item.mode === 'listening' && Date.now() < state.awakeUntil && state.listening) ||
+          (item.mode === 'speaking' && state.speaking) ||
+          (item.mode === 'thinking' && state.loading) ||
+          (item.mode === 'translating' && state.translationActive) ||
+          (item.mode === 'playing_media' && Boolean(state.video || state.musicQueue[state.musicIndex]));
+        return (
+          <span class={`state-node ${active ? 'active' : ''}`} key={item.mode}>
+            <i aria-hidden="true" />
+            {item.label}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 function MediaPanel() {
   const track = state.musicQueue[state.musicIndex];
 
@@ -1288,7 +1449,7 @@ function MediaPanel() {
     );
   }
 
-  if (state.mode === 'youtube' || state.video || !state.youtubeConfigured) {
+  if (state.mode === 'playing_media' || state.video || !state.youtubeConfigured) {
     return (
       <div class="media-panel youtube-panel">
         <div class="media-copy">
@@ -1303,7 +1464,7 @@ function MediaPanel() {
     );
   }
 
-  if (state.mode === 'music' || track) {
+  if (track || state.musicQueue.length) {
     return (
       <div class="media-panel music-panel">
         <div class="album-art">
@@ -1312,7 +1473,7 @@ function MediaPanel() {
         <div class="media-copy">
           <span class="panel-label">Music previews</span>
           <strong>{track ? track.title : 'No track selected'}</strong>
-          <p>{track ? `${track.artist}${track.album ? ` · ${track.album}` : ''}` : 'Say “AGA, play music ...”'}</p>
+          <p>{track ? `${track.artist}${track.album ? ` · ${track.album}` : ''}` : 'Say “Hey AGA, play music ...”'}</p>
         </div>
         <div class="media-commands">pause · resume · next · volume up</div>
       </div>
@@ -1350,6 +1511,8 @@ Always-listening wake word, recovery commands, voice media controls, SQLite memo
           <span>{statusLabel()}</span>
         </div>
       </div>
+
+      <StateRail />
 
       <MediaPanel />
 
@@ -1396,7 +1559,7 @@ Always-listening wake word, recovery commands, voice media controls, SQLite memo
             {state.transcript ||
               state.passiveHeard ||
               (state.speechSupported
-                ? 'Say “AGA, help” for commands.'
+                ? 'Say “Hey AGA, help” for commands.'
                 : 'Use Chrome/WebView speech support or wire native Expo speech recognition.')}
           </strong>
           <div class="hint-row" aria-hidden="true">
