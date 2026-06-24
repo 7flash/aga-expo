@@ -11,6 +11,7 @@ type Preferences = {
   brainMode: 'offline' | 'openai' | 'gemini';
   translateTarget: string | null;
   showDiagnostics: boolean;
+  proactiveReminders: boolean;
 };
 
 export type { Preferences };
@@ -24,6 +25,7 @@ const DEFAULT_PREFS: Preferences = {
   brainMode: ((process.env.EXPO_PUBLIC_AGA_BRAIN_MODE as Preferences['brainMode']) || 'openai') as Preferences['brainMode'],
   translateTarget: null,
   showDiagnostics: false,
+  proactiveReminders: true,
 };
 
 let dbPromise: Promise<SQLiteDatabase | null> | null = null;
@@ -31,6 +33,7 @@ let memoryFallback = {
   prefs: { ...DEFAULT_PREFS },
   messages: [] as Array<{ role: string; content: string; createdAt: string }>,
   memories: [] as Array<{ text: string; createdAt: string }>,
+  reminders: [] as Array<{ id: number; text: string; dueAt: string; delivered: number; createdAt: string }>,
   events: [] as Array<{ label: string; detail: string; createdAt: string }>,
 };
 
@@ -100,6 +103,7 @@ export async function initializeLocalStore() {
   await exec(db, `CREATE TABLE IF NOT EXISTS preferences (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);`);
   await exec(db, `CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT NOT NULL, content TEXT NOT NULL, createdAt TEXT NOT NULL);`);
   await exec(db, `CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, createdAt TEXT NOT NULL);`);
+  await exec(db, `CREATE TABLE IF NOT EXISTS reminders (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, dueAt TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0, createdAt TEXT NOT NULL);`);
   await exec(db, `CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT NOT NULL, detail TEXT NOT NULL, createdAt TEXT NOT NULL);`);
   const prefs = await loadPreferences();
   await savePreferences({ ...DEFAULT_PREFS, ...prefs });
@@ -177,6 +181,68 @@ export async function searchMemories(query?: string, limit = 8) {
   return all<{ text: string; createdAt: string }>(db, 'SELECT text, createdAt FROM memories ORDER BY id DESC LIMIT ?', [limit]);
 }
 
+
+export type Reminder = {
+  id: number;
+  text: string;
+  dueAt: string;
+  delivered: number;
+  createdAt: string;
+};
+
+export async function addReminder(text: string, dueAt: string) {
+  const createdAt = new Date().toISOString();
+  const db = await openDb();
+  if (!db) {
+    const id = Date.now();
+    memoryFallback.reminders.push({ id, text, dueAt, delivered: 0, createdAt });
+    return { id, text, dueAt, delivered: 0, createdAt };
+  }
+  await exec(db, 'INSERT INTO reminders (text, dueAt, delivered, createdAt) VALUES (?, ?, 0, ?)', [text, dueAt, createdAt]);
+  const row = await first<Reminder>(db, 'SELECT id, text, dueAt, delivered, createdAt FROM reminders ORDER BY id DESC LIMIT 1');
+  return row ?? { id: Date.now(), text, dueAt, delivered: 0, createdAt };
+}
+
+export async function listPendingReminders(limit = 8) {
+  const db = await openDb();
+  if (!db) {
+    return memoryFallback.reminders
+      .filter((reminder) => !reminder.delivered)
+      .sort((a, b) => a.dueAt.localeCompare(b.dueAt))
+      .slice(0, limit);
+  }
+  return all<Reminder>(
+    db,
+    'SELECT id, text, dueAt, delivered, createdAt FROM reminders WHERE delivered = 0 ORDER BY dueAt ASC LIMIT ?',
+    [limit]
+  );
+}
+
+export async function drainDueReminders(now = new Date()) {
+  const nowIso = now.toISOString();
+  const db = await openDb();
+  if (!db) {
+    const due = memoryFallback.reminders.filter((reminder) => !reminder.delivered && reminder.dueAt <= nowIso);
+    memoryFallback.reminders = memoryFallback.reminders.map((reminder) => due.some((item) => item.id === reminder.id) ? { ...reminder, delivered: 1 } : reminder);
+    return due;
+  }
+  const due = await all<Reminder>(
+    db,
+    'SELECT id, text, dueAt, delivered, createdAt FROM reminders WHERE delivered = 0 AND dueAt <= ? ORDER BY dueAt ASC LIMIT 5',
+    [nowIso]
+  );
+  for (const reminder of due) {
+    await exec(db, 'UPDATE reminders SET delivered = 1 WHERE id = ?', [reminder.id]);
+  }
+  return due;
+}
+
+export async function clearReminders() {
+  memoryFallback.reminders = [];
+  const db = await openDb();
+  if (db) await exec(db, 'DELETE FROM reminders');
+}
+
 export async function logEvent(label: string, detail = '') {
   const createdAt = new Date().toISOString();
   memoryFallback.events.push({ label, detail, createdAt });
@@ -194,13 +260,14 @@ export async function listEvents(limit = 20) {
 export async function getDiagnostics() {
   const db = await openDb();
   const prefs = await loadPreferences();
-  const [messageCount, memoryCount, eventCount] = db
+  const [messageCount, memoryCount, eventCount, reminderCount] = db
     ? await Promise.all([
         first<{ c: number }>(db, 'SELECT COUNT(*) as c FROM messages'),
         first<{ c: number }>(db, 'SELECT COUNT(*) as c FROM memories'),
         first<{ c: number }>(db, 'SELECT COUNT(*) as c FROM events'),
+        first<{ c: number }>(db, 'SELECT COUNT(*) as c FROM reminders WHERE delivered = 0'),
       ])
-    : [{ c: memoryFallback.messages.length }, { c: memoryFallback.memories.length }, { c: memoryFallback.events.length }];
+    : [{ c: memoryFallback.messages.length }, { c: memoryFallback.memories.length }, { c: memoryFallback.events.length }, { c: memoryFallback.reminders.filter((r) => !r.delivered).length }];
   return {
     sqliteAvailable: !!db,
     persona: getPersona(prefs.persona).label,
@@ -210,5 +277,7 @@ export async function getDiagnostics() {
     messages: messageCount?.c ?? 0,
     memories: memoryCount?.c ?? 0,
     events: eventCount?.c ?? 0,
+    pendingReminders: reminderCount?.c ?? 0,
+    proactiveReminders: prefs.proactiveReminders,
   };
 }

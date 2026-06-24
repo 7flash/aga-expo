@@ -49,6 +49,15 @@ export function AgaSettingsScreen() {
           ))}
         </View>
 
+        <Text style={styles.sectionTitle}>Proactive reminders</Text>
+        <View style={styles.choiceRow}>
+          {[true, false].map((enabled) => (
+            <Pressable key={String(enabled)} onPress={() => update({ proactiveReminders: enabled })} style={[styles.choice, prefs.proactiveReminders === enabled && styles.choiceActive]}>
+              <Text style={styles.choiceText}>{enabled ? 'on' : 'off'}</Text>
+            </Pressable>
+          ))}
+        </View>
+
         <Text style={styles.sectionTitle}>Persona</Text>
         <View style={styles.personaGrid}>
           {Object.values(PERSONAS).map((persona) => (
@@ -105,3 +114,5 @@ const styles = StyleSheet.create({
   personaTitle: { color: colors.text, fontSize: 17, fontWeight: '900' },
   personaDesc: { color: colors.muted, marginTop: 5 },
 });
+
+export default AgaSettingsScreen;

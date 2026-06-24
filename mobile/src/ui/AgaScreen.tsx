@@ -8,6 +8,7 @@ import { askBrain, translatePhrase } from '../backend/brain';
 import {
   addMemory,
   addMessage,
+  addReminder,
   getDiagnostics,
   initializeLocalStore,
   listEvents,
@@ -18,6 +19,10 @@ import {
   searchMemories,
   type Preferences,
   clearMessages,
+  clearReminders,
+  drainDueReminders,
+  listPendingReminders,
+  type Reminder,
 } from '../db/localStore';
 import { NativeSpeechLoop } from '../voice/nativeSpeech';
 import { speak, stopSpeaking } from '../voice/tts';
@@ -31,6 +36,7 @@ const initialPrefs: Preferences = {
   brainMode: ((process.env.EXPO_PUBLIC_AGA_BRAIN_MODE as Preferences['brainMode']) || 'openai') as Preferences['brainMode'],
   translateTarget: null,
   showDiagnostics: false,
+  proactiveReminders: true,
 };
 
 export function AgaScreen() {
@@ -40,6 +46,7 @@ export function AgaScreen() {
   const [interim, setInterim] = useState('');
   const [messages, setMessages] = useState<Array<{ role: string; content: string; createdAt?: string }>>([]);
   const [events, setEvents] = useState<Array<{ label: string; detail: string; createdAt: string }>>([]);
+  const [reminders, setReminders] = useState<Reminder[]>([]);
   const [diagnostics, setDiagnostics] = useState<any>(null);
   const [manualText, setManualText] = useState('');
   const [speechStatus, setSpeechStatus] = useState('starting');
@@ -47,6 +54,7 @@ export function AgaScreen() {
   const prefsRef = useRef(prefs);
   const processingRef = useRef(false);
   const activeUntilRef = useRef(0);
+  const proactiveBusyRef = useRef(false);
 
   prefsRef.current = prefs;
 
@@ -54,6 +62,7 @@ export function AgaScreen() {
     setMessages(await listMessages(12));
     setEvents(await listEvents(8));
     setDiagnostics(await getDiagnostics());
+    setReminders(await listPendingReminders(5));
   }, []);
 
   const say = useCallback(async (text: string) => {
@@ -121,6 +130,39 @@ export function AgaScreen() {
       case 'show_diagnostics': {
         const next = await savePreferences({ showDiagnostics: !currentPrefs.showDiagnostics });
         setPrefs(next);
+        await refresh();
+        return;
+      }
+      case 'add_reminder': {
+        const reminder = await addReminder(action.text, action.dueAt);
+        await logEvent('reminder.add', `${reminder.text} @ ${reminder.dueAt}`);
+        await refresh();
+        await say(`Okay, I will remind you about ${action.text}.`);
+        return;
+      }
+      case 'list_reminders': {
+        const pending = await listPendingReminders(6);
+        if (!pending.length) {
+          await say('You have no pending reminders.');
+        } else {
+          await say(`You have ${pending.length} reminder${pending.length === 1 ? '' : 's'}: ${pending.map((item) => item.text).join('; ')}.`);
+        }
+        await refresh();
+        return;
+      }
+      case 'clear_reminders': {
+        await clearReminders();
+        await logEvent('reminder.clear');
+        await refresh();
+        await say('I cleared your reminders.');
+        return;
+      }
+      case 'test_voice':
+        await say('My voice is working. I am listening from the APK, without localhost.');
+        return;
+      case 'status': {
+        const diag = await getDiagnostics();
+        await say(`I am running locally. Speech status is ${speechStatus}. I have ${diag.messages} messages, ${diag.memories} memories, and ${diag.pendingReminders} pending reminders.`);
         await refresh();
         return;
       }
@@ -219,12 +261,37 @@ export function AgaScreen() {
     return () => { void loop.destroy(); loopRef.current = null; };
   }, [ready, prefs.voiceLocale, refresh]);
 
+  useEffect(() => {
+    if (!ready || !prefs.proactiveReminders) return;
+    const timer = setInterval(() => {
+      if (proactiveBusyRef.current || processingRef.current) return;
+      proactiveBusyRef.current = true;
+      (async () => {
+        try {
+          const due = await drainDueReminders();
+          for (const reminder of due) {
+            await logEvent('reminder.due', reminder.text);
+            await say(`Reminder: ${reminder.text}`);
+          }
+          if (due.length) await refresh();
+        } finally {
+          proactiveBusyRef.current = false;
+        }
+      })();
+    }, 15000);
+    return () => clearInterval(timer);
+  }, [ready, prefs.proactiveReminders, refresh, say]);
+
   async function submitManual() {
     const text = manualText.trim();
     if (!text) return;
     setManualText('');
     await handleRecognizedText(text);
   }
+
+  const reminderBody = reminders.length
+    ? reminders.map((item) => `• ${item.text} — ${new Date(item.dueAt).toLocaleString()}`).join('\n')
+    : 'No pending reminders. Try: Hey AGA, remind me to stretch in one minute.';
 
   const statusText = mode === 'sleeping'
     ? `Listening for “${prefs.wakePhrase}”`
@@ -276,6 +343,7 @@ export function AgaScreen() {
         <View style={styles.cardsRow}>
           <InfoCard title="Try" body={`“${prefs.wakePhrase}, help”\n“${prefs.wakePhrase}, remember that this boots”\n“${prefs.wakePhrase}, what do you remember?”`} />
           <InfoCard title="Brain" body={`${prefs.brainMode}\nOpenAI key: ${prefs.openaiApiKey ? 'set' : 'not set'}\nGemini key: ${prefs.geminiApiKey ? 'set' : 'not set'}`} />
+          <InfoCard title="Reminders" body={reminderBody} />
         </View>
 
         <View style={styles.messagesPanel}>
