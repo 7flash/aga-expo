@@ -14,6 +14,9 @@ import { createConversation, getOrCreateConversation, listMessages, saveMessage 
 import { getPreferences, updatePreferences } from '../db/preferences';
 import { logEvent, recentEvents } from '../db/eventLog';
 import type { ChatMessage, Conversation, EventLog, MediaQueueItem, MemoryFact, Reminder, UserPreferences } from '../db/schema';
+import { searchLocalRecall, summarizeSearchResults } from '../db/search';
+import { clearEventLog, createBackupJson, factoryResetLocalData, getStorageSummary, selfRepairDatabase, summarizeStorage, type StorageSummary } from '../db/backup';
+import { copyOrShareText } from '../platform/optionalShare';
 import type { AgaAction } from '../aga/actions';
 import type { AgaState } from '../aga/stateMachine';
 import { stateLabel, transition } from '../aga/stateMachine';
@@ -39,7 +42,7 @@ function webviewCommand(type: string, value?: number) {
 }
 
 function actionProducesOwnSpeech(action: AgaAction) {
-  return action.type === 'media.status' || action.type === 'media.queue.status' || action.type === 'memory.recall' || action.type === 'reminder.list' || action.type === 'system.health' || action.type === 'notifications.request' || action.type === 'command.harness';
+  return action.type === 'media.status' || action.type === 'media.queue.status' || action.type === 'memory.recall' || action.type === 'reminder.list' || action.type === 'system.health' || action.type === 'notifications.request' || action.type === 'command.harness' || action.type === 'history.search' || action.type === 'backup.export' || action.type === 'backup.summary' || action.type === 'system.self_repair' || action.type === 'system.factory_reset_request' || action.type === 'system.factory_reset_confirm';
 }
 
 export function AgaScreen() {
@@ -61,6 +64,9 @@ export function AgaScreen() {
   const [queueItems, setQueueItems] = useState<MediaQueueItem[]>([]);
   const [notificationStatus, setNotificationStatus] = useState('unknown');
   const [harnessSummary, setHarnessSummary] = useState<string | undefined>();
+  const [storageSummary, setStorageSummary] = useState<StorageSummary | null>(null);
+  const [backupStatus, setBackupStatus] = useState<string | undefined>();
+  const [factoryResetRequestedAt, setFactoryResetRequestedAt] = useState<number | null>(null);
 
   const speechLoopRef = useRef<NativeSpeechLoop | null>(null);
   const activeUntilRef = useRef(0);
@@ -115,6 +121,7 @@ export function AgaScreen() {
         await refreshLocalContext();
         const notifications = await notificationDiagnostics();
         setNotificationStatus(notifications.available ? (notifications.granted ? 'granted' : notifications.status) : 'module missing');
+        setStorageSummary(await getStorageSummary());
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Could not start AGA.');
         setAgaState('recovering');
@@ -172,6 +179,21 @@ export function AgaScreen() {
     return () => clearInterval(interval);
   }, [drainProactiveQueue, ready]);
 
+
+
+  const refreshStorageSummary = useCallback(async () => {
+    const summary = await getStorageSummary();
+    setStorageSummary(summary);
+    return summary;
+  }, []);
+
+  const restartSpeechLoop = useCallback(async () => {
+    const loop = speechLoopRef.current;
+    if (!loop) return false;
+    await loop.stop();
+    await loop.start();
+    return true;
+  }, []);
 
   const scheduleReminderIfEnabled = useCallback(async (reminder: Reminder) => {
     if (!prefs?.localNotificationsEnabled) return;
@@ -268,6 +290,76 @@ export function AgaScreen() {
     await logEvent('action', action.type, action);
     switch (action.type) {
 
+      case 'history.search': {
+        const results = await searchLocalRecall(action.query, 12);
+        const reply = summarizeSearchResults(results, action.query);
+        speakAga(reply);
+        await logEvent('search', 'local_history', { query: action.query, count: results.length });
+        await refreshLog();
+        return;
+      }
+      case 'backup.summary': {
+        const summary = await refreshStorageSummary();
+        const reply = summarizeStorage(summary);
+        speakAga(reply);
+        return;
+      }
+      case 'backup.export': {
+        const json = await createBackupJson();
+        const result = await copyOrShareText(`aga-backup-${Date.now()}.json`, json);
+        const summary = await refreshStorageSummary();
+        const kb = Math.max(1, Math.round(json.length / 1024));
+        const status = `Backup ${result.note}. Size ${kb} KB.`;
+        setBackupStatus(status);
+        setStorageSummary(summary);
+        await logEvent('backup', 'export', { bytes: json.length, transport: result.note });
+        speakAga(result.copied || result.shared ? `Backup ready and ${result.note}.` : `Backup created, but ${result.note}. Install expo clipboard or sharing to move it out of the app.`);
+        await refreshLog();
+        return;
+      }
+      case 'diagnostics.clear_logs': {
+        await clearEventLog();
+        setRecentLog([]);
+        await refreshStorageSummary();
+        return;
+      }
+      case 'system.self_repair': {
+        sendMachine({ type: 'recover' });
+        const summary = await selfRepairDatabase();
+        setStorageSummary(summary);
+        const [nextPrefs, nextConversation] = await Promise.all([getPreferences(), getOrCreateConversation()]);
+        setPrefs(nextPrefs);
+        setConversation(nextConversation);
+        await Promise.all([refreshMessages(nextConversation.id), refreshLocalContext(), refreshLog(), restartSpeechLoop()]);
+        speakAga(`Self repair complete. ${summarizeStorage(summary)}`);
+        return;
+      }
+      case 'system.factory_reset_request': {
+        setFactoryResetRequestedAt(Date.now());
+        speakAga('I will only erase local data if you say confirm factory reset within the next thirty seconds.');
+        return;
+      }
+      case 'system.factory_reset_confirm': {
+        if (!factoryResetRequestedAt || Date.now() - factoryResetRequestedAt > 30_000) {
+          speakAga('Factory reset was not armed. Say factory reset first, then confirm factory reset.');
+          return;
+        }
+        await factoryResetLocalData();
+        setFactoryResetRequestedAt(null);
+        const [nextConversation, nextPrefs] = await Promise.all([getOrCreateConversation(), getPreferences()]);
+        setConversation(nextConversation);
+        setPrefs(nextPrefs);
+        setMessages(await listMessages(nextConversation.id));
+        setNowPlaying(EMPTY_NOW_PLAYING);
+        setPlayerHtml(null);
+        setMemories([]);
+        setReminders([]);
+        setQueueItems([]);
+        setRecentLog([]);
+        await refreshStorageSummary();
+        speakAga('Factory reset complete. I am fresh and ready.');
+        return;
+      }
       case 'diagnostics.show': {
         setDebugVisible(true);
         await refreshLog();
@@ -376,7 +468,7 @@ export function AgaScreen() {
         return;
       }
       case 'system.health': {
-        const status = `Voice ${voiceAvailable ? 'ready' : 'not installed'}, SQLite ready, persona ${persona.label}, ${memories.length} memories, ${reminders.length} reminders, ${queueItems.length} queued media items, notifications ${notificationStatus}.`;
+        const status = `Voice ${voiceAvailable ? 'ready' : 'not installed'}, SQLite ready, persona ${persona.label}, ${memories.length} memories, ${reminders.length} reminders, ${queueItems.length} queued media items, notifications ${notificationStatus}, storage ${storageSummary ? summarizeStorage(storageSummary) : 'not summarized yet'}.`;
         speakAga(status);
         return;
       }
@@ -459,7 +551,7 @@ export function AgaScreen() {
         return;
       }
     }
-  }, [memories.length, notificationStatus, nowPlaying, persona.label, playNextQueuedItem, playResolvedMedia, postPlayer, queueItems.length, refreshLocalContext, refreshLog, reminders.length, scheduleReminderIfEnabled, sendMachine, speakAga, voiceAvailable]);
+  }, [factoryResetRequestedAt, memories.length, notificationStatus, nowPlaying, persona.label, playNextQueuedItem, playResolvedMedia, postPlayer, queueItems.length, refreshLocalContext, refreshLog, refreshMessages, refreshStorageSummary, reminders.length, restartSpeechLoop, scheduleReminderIfEnabled, sendMachine, speakAga, storageSummary, voiceAvailable]);
 
   const handleCommand = useCallback(async (rawText: string) => {
     const text = rawText.trim();
@@ -634,6 +726,9 @@ export function AgaScreen() {
           queue={queueItems}
           notificationStatus={notificationStatus}
           harnessSummary={harnessSummary}
+          storageSummary={storageSummary}
+          backupStatus={backupStatus}
+          factoryResetArmed={!!factoryResetRequestedAt && Date.now() - factoryResetRequestedAt < 30_000}
         />
 
         <View style={styles.devBox}>

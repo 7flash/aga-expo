@@ -17,6 +17,10 @@ const FIXTURES: { input: string; expected: string }[] = [
   { input: 'request notification permission', expected: 'notifications.request' },
   { input: 'remember that I like warm voices', expected: 'memory.save' },
   { input: 'show diagnostics', expected: 'diagnostics.show' },
+  { input: 'search history about wake word', expected: 'history.search' },
+  { input: 'export local backup', expected: 'backup.export' },
+  { input: 'storage summary', expected: 'backup.summary' },
+  { input: 'repair yourself', expected: 'system.self_repair' },
 ];
 
 export function runCommandHarness(): CommandHarnessResult {

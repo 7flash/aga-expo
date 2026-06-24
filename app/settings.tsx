@@ -4,6 +4,8 @@ import { PERSONAS } from '../src/aga/personas';
 import { migrate } from '../src/db/migrations';
 import { getPreferences, updatePreferences } from '../src/db/preferences';
 import type { UserPreferences } from '../src/db/schema';
+import { createBackupJson, getStorageSummary, summarizeStorage } from '../src/db/backup';
+import { copyOrShareText } from '../src/platform/optionalShare';
 
 export default function SettingsScreen() {
   const [prefs, setPrefs] = useState<UserPreferences | null>(null);
@@ -11,6 +13,7 @@ export default function SettingsScreen() {
   const [openaiKey, setOpenaiKey] = useState('');
   const [geminiKey, setGeminiKey] = useState('');
   const [saved, setSaved] = useState(false);
+  const [storageNote, setStorageNote] = useState('');
 
   useEffect(() => {
     let mounted = true;
@@ -34,6 +37,19 @@ export default function SettingsScreen() {
     setGeminiKey(next.geminiApiKey ?? '');
     setSaved(true);
     setTimeout(() => setSaved(false), 1400);
+  }
+
+
+
+  async function exportBackup() {
+    const json = await createBackupJson();
+    const result = await copyOrShareText(`aga-backup-${Date.now()}.json`, json);
+    setStorageNote(`Backup ${result.note}. Size ${Math.max(1, Math.round(json.length / 1024))} KB.`);
+  }
+
+  async function summarizeLocalStorage() {
+    const summary = await getStorageSummary();
+    setStorageNote(summarizeStorage(summary));
   }
 
   if (!prefs) {
@@ -98,6 +114,22 @@ export default function SettingsScreen() {
           <Pressable style={styles.button} onPress={() => savePatch({ openaiApiKey: openaiKey || null, geminiApiKey: geminiKey || null })}>
             <Text style={styles.buttonText}>Save API keys</Text>
           </Pressable>
+        </View>
+
+
+
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Backup and local storage</Text>
+          <Text style={styles.copy}>Create a JSON backup of AGA's local conversations, memories, reminders, media state, preferences, and diagnostics.</Text>
+          <View style={styles.row}>
+            <Pressable style={styles.chip} onPress={summarizeLocalStorage}>
+              <Text style={styles.chipText}>summary</Text>
+            </Pressable>
+            <Pressable style={styles.chip} onPress={exportBackup}>
+              <Text style={styles.chipText}>export backup</Text>
+            </Pressable>
+          </View>
+          {!!storageNote && <Text style={styles.meta}>{storageNote}</Text>}
         </View>
 
         <View style={styles.card}>

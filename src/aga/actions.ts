@@ -12,6 +12,9 @@ export type AssistantIntent =
   | 'settings'
   | 'memory'
   | 'reminder'
+  | 'history'
+  | 'backup'
+  | 'recovery'
   | 'unknown';
 
 export type AgaAction =
@@ -45,7 +48,14 @@ export type AgaAction =
   | { type: 'proactive.toggle'; enabled: boolean }
   | { type: 'notifications.toggle'; enabled: boolean }
   | { type: 'notifications.request' }
-  | { type: 'command.harness' };
+  | { type: 'command.harness' }
+  | { type: 'history.search'; query: string }
+  | { type: 'backup.export' }
+  | { type: 'backup.summary' }
+  | { type: 'diagnostics.clear_logs' }
+  | { type: 'system.self_repair' }
+  | { type: 'system.factory_reset_request' }
+  | { type: 'system.factory_reset_confirm' };
 
 export type AgaTurn = {
   speech: string;
@@ -71,6 +81,37 @@ export function inferLocalActions(text: string): AgaTurn | null {
 
   if (!clean) return null;
 
+
+  if (/\b(self\s*repair|repair yourself|heal yourself|fix yourself|restart voice|restart listening)\b/.test(lower)) {
+    return { speech: 'I will run local self repair and restart my voice loop.', actions: [{ type: 'system.self_repair' }], intent: 'recovery' };
+  }
+
+  if (/\b(clear|delete)\s+(diagnostic\s+)?logs\b/.test(lower)) {
+    return { speech: 'I cleared the local diagnostic logs.', actions: [{ type: 'diagnostics.clear_logs' }], intent: 'system' };
+  }
+
+  if (/\b(confirm\s+factory\s+reset|factory\s+reset\s+confirm)\b/.test(lower)) {
+    return { speech: 'Factory reset confirmed.', actions: [{ type: 'system.factory_reset_confirm' }], intent: 'recovery' };
+  }
+
+  if (/\b(factory\s+reset|reset\s+everything|wipe\s+local\s+data)\b/.test(lower)) {
+    return { speech: 'Factory reset is dangerous. Say confirm factory reset if you really want to erase local AGA data.', actions: [{ type: 'system.factory_reset_request' }], intent: 'recovery' };
+  }
+
+  if (/\b(export|create|copy|share)\s+(a\s+)?(local\s+)?backup\b/.test(lower) || /\bbackup\s+(my\s+)?aga\b/.test(lower)) {
+    return { speech: 'I will create a local AGA backup.', actions: [{ type: 'backup.export' }], intent: 'backup' };
+  }
+
+  if (/\b(storage|database|backup)\s+(summary|status|size)\b/.test(lower)) {
+    return { speech: 'I will summarize my local storage.', actions: [{ type: 'backup.summary' }], intent: 'backup' };
+  }
+
+  const historyMatch = clean.match(/(?:search|find|recall|look up)\s+(?:my\s+)?(?:history|conversation|chat|messages|local data|everything)\s+(?:about|for)\s+(.+)/i)
+    ?? clean.match(/(?:what did we|what have we)\s+(?:say|talk|discuss)\s+(?:about|regarding)\s+(.+)/i);
+  if (historyMatch) {
+    const query = historyMatch[1].replace(/[.!?]+$/g, '').trim();
+    if (query.length > 1) return { speech: `I will search local history about ${query}.`, actions: [{ type: 'history.search', query }], intent: 'history' };
+  }
 
   if (/\b(run|test)\s+(voice\s+)?commands\b/.test(lower) || /\bcommand harness\b/.test(lower)) {
     return { speech: 'Running the local command harness.', actions: [{ type: 'command.harness' }], intent: 'system' };
