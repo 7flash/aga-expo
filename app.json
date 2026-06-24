@@ -1,0 +1,29 @@
+{
+  "expo": {
+    "name": "AGA",
+    "slug": "aga-voice-apk",
+    "scheme": "aga",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "android": {
+      "package": "com.aga.voiceapk",
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.INTERNET",
+        "android.permission.WAKE_LOCK"
+      ]
+    },
+    "plugins": [
+      "expo-sqlite",
+      "expo-speech",
+      [
+        "@react-native-voice/voice",
+        {
+          "microphonePermission": "AGA needs microphone access so you can control the device by voice.",
+          "speechRecognitionPermission": "AGA needs speech recognition to understand wake words and commands."
+        }
+      ]
+    ]
+  }
+}
