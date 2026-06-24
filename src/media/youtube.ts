@@ -11,7 +11,8 @@ export function youtubeEmbedHtml(videoId: string) {
 html,body,#player{margin:0;width:100%;height:100%;background:#050817;overflow:hidden}
 </style></head><body><div id="player"></div><script src="https://www.youtube.com/iframe_api"></script><script>
 var player;
-function onYouTubeIframeAPIReady(){player=new YT.Player('player',{videoId:'${videoId}',playerVars:{autoplay:1,playsinline:1,controls:1,rel:0},events:{onReady:function(e){e.target.playVideo();}}});}
+function tell(type,payload){try{window.ReactNativeWebView&&window.ReactNativeWebView.postMessage(JSON.stringify(Object.assign({type:type},payload||{})));}catch(e){}}
+function onYouTubeIframeAPIReady(){player=new YT.Player('player',{videoId:'${videoId}',playerVars:{autoplay:1,playsinline:1,controls:1,rel:0},events:{onReady:function(e){e.target.playVideo();tell('player.playing')},onStateChange:function(e){if(e.data===0)tell('player.ended'); if(e.data===1)tell('player.playing'); if(e.data===2)tell('player.paused');},onError:function(){tell('player.error')}}});}
 document.addEventListener('message',function(event){handle(event.data)});
 window.addEventListener('message',function(event){handle(event.data)});
 function handle(raw){try{var msg=JSON.parse(raw); if(!player)return; if(msg.type==='pause')player.pauseVideo(); if(msg.type==='resume')player.playVideo(); if(msg.type==='stop')player.stopVideo(); if(msg.type==='volume')player.setVolume(msg.value||50);}catch(e){}}

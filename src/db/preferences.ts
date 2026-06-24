@@ -16,6 +16,7 @@ export async function getPreferences(): Promise<UserPreferences> {
     openaiModel: process.env.EXPO_PUBLIC_OPENAI_MODEL || prefs.openaiModel || 'gpt-5.5',
     geminiModel: process.env.EXPO_PUBLIC_GEMINI_MODEL || prefs.geminiModel || 'gemini-2.5-flash',
     proactiveEnabled: Number(prefs.proactiveEnabled ?? 1),
+    localNotificationsEnabled: Number(prefs.localNotificationsEnabled ?? 1),
     quietHoursStart: prefs.quietHoursStart ?? null,
     quietHoursEnd: prefs.quietHoursEnd ?? null,
   };

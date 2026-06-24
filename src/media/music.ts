@@ -12,6 +12,11 @@ export function audioPreviewHtml(url: string) {
   return `<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1" /><style>
 html,body{margin:0;width:100%;height:100%;background:#050817;color:white;font-family:system-ui;display:grid;place-items:center} audio{width:92%}.label{font-size:12px;opacity:.72;margin-bottom:8px;text-align:center}</style></head><body><div><div class="label">AGA music preview</div><audio id="audio" src="${safe}" controls autoplay></audio></div><script>
 var audio=document.getElementById('audio');
+function tell(type,payload){try{window.ReactNativeWebView&&window.ReactNativeWebView.postMessage(JSON.stringify(Object.assign({type:type},payload||{})));}catch(e){}}
+audio.addEventListener('play',function(){tell('player.playing')});
+audio.addEventListener('pause',function(){tell('player.paused')});
+audio.addEventListener('ended',function(){tell('player.ended')});
+audio.addEventListener('error',function(){tell('player.error')});
 document.addEventListener('message',function(event){handle(event.data)}); window.addEventListener('message',function(event){handle(event.data)});
 function handle(raw){try{var msg=JSON.parse(raw); if(msg.type==='pause')audio.pause(); if(msg.type==='resume')audio.play(); if(msg.type==='stop'){audio.pause();audio.currentTime=0;} if(msg.type==='volume')audio.volume=Math.max(0,Math.min(1,(msg.value||50)/100));}catch(e){}}
 </script></body></html>`;

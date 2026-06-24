@@ -28,6 +28,7 @@ export type UserPreferences = {
   openaiModel: string;
   geminiModel: string;
   proactiveEnabled: number;
+  localNotificationsEnabled: number;
   quietHoursStart: string | null;
   quietHoursEnd: string | null;
   updatedAt: string;
@@ -55,6 +56,22 @@ export type MediaSession = {
   updatedAt: string;
 };
 
+export type MediaQueueStatus = 'queued' | 'playing' | 'played' | 'skipped' | 'failed' | 'cleared';
+
+export type MediaQueueItem = {
+  id: number;
+  kind: 'youtube' | 'music';
+  query: string;
+  title: string | null;
+  artist: string | null;
+  ref: string | null;
+  artworkUrl: string | null;
+  status: MediaQueueStatus;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type MemoryFact = {
   id: number;
   text: string;
@@ -72,6 +89,7 @@ export type Reminder = {
   dueAt: string;
   status: ReminderStatus;
   source: 'voice' | 'settings';
+  notificationId: string | null;
   createdAt: string;
   updatedAt: string;
 };

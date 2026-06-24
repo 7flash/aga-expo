@@ -72,6 +72,19 @@ export default function SettingsScreen() {
         </View>
 
         <View style={styles.card}>
+          <Text style={styles.cardTitle}>Local notifications</Text>
+          <Text style={styles.copy}>When on, new reminders are also scheduled as native local notifications. The foreground spoken reminder loop still works even if this module is not installed yet.</Text>
+          <View style={styles.row}>
+            <Pressable style={[styles.chip, prefs.localNotificationsEnabled ? styles.chipActive : null]} onPress={() => savePatch({ localNotificationsEnabled: 1 })}>
+              <Text style={[styles.chipText, prefs.localNotificationsEnabled ? styles.chipTextActive : null]}>on</Text>
+            </Pressable>
+            <Pressable style={[styles.chip, !prefs.localNotificationsEnabled ? styles.chipActive : null]} onPress={() => savePatch({ localNotificationsEnabled: 0 })}>
+              <Text style={[styles.chipText, !prefs.localNotificationsEnabled ? styles.chipTextActive : null]}>off</Text>
+            </Pressable>
+          </View>
+        </View>
+
+        <View style={styles.card}>
           <Text style={styles.cardTitle}>Brain mode</Text>
           <View style={styles.row}>
             {(['offline', 'openai-direct', 'gemini-direct'] as const).map((mode) => (

@@ -1,10 +1,14 @@
-import { all, run } from './sqlite';
+import { all, first, run } from './sqlite';
 import type { ProactiveEvent, Reminder } from './schema';
 
-export async function createReminder(input: { title: string; dueAt: string; source?: Reminder['source'] }) {
-  await run('INSERT INTO reminders (title, dueAt, source) VALUES (?, ?, ?)', [input.title.trim(), input.dueAt, input.source ?? 'voice']);
-  const [created] = await all<Reminder>('SELECT * FROM reminders ORDER BY id DESC LIMIT 1');
-  return created ?? null;
+export async function createReminder(input: { title: string; dueAt: string; source?: Reminder['source']; notificationId?: string | null }) {
+  const result = await run('INSERT INTO reminders (title, dueAt, source, notificationId) VALUES (?, ?, ?, ?)', [
+    input.title.trim(),
+    input.dueAt,
+    input.source ?? 'voice',
+    input.notificationId ?? null,
+  ]);
+  return first<Reminder>('SELECT * FROM reminders WHERE id = ?', [result.lastInsertRowId]) as Promise<Reminder>;
 }
 
 export async function listPendingReminders(limit = 20) {
@@ -17,6 +21,14 @@ export async function cancelPendingReminders() {
 
 export async function markReminderFired(id: number) {
   await run("UPDATE reminders SET status = 'fired', updatedAt = CURRENT_TIMESTAMP WHERE id = ?", [id]);
+}
+
+export async function setReminderNotificationId(id: number, notificationId: string | null) {
+  await run('UPDATE reminders SET notificationId = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?', [notificationId, id]);
+}
+
+export async function latestPendingReminder() {
+  return first<Reminder>('SELECT * FROM reminders WHERE status = ? ORDER BY dueAt ASC LIMIT 1', ['pending']);
 }
 
 export async function enqueueProactiveEvent(input: { kind: ProactiveEvent['kind']; speech: string; payload?: unknown }) {

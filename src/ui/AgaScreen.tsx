@@ -8,11 +8,12 @@ import { TranscriptStrip } from './TranscriptStrip';
 import { NowPlaying } from './NowPlaying';
 import { DebugPanel } from './DebugPanel';
 import { MemoryReminderPanel } from './MemoryReminderPanel';
+import { MediaQueuePanel } from './MediaQueuePanel';
 import { migrate } from '../db/migrations';
 import { createConversation, getOrCreateConversation, listMessages, saveMessage } from '../db/conversations';
 import { getPreferences, updatePreferences } from '../db/preferences';
 import { logEvent, recentEvents } from '../db/eventLog';
-import type { ChatMessage, Conversation, EventLog, MemoryFact, Reminder, UserPreferences } from '../db/schema';
+import type { ChatMessage, Conversation, EventLog, MediaQueueItem, MemoryFact, Reminder, UserPreferences } from '../db/schema';
 import type { AgaAction } from '../aga/actions';
 import type { AgaState } from '../aga/stateMachine';
 import { stateLabel, transition } from '../aga/stateMachine';
@@ -25,17 +26,20 @@ import { speak, stopSpeaking } from '../voice/tts';
 import { EMPTY_NOW_PLAYING, type NowPlaying as NowPlayingState } from '../media/nowPlaying';
 import { saveMediaSession, updateLatestMediaState } from '../db/mediaSessions';
 import { clearMemoryFacts, listMemoryFacts, saveMemoryFact, searchMemoryFacts } from '../db/memory';
-import { cancelPendingReminders, createReminder, dueReminders, enqueueProactiveEvent, listPendingReminders, markProactiveEventSpoken, markReminderFired, nextQueuedProactiveEvent } from '../db/reminders';
-import { audioPreviewHtml, searchMusic } from '../media/music';
-import { searchYouTube, youtubeEmbedHtml } from '../media/youtube';
+import { cancelPendingReminders, createReminder, dueReminders, enqueueProactiveEvent, listPendingReminders, markProactiveEventSpoken, markReminderFired, nextQueuedProactiveEvent, setReminderNotificationId } from '../db/reminders';
+import { audioPreviewHtml, searchMusic, type MusicTrack } from '../media/music';
+import { searchYouTube, youtubeEmbedHtml, type YouTubeResult } from '../media/youtube';
 import { translateWithGemini } from '../backend/geminiDirect';
+import { clearMediaQueue, countQueuedMedia, enqueueMedia, listQueuedMedia, markQueueItem, nextQueuedMedia } from '../db/mediaQueue';
+import { cancelReminderNotification, notificationDiagnostics, requestNotificationPermission, scheduleReminderNotification } from '../notifications/localNotifications';
+import { runCommandHarness } from '../voice/commandHarness';
 
 function webviewCommand(type: string, value?: number) {
   return JSON.stringify({ type, value });
 }
 
 function actionProducesOwnSpeech(action: AgaAction) {
-  return action.type === 'media.status' || action.type === 'memory.recall' || action.type === 'reminder.list' || action.type === 'system.health';
+  return action.type === 'media.status' || action.type === 'media.queue.status' || action.type === 'memory.recall' || action.type === 'reminder.list' || action.type === 'system.health' || action.type === 'notifications.request' || action.type === 'command.harness';
 }
 
 export function AgaScreen() {
@@ -54,12 +58,16 @@ export function AgaScreen() {
   const [recentLog, setRecentLog] = useState<EventLog[]>([]);
   const [memories, setMemories] = useState<MemoryFact[]>([]);
   const [reminders, setReminders] = useState<Reminder[]>([]);
+  const [queueItems, setQueueItems] = useState<MediaQueueItem[]>([]);
+  const [notificationStatus, setNotificationStatus] = useState('unknown');
+  const [harnessSummary, setHarnessSummary] = useState<string | undefined>();
 
   const speechLoopRef = useRef<NativeSpeechLoop | null>(null);
   const activeUntilRef = useRef(0);
   const webviewRef = useRef<WebViewType>(null);
   const processingRef = useRef(false);
   const agaStateRef = useRef<AgaState>('idle');
+  const playingQueueIdRef = useRef<number | null>(null);
 
   useEffect(() => {
     agaStateRef.current = agaState;
@@ -83,9 +91,10 @@ export function AgaScreen() {
   }, []);
 
   const refreshLocalContext = useCallback(async () => {
-    const [nextMemories, nextReminders] = await Promise.all([listMemoryFacts(8), listPendingReminders(8)]);
+    const [nextMemories, nextReminders, nextQueue] = await Promise.all([listMemoryFacts(8), listPendingReminders(8), listQueuedMedia(8)]);
     setMemories(nextMemories);
     setReminders(nextReminders);
+    setQueueItems(nextQueue);
   }, []);
 
   useEffect(() => {
@@ -104,6 +113,8 @@ export function AgaScreen() {
         await logEvent('system', 'apk_boot', { mode: 'single-apk' });
         await refreshLog();
         await refreshLocalContext();
+        const notifications = await notificationDiagnostics();
+        setNotificationStatus(notifications.available ? (notifications.granted ? 'granted' : notifications.status) : 'module missing');
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Could not start AGA.');
         setAgaState('recovering');
@@ -161,6 +172,98 @@ export function AgaScreen() {
     return () => clearInterval(interval);
   }, [drainProactiveQueue, ready]);
 
+
+  const scheduleReminderIfEnabled = useCallback(async (reminder: Reminder) => {
+    if (!prefs?.localNotificationsEnabled) return;
+    const permission = await requestNotificationPermission();
+    setNotificationStatus(permission.available ? (permission.granted ? 'granted' : permission.status) : 'module missing');
+    if (!permission.granted) return;
+    const notificationId = await scheduleReminderNotification(reminder);
+    if (notificationId) await setReminderNotificationId(reminder.id, notificationId);
+  }, [prefs?.localNotificationsEnabled]);
+
+  const playResolvedMedia = useCallback(async (kind: 'youtube' | 'music', query: string, queueId?: number | null) => {
+    sendMachine({ type: 'media_start' });
+    if (kind === 'youtube') {
+      const result: YouTubeResult = await measureAsync('media:youtube:search', () => searchYouTube(query), { query });
+      if (result.videoId) setPlayerHtml(youtubeEmbedHtml(result.videoId));
+      const session = {
+        kind: 'youtube' as const,
+        title: result.title,
+        subtitle: 'YouTube',
+        artworkUrl: result.thumbnailUrl,
+        ref: result.videoId || result.url,
+        query,
+        state: 'playing' as const,
+      };
+      setNowPlaying(session);
+      await saveMediaSession({ kind: 'youtube', title: result.title, query, ref: result.videoId || result.url, artworkUrl: result.thumbnailUrl, state: 'playing' });
+      if (queueId) {
+        playingQueueIdRef.current = queueId;
+        await markQueueItem(queueId, 'playing', { title: result.title, ref: result.videoId || result.url, artworkUrl: result.thumbnailUrl });
+      } else {
+        playingQueueIdRef.current = null;
+      }
+    } else {
+      const track: MusicTrack | null = await measureAsync('media:music:search', () => searchMusic(query), { query });
+      if (!track) {
+        if (queueId) await markQueueItem(queueId, 'failed');
+        speakAga(`I could not find a playable preview for ${query}.`);
+        return false;
+      }
+      setPlayerHtml(audioPreviewHtml(track.previewUrl));
+      const session = {
+        kind: 'music' as const,
+        title: track.title,
+        subtitle: track.artist,
+        artworkUrl: track.artworkUrl,
+        ref: track.id,
+        query,
+        state: 'playing' as const,
+      };
+      setNowPlaying(session);
+      await saveMediaSession({ kind: 'music', title: track.title, artist: track.artist, query, ref: track.id, artworkUrl: track.artworkUrl, state: 'playing' });
+      if (queueId) {
+        playingQueueIdRef.current = queueId;
+        await markQueueItem(queueId, 'playing', { title: track.title, artist: track.artist, ref: track.id, artworkUrl: track.artworkUrl });
+      } else {
+        playingQueueIdRef.current = null;
+      }
+    }
+    await Promise.all([refreshLog(), refreshLocalContext()]);
+    return true;
+  }, [refreshLocalContext, refreshLog, sendMachine, speakAga]);
+
+  const playNextQueuedItem = useCallback(async (announceEmpty = true) => {
+    const currentQueueId = playingQueueIdRef.current;
+    if (currentQueueId) {
+      await markQueueItem(currentQueueId, 'played');
+      playingQueueIdRef.current = null;
+    }
+    const next = await nextQueuedMedia();
+    if (!next) {
+      if (announceEmpty) speakAga('The media queue is empty.');
+      setNowPlaying((item) => ({ ...item, state: 'stopped' }));
+      sendMachine({ type: 'media_stop' });
+      await refreshLocalContext();
+      return;
+    }
+    await playResolvedMedia(next.kind, next.query, next.id);
+  }, [playResolvedMedia, refreshLocalContext, sendMachine, speakAga]);
+
+  const handlePlayerMessage = useCallback((event: any) => {
+    try {
+      const data = JSON.parse(event?.nativeEvent?.data ?? '{}');
+      if (data.type === 'player.ended') void playNextQueuedItem(false);
+      if (data.type === 'player.error') {
+        void logEvent('media', 'player_error', data).then(refreshLog);
+        void playNextQueuedItem(false);
+      }
+      if (data.type === 'player.paused') setNowPlaying((item) => ({ ...item, state: 'paused' }));
+      if (data.type === 'player.playing') setNowPlaying((item) => ({ ...item, state: 'playing' }));
+    } catch {}
+  }, [playNextQueuedItem, refreshLog]);
+
   const applyAction = useCallback(async (action: AgaAction) => {
     await logEvent('action', action.type, action);
     switch (action.type) {
@@ -203,6 +306,28 @@ export function AgaScreen() {
         await refreshLocalContext();
         return;
       }
+      case 'notifications.toggle': {
+        const nextPrefs = await updatePreferences({ localNotificationsEnabled: action.enabled ? 1 : 0 });
+        setPrefs(nextPrefs);
+        setNotificationStatus(action.enabled ? notificationStatus : 'off');
+        return;
+      }
+      case 'notifications.request': {
+        const permission = await requestNotificationPermission();
+        const label = permission.available ? (permission.granted ? 'granted' : permission.status) : 'module missing';
+        setNotificationStatus(label);
+        speakAga(permission.granted ? 'Notification permission is ready.' : `Notification permission is ${label}.`);
+        return;
+      }
+      case 'command.harness': {
+        const result = runCommandHarness();
+        const summary = `${result.passed}/${result.total} passed`;
+        setHarnessSummary(summary);
+        await logEvent('system', 'command_harness', result);
+        speakAga(result.failed.length ? `Command harness found ${result.failed.length} issue${result.failed.length === 1 ? '' : 's'}.` : 'Command harness passed.');
+        await refreshLog();
+        return;
+      }
       case 'memory.save': {
         await saveMemoryFact(action.text, 'voice');
         await refreshLocalContext();
@@ -224,7 +349,8 @@ export function AgaScreen() {
         return;
       }
       case 'reminder.create': {
-        await createReminder({ title: action.title, dueAt: action.dueAt, source: 'voice' });
+        const reminder = await createReminder({ title: action.title, dueAt: action.dueAt, source: 'voice' });
+        if (reminder) await scheduleReminderIfEnabled(reminder);
         await refreshLocalContext();
         return;
       }
@@ -237,6 +363,8 @@ export function AgaScreen() {
         return;
       }
       case 'reminder.clear': {
+        const pending = await listPendingReminders(100);
+        await Promise.all(pending.map((item) => cancelReminderNotification(item.notificationId)));
         await cancelPendingReminders();
         await refreshLocalContext();
         return;
@@ -248,7 +376,7 @@ export function AgaScreen() {
         return;
       }
       case 'system.health': {
-        const status = `Voice ${voiceAvailable ? 'ready' : 'not installed'}, SQLite ready, persona ${persona.label}, ${memories.length} memories, ${reminders.length} reminders.`;
+        const status = `Voice ${voiceAvailable ? 'ready' : 'not installed'}, SQLite ready, persona ${persona.label}, ${memories.length} memories, ${reminders.length} reminders, ${queueItems.length} queued media items, notifications ${notificationStatus}.`;
         speakAga(status);
         return;
       }
@@ -272,50 +400,42 @@ export function AgaScreen() {
         sendMachine({ type: 'translate_stop' });
         return;
       }
+      case 'media.queue.add': {
+        await enqueueMedia({ kind: action.kind, query: action.query });
+        await refreshLocalContext();
+        return;
+      }
+      case 'media.queue.status': {
+        const count = await countQueuedMedia();
+        if (!count) speakAga('The media queue is empty.');
+        else speakAga(`There ${count === 1 ? 'is' : 'are'} ${count} item${count === 1 ? '' : 's'} in the media queue.`);
+        await refreshLocalContext();
+        return;
+      }
+      case 'media.queue.clear': {
+        playingQueueIdRef.current = null;
+        await clearMediaQueue();
+        await refreshLocalContext();
+        return;
+      }
+      case 'media.next': {
+        await playNextQueuedItem();
+        return;
+      }
       case 'youtube.play': {
-        sendMachine({ type: 'media_start' });
-        const result = await measureAsync('media:youtube:search', () => searchYouTube(action.query), { query: action.query });
-        if (result.videoId) {
-          setPlayerHtml(youtubeEmbedHtml(result.videoId));
-        }
-        const session = {
-          kind: 'youtube' as const,
-          title: result.title,
-          subtitle: 'YouTube',
-          artworkUrl: result.thumbnailUrl,
-          ref: result.videoId || result.url,
-          query: action.query,
-          state: 'playing' as const,
-        };
-        setNowPlaying(session);
-        await saveMediaSession({ kind: 'youtube', title: result.title, query: action.query, ref: result.videoId || result.url, artworkUrl: result.thumbnailUrl, state: 'playing' });
-        await refreshLog();
+        await playResolvedMedia('youtube', action.query);
         return;
       }
       case 'music.play': {
-        sendMachine({ type: 'media_start' });
-        const track = await measureAsync('media:music:search', () => searchMusic(action.query), { query: action.query });
-        if (!track) {
-          speakAga(`I could not find a playable preview for ${action.query}.`);
-          return;
-        }
-        setPlayerHtml(audioPreviewHtml(track.previewUrl));
-        const session = {
-          kind: 'music' as const,
-          title: track.title,
-          subtitle: track.artist,
-          artworkUrl: track.artworkUrl,
-          ref: track.id,
-          query: action.query,
-          state: 'playing' as const,
-        };
-        setNowPlaying(session);
-        await saveMediaSession({ kind: 'music', title: track.title, artist: track.artist, query: action.query, ref: track.id, artworkUrl: track.artworkUrl, state: 'playing' });
-        await refreshLog();
+        await playResolvedMedia('music', action.query);
         return;
       }
       case 'youtube.control':
       case 'music.control': {
+        if (action.command === 'next') {
+          await playNextQueuedItem();
+          return;
+        }
         const command = action.command === 'resume' ? 'resume' : action.command === 'pause' ? 'pause' : action.command === 'volume' ? 'volume' : 'stop';
         postPlayer(command, action.value);
         if (command === 'stop') {
@@ -339,7 +459,7 @@ export function AgaScreen() {
         return;
       }
     }
-  }, [memories.length, nowPlaying, persona.label, postPlayer, refreshLocalContext, refreshLog, reminders.length, sendMachine, speakAga, voiceAvailable]);
+  }, [memories.length, notificationStatus, nowPlaying, persona.label, playNextQueuedItem, playResolvedMedia, postPlayer, queueItems.length, refreshLocalContext, refreshLog, reminders.length, scheduleReminderIfEnabled, sendMachine, speakAga, voiceAvailable]);
 
   const handleCommand = useCallback(async (rawText: string) => {
     const text = rawText.trim();
@@ -482,6 +602,7 @@ export function AgaScreen() {
         <StateRail state={agaState} />
         <NowPlaying item={nowPlaying} />
         <MemoryReminderPanel memories={memories} reminders={reminders} />
+        <MediaQueuePanel queue={queueItems} />
 
         {playerHtml && (
           <View style={styles.playerCard}>
@@ -493,6 +614,7 @@ export function AgaScreen() {
               mediaPlaybackRequiresUserAction={false}
               javaScriptEnabled
               domStorageEnabled
+              onMessage={handlePlayerMessage}
               style={styles.player}
             />
           </View>
@@ -509,6 +631,9 @@ export function AgaScreen() {
           voiceAvailable={voiceAvailable}
           nowPlaying={nowPlaying}
           events={recentLog}
+          queue={queueItems}
+          notificationStatus={notificationStatus}
+          harnessSummary={harnessSummary}
         />
 
         <View style={styles.devBox}>

@@ -3,6 +3,8 @@ export type AssistantIntent =
   | 'play_music'
   | 'play_youtube'
   | 'media_control'
+  | 'media_queue'
+  | 'notifications'
   | 'translate'
   | 'persona'
   | 'agent'
@@ -30,13 +32,20 @@ export type AgaAction =
   | { type: 'voice.pitch'; value: number }
   | { type: 'wake.set'; phrase: string }
   | { type: 'media.status' }
+  | { type: 'media.next' }
+  | { type: 'media.queue.add'; kind: 'youtube' | 'music'; query: string }
+  | { type: 'media.queue.status' }
+  | { type: 'media.queue.clear' }
   | { type: 'memory.save'; text: string }
   | { type: 'memory.recall'; query?: string }
   | { type: 'memory.clear' }
   | { type: 'reminder.create'; title: string; dueAt: string }
   | { type: 'reminder.list' }
   | { type: 'reminder.clear' }
-  | { type: 'proactive.toggle'; enabled: boolean };
+  | { type: 'proactive.toggle'; enabled: boolean }
+  | { type: 'notifications.toggle'; enabled: boolean }
+  | { type: 'notifications.request' }
+  | { type: 'command.harness' };
 
 export type AgaTurn = {
   speech: string;
@@ -62,6 +71,22 @@ export function inferLocalActions(text: string): AgaTurn | null {
 
   if (!clean) return null;
 
+
+  if (/\b(run|test)\s+(voice\s+)?commands\b/.test(lower) || /\bcommand harness\b/.test(lower)) {
+    return { speech: 'Running the local command harness.', actions: [{ type: 'command.harness' }], intent: 'system' };
+  }
+
+  if (/\b(request|ask for|enable)\s+(local\s+)?notification\s+permission\b/.test(lower)) {
+    return { speech: 'I will request notification permission.', actions: [{ type: 'notifications.request' }], intent: 'notifications' };
+  }
+
+  if (/\b(turn|switch)\s+(local\s+)?notifications\s+on\b/.test(lower)) {
+    return { speech: 'Local notifications are on.', actions: [{ type: 'notifications.toggle', enabled: true }, { type: 'notifications.request' }], intent: 'notifications' };
+  }
+
+  if (/\b(turn|switch)\s+(local\s+)?notifications\s+off\b/.test(lower)) {
+    return { speech: 'Local notifications are off.', actions: [{ type: 'notifications.toggle', enabled: false }], intent: 'notifications' };
+  }
 
   if (/\b(turn|switch)\s+(proactive|reminders|nudges)\s+on\b/.test(lower)) {
     return { speech: 'Proactive reminders are on.', actions: [{ type: 'proactive.toggle', enabled: true }], intent: 'settings' };
@@ -167,6 +192,32 @@ export function inferLocalActions(text: string): AgaTurn | null {
     return { speech: `Okay, I will use my ${persona} voice.`, actions: [{ type: 'persona.set', persona }], intent: 'persona' };
   }
 
+
+  if (/\b(what'?s|what is|show|list)\s+(in\s+)?(?:the\s+)?queue\b/.test(lower)) {
+    return { speech: 'I will check the media queue.', actions: [{ type: 'media.queue.status' }], intent: 'media_queue' };
+  }
+
+  if (/\b(clear|empty)\s+(the\s+)?queue\b/.test(lower)) {
+    return { speech: 'I cleared the media queue.', actions: [{ type: 'media.queue.clear' }], intent: 'media_queue' };
+  }
+
+  if (/\b(play|skip to)\s+(the\s+)?next\b/.test(lower) || /\bnext\s+(song|track|video)\b/.test(lower)) {
+    return { speech: 'Playing the next queued item.', actions: [{ type: 'media.next' }], intent: 'media_queue' };
+  }
+
+  const queueYoutubeMatch = clean.match(/(?:queue|add)\s+(.+?)\s+(?:on\s+)?youtube/i);
+  if (queueYoutubeMatch) {
+    const query = queueYoutubeMatch[1].trim();
+    return { speech: `Queued ${query} for YouTube.`, actions: [{ type: 'media.queue.add', kind: 'youtube', query }], intent: 'media_queue' };
+  }
+
+  const queueMusicMatch = clean.match(/(?:queue|add)\s+(.+?)(?:\s+music|\s+song|\s+track)?$/i);
+  if (queueMusicMatch && /\b(queue|add)\b/.test(lower)) {
+    const query = queueMusicMatch[1].replace(/\bmusic\b|\bsong\b|\btrack\b/gi, '').trim();
+    if (query.length > 1) {
+      return { speech: `Queued ${query}.`, actions: [{ type: 'media.queue.add', kind: 'music', query }], intent: 'media_queue' };
+    }
+  }
 
   const volumeMatch = lower.match(/\b(?:volume|set volume)\s+(?:to\s+)?(\d{1,3})\b/);
   if (volumeMatch) {

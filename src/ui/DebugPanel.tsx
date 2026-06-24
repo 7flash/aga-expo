@@ -1,6 +1,6 @@
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
-import type { EventLog, UserPreferences } from '../db/schema';
+import type { EventLog, MediaQueueItem, UserPreferences } from '../db/schema';
 import type { AgaState } from '../aga/stateMachine';
 import type { NowPlaying } from '../media/nowPlaying';
 
@@ -11,6 +11,9 @@ export function DebugPanel({
   voiceAvailable,
   nowPlaying,
   events,
+  queue,
+  notificationStatus,
+  harnessSummary,
 }: {
   visible: boolean;
   state: AgaState;
@@ -18,6 +21,9 @@ export function DebugPanel({
   voiceAvailable: boolean;
   nowPlaying: NowPlaying;
   events: EventLog[];
+  queue?: MediaQueueItem[];
+  notificationStatus?: string;
+  harnessSummary?: string;
 }) {
   if (!visible) return null;
 
@@ -28,7 +34,10 @@ export function DebugPanel({
       <Text style={styles.line}>voice: {voiceAvailable ? 'native module ready' : 'native STT missing'}</Text>
       <Text style={styles.line}>persona: {prefs?.activePersona ?? 'unknown'} · wake: {prefs?.wakePhrase ?? 'hey aga'}</Text>
       <Text style={styles.line}>brain: {prefs?.backendMode ?? 'unknown'} · translate: {prefs?.translateTargetLang ?? 'off'} · proactive: {prefs?.proactiveEnabled ? 'on' : 'off'}</Text>
+      <Text style={styles.line}>notifications: {notificationStatus ?? (prefs?.localNotificationsEnabled ? 'enabled' : 'off')}</Text>
       <Text style={styles.line}>media: {nowPlaying.kind === null ? 'none' : `${nowPlaying.kind} · ${nowPlaying.state} · ${nowPlaying.title}`}</Text>
+      <Text style={styles.line}>queue: {queue?.length ?? 0} active item{(queue?.length ?? 0) === 1 ? '' : 's'}</Text>
+      {!!harnessSummary && <Text style={styles.line}>command harness: {harnessSummary}</Text>}
       <Text style={styles.subtitle}>Recent events</Text>
       {events.slice(0, 8).map((event) => (
         <Text style={styles.event} key={event.id}>[{event.kind}] {event.label}{event.durationMs ? ` · ${event.durationMs.toFixed(0)}ms` : ''}</Text>
