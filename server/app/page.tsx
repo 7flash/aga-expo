@@ -16,7 +16,7 @@ export default function HomePage() {
 
         <div class="top-status-pill" aria-hidden="true">
           <span class="status-dot" />
-          <span>Wake word: “AGA” · YouTube · music · live translate</span>
+          <span>Wake word · media · translate · agents · recovery</span>
         </div>
 
         <div id="three-stage" class="three-stage">

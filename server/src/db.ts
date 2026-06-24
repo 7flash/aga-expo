@@ -27,6 +27,31 @@ export const commandEventSchema = z.object({
   payload: z.string().min(1).default('{}'),
 });
 
+export const mediaSessionSchema = z.object({
+  provider: z.enum(['youtube', 'music', 'system']).default('system'),
+  query: z.string().trim().max(240).default(''),
+  title: z.string().trim().max(500).default(''),
+  status: z.enum(['started', 'playing', 'paused', 'stopped', 'failed']).default('started'),
+  payload: z.string().min(1).default('{}'),
+});
+
+export const translationSessionSchema = z.object({
+  sourceLanguage: z.string().trim().min(2).max(40).default('auto'),
+  targetLanguage: z.string().trim().min(2).max(40).default('English'),
+  status: z.enum(['started', 'segment', 'stopped', 'failed']).default('started'),
+  original: z.string().max(2_000).default(''),
+  translated: z.string().max(2_000).default(''),
+  provider: z.string().trim().max(40).default('unknown'),
+});
+
+export const agentRunSchema = z.object({
+  goal: z.string().trim().min(1).max(2_000),
+  agentName: z.string().trim().min(1).max(120).default('aga-main'),
+  status: z.enum(['queued', 'running', 'completed', 'failed', 'fallback']).default('queued'),
+  result: z.string().max(8_000).default(''),
+  payload: z.string().min(1).default('{}'),
+});
+
 export const assistantPreferencesSchema = z.object({
   assistantName: z.string().trim().min(1).max(32).default('AGA'),
   wakeWord: z.string().trim().min(1).max(24).default('aga'),
@@ -38,14 +63,21 @@ export const assistantPreferencesSchema = z.object({
   translationSource: z.string().trim().min(2).max(40).default('auto'),
   youtubeAutoplay: z.boolean().default(true),
   musicAutoplay: z.boolean().default(true),
+  confirmRiskyActions: z.boolean().default(true),
+  agentMode: z.enum(['off', 'assistive', 'on_demand']).default('on_demand'),
+  recoveryVoicePrompts: z.boolean().default(true),
 });
 
 export type Role = z.infer<typeof roleSchema>;
 export type ChatMessage = z.infer<typeof messageSchema> & { id: number };
 export type Conversation = z.infer<typeof conversationSchema> & { id: number };
 export type AssistantPreferences = z.infer<typeof assistantPreferencesSchema>;
+export type MediaSession = z.infer<typeof mediaSessionSchema> & { id: number };
+export type TranslationSession = z.infer<typeof translationSessionSchema> & { id: number };
+export type AgentRun = z.infer<typeof agentRunSchema> & { id: number };
 
-const PREFERENCES_KEY = 'assistant.preferences.v3';
+const PREFERENCES_KEY = 'assistant.preferences.v4';
+const STATE_KEY = 'assistant.runtime.state.v1';
 
 export const defaultAssistantPreferences = assistantPreferencesSchema.parse({});
 
@@ -56,6 +88,9 @@ export const db = new Database(
     messages: messageSchema,
     preferences: preferenceSchema,
     commandEvents: commandEventSchema,
+    mediaSessions: mediaSessionSchema,
+    translationSessions: translationSessionSchema,
+    agentRuns: agentRunSchema,
   },
   {
     relations: {
@@ -99,6 +134,44 @@ export function saveCommandEvent(kind: string, payload: unknown) {
   );
 }
 
+export function listCommandEvents(limit = 50) {
+  return db.commandEvents.select().orderBy('id', 'desc').limit(limit).all();
+}
+
+export function saveMediaSession(input: Partial<z.infer<typeof mediaSessionSchema>>) {
+  return db.mediaSessions.insert(
+    mediaSessionSchema.parse({
+      ...input,
+      payload: typeof input.payload === 'string' ? input.payload : JSON.stringify(input.payload ?? {}),
+    })
+  );
+}
+
+export function listMediaSessions(limit = 20) {
+  return db.mediaSessions.select().orderBy('id', 'desc').limit(limit).all();
+}
+
+export function saveTranslationSession(input: Partial<z.infer<typeof translationSessionSchema>>) {
+  return db.translationSessions.insert(translationSessionSchema.parse(input));
+}
+
+export function listTranslationSessions(limit = 20) {
+  return db.translationSessions.select().orderBy('id', 'desc').limit(limit).all();
+}
+
+export function saveAgentRun(input: Partial<z.infer<typeof agentRunSchema>> & { goal: string }) {
+  return db.agentRuns.insert(
+    agentRunSchema.parse({
+      ...input,
+      payload: typeof input.payload === 'string' ? input.payload : JSON.stringify(input.payload ?? {}),
+    })
+  );
+}
+
+export function listAgentRuns(limit = 20) {
+  return db.agentRuns.select().orderBy('id', 'desc').limit(limit).all();
+}
+
 export function getAssistantPreferences(): AssistantPreferences {
   const rows = db.preferences
     .select()
@@ -132,5 +205,32 @@ export function saveAssistantPreferences(partial: Partial<AssistantPreferences>)
     value: JSON.stringify(next),
   });
 
+  saveCommandEvent('preferences.updated', { keys: Object.keys(partial) });
   return next;
+}
+
+export function getRuntimeState<T extends Record<string, unknown>>(fallback: T): T {
+  const rows = db.preferences
+    .select()
+    .where({ key: STATE_KEY })
+    .orderBy('id', 'desc')
+    .limit(1)
+    .all();
+
+  const raw = rows[0]?.value;
+  if (!raw) return fallback;
+
+  try {
+    return { ...fallback, ...JSON.parse(raw) } as T;
+  } catch {
+    return fallback;
+  }
+}
+
+export function saveRuntimeState(state: Record<string, unknown>) {
+  db.preferences.insert({
+    key: STATE_KEY,
+    value: JSON.stringify(state),
+  });
+  return state;
 }

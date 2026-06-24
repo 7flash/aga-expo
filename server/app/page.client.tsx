@@ -3,7 +3,18 @@ import * as THREE from 'three';
 
 type Role = 'user' | 'assistant';
 type VoiceStyle = 'warm' | 'bright' | 'calm' | 'coach' | 'story';
-type AssistantMode = 'idle' | 'listening' | 'thinking' | 'speaking' | 'translate' | 'youtube' | 'music' | 'config';
+type AssistantMode =
+  | 'idle'
+  | 'wake-listening'
+  | 'command-listening'
+  | 'thinking'
+  | 'speaking'
+  | 'translate'
+  | 'youtube'
+  | 'music'
+  | 'config'
+  | 'recovery'
+  | 'agent';
 
 type ChatMessage = {
   id: string;
@@ -23,6 +34,9 @@ type Preferences = {
   translationSource: string;
   youtubeAutoplay: boolean;
   musicAutoplay: boolean;
+  confirmRiskyActions?: boolean;
+  agentMode?: 'off' | 'assistive' | 'on_demand';
+  recoveryVoicePrompts?: boolean;
 };
 
 type Track = {
@@ -51,6 +65,16 @@ type TranslationLine = {
   provider: string;
 };
 
+type ServerIntent = {
+  name: string;
+  confidence: number;
+  command: string;
+  normalized: string;
+  args: Record<string, unknown>;
+  needsConfirmation: boolean;
+  spokenSummary: string;
+};
+
 type ChatState = {
   conversationId: number | null;
   messages: ChatMessage[];
@@ -73,6 +97,10 @@ type ChatState = {
   youtubeQuery: string;
   youtubeConfigured: boolean;
   availableVoices: string[];
+  watchdogCount: number;
+  lastRecovery: string | null;
+  agentStatus: string | null;
+  diagnostics: string | null;
 };
 
 declare global {
@@ -95,6 +123,9 @@ const defaultPreferences: Preferences = {
   translationSource: 'auto',
   youtubeAutoplay: true,
   musicAutoplay: true,
+  confirmRiskyActions: true,
+  agentMode: 'on_demand',
+  recoveryVoicePrompts: true,
 };
 
 const state: ChatState = {
@@ -127,6 +158,10 @@ const state: ChatState = {
   youtubeQuery: '',
   youtubeConfigured: true,
   availableVoices: [],
+  watchdogCount: 0,
+  lastRecovery: null,
+  agentStatus: null,
+  diagnostics: null,
 };
 
 let root: HTMLElement | null = null;
@@ -135,6 +170,8 @@ let shouldKeepListening = true;
 let recognitionStarting = false;
 let lastHandledTranscript = '';
 let lastSpoken = '';
+let ttsVolume = 1;
+let watchdogTimer = 0;
 let audioPlayer: HTMLAudioElement | null = null;
 let youtubeApiPromise: Promise<void> | null = null;
 let youtubePlayer: any = null;
@@ -160,7 +197,8 @@ const commandHints = [
   '“AGA, play calm music”',
   '“AGA, open YouTube lofi study”',
   '“AGA, translate to Indonesian”',
-  '“AGA, change voice to calm”',
+  '“AGA, health check”',
+  '“AGA, run an agent to plan this”',
 ];
 
 function createMessage(role: Role, content: string): ChatMessage {
@@ -265,6 +303,169 @@ async function patchPreferences(partial: Partial<Preferences>) {
   update();
 }
 
+async function patchRuntimeState(partial: Record<string, unknown>) {
+  try {
+    await fetch('/api/runtime/state', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state: partial }),
+    });
+  } catch {
+    // Runtime persistence should never interrupt voice control.
+  }
+}
+
+async function classifyOnServer(command: string): Promise<ServerIntent | null> {
+  try {
+    const response = await fetch('/api/assistant/intent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command }),
+    });
+    const data = await response.json();
+    return response.ok && data?.intent ? data.intent : null;
+  } catch {
+    return null;
+  }
+}
+
+function lastAssistantText() {
+  return [...state.messages].reverse().find((message) => message.role === 'assistant')?.content ?? '';
+}
+
+function setRecovery(reason: string) {
+  state.mode = 'recovery';
+  state.lastRecovery = reason;
+  state.watchdogCount += 1;
+  logVoiceEvent('recovery', { reason, count: state.watchdogCount });
+  void patchRuntimeState({ mode: 'recovery', lastRecovery: reason });
+  update();
+}
+
+function restartVoiceLoop(reason = 'manual restart') {
+  setRecovery(reason);
+  shouldKeepListening = true;
+  try {
+    recognition?.abort?.();
+  } catch {
+    try {
+      recognition?.stop?.();
+    } catch {
+      // ignored
+    }
+  }
+  recognitionStarting = false;
+  window.setTimeout(() => startListening(), 500);
+}
+
+function handleRecoveryCommand(command: string) {
+  const normalizedCommand = normalize(command);
+
+  if (/\b(cancel|never mind|abort)\b/.test(normalizedCommand)) {
+    state.loading = false;
+    state.translationActive = false;
+    window.speechSynthesis?.cancel?.();
+    state.mode = 'idle';
+    state.messages.push(createMessage('assistant', 'Cancelled. I am back in listening mode.'));
+    speak('Cancelled. I am back in listening mode.', { force: true });
+    update();
+    return true;
+  }
+
+  if (/\b(repeat|say that again)\b/.test(normalizedCommand)) {
+    const text = lastAssistantText() || 'I do not have anything to repeat yet.';
+    speak(text, { force: true });
+    return true;
+  }
+
+  if (/\b(louder|volume up|speak up)\b/.test(normalizedCommand)) {
+    ttsVolume = Math.min(1, ttsVolume + 0.15);
+    speak('I will speak louder.', { force: true });
+    return true;
+  }
+
+  if (/\b(quieter|volume down|speak softer)\b/.test(normalizedCommand)) {
+    ttsVolume = Math.max(0.25, ttsVolume - 0.15);
+    speak('I will speak softer.', { force: true });
+    return true;
+  }
+
+  if (/\b(restart listening|reset microphone|listen again)\b/.test(normalizedCommand)) {
+    restartVoiceLoop('voice command restart');
+    speak('Restarting listening.', { force: true });
+    return true;
+  }
+
+  return false;
+}
+
+async function runHealthCheck() {
+  state.loading = true;
+  state.mode = 'thinking';
+  update();
+
+  try {
+    const response = await fetch('/api/health');
+    const data = await response.json();
+    if (!response.ok) throw new Error(data?.error ?? 'Health check failed.');
+
+    const missing = Object.entries(data.env ?? {})
+      .filter(([key, value]) => ['openai', 'gemini', 'youtube'].includes(key) && !value)
+      .map(([key]) => key);
+
+    const reply = missing.length
+      ? `Diagnostics complete. Core app is running, but ${missing.join(', ')} is not configured yet.`
+      : 'Diagnostics complete. OpenAI, Gemini, YouTube, and SQLite checks look configured.';
+
+    state.diagnostics = reply;
+    state.messages.push(createMessage('assistant', reply));
+    speak(reply, { force: true });
+  } catch (error) {
+    const reply = `Diagnostics failed: ${error instanceof Error ? error.message : 'unknown error'}.`;
+    state.error = reply;
+    state.messages.push(createMessage('assistant', reply));
+    speak(reply, { force: true });
+  } finally {
+    state.loading = false;
+    state.mode = state.translationActive ? 'translate' : 'idle';
+    update();
+  }
+}
+
+async function runAgent(command: string) {
+  state.loading = true;
+  state.mode = 'agent';
+  state.agentStatus = 'Running an on-demand agent task';
+  state.messages.push(createMessage('user', command));
+  update();
+
+  try {
+    const context = state.messages.slice(-8).map((message) => `${message.role}: ${message.content}`);
+    const response = await fetch('/api/agents/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ goal: command, context }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data?.error ?? 'Agent failed.');
+
+    const reply = data.result || 'Agent task completed.';
+    state.agentStatus = `${data.provider ?? 'agent'} completed`;
+    state.messages.push(createMessage('assistant', reply));
+    speak(reply);
+  } catch (error) {
+    const reply = `I could not run the agent task: ${error instanceof Error ? error.message : 'unknown error'}.`;
+    state.agentStatus = 'Agent failed';
+    state.error = reply;
+    state.messages.push(createMessage('assistant', reply));
+    speak(reply, { force: true });
+  } finally {
+    state.loading = false;
+    state.mode = state.translationActive ? 'translate' : 'idle';
+    update();
+  }
+}
+
 function updateVoiceList() {
   if (!('speechSynthesis' in window)) return;
   state.availableVoices = window.speechSynthesis.getVoices().map((voice) => voice.name).slice(0, 12);
@@ -330,6 +531,7 @@ function speak(text: string, options: { interrupt?: boolean; force?: boolean } =
   if (options.interrupt !== false) window.speechSynthesis.cancel();
 
   const utterance = new SpeechSynthesisUtterance(spokenText);
+  utterance.volume = ttsVolume;
   const voice = chooseVoice();
   if (voice) utterance.voice = voice;
   styleSpeech(utterance);
@@ -371,7 +573,7 @@ function ensureRecognition() {
     recognitionStarting = false;
     state.listening = true;
     state.error = null;
-    if (state.mode === 'idle') state.mode = 'listening';
+    if (state.mode === 'idle') state.mode = Date.now() < state.awakeUntil ? 'command-listening' : 'wake-listening';
     update();
   };
 
@@ -538,20 +740,44 @@ async function runCommand(command: string) {
   state.error = null;
   update();
 
-  if (/\b(stop|end|cancel)\s+(translation|translate|interpreter)\b/.test(normalizedCommand)) {
+  if (handleRecoveryCommand(command)) return;
+
+  const serverIntent = await classifyOnServer(command);
+  logVoiceEvent('command.received', { command, intent: serverIntent?.name, confidence: serverIntent?.confidence });
+
+  if (serverIntent?.name === 'health_check') {
+    await runHealthCheck();
+    return;
+  }
+
+  if (serverIntent?.name === 'agent_task') {
+    if (state.preferences.agentMode === 'off') {
+      const reply = 'Agent mode is off. Say AGA, change personality, or enable agents in preferences when you want that back.';
+      state.messages.push(createMessage('assistant', reply));
+      speak(reply, { force: true });
+      return;
+    }
+    await runAgent(String(serverIntent.args?.goal ?? command));
+    return;
+  }
+
+  if (serverIntent?.name === 'stop_translation' || /\b(stop|end|cancel)\s+(translation|translate|interpreter)\b/.test(normalizedCommand)) {
     state.translationActive = false;
     state.mode = 'idle';
+    void patchRuntimeState({ mode: 'idle', lastTranslationTarget: state.preferences.translationTarget });
     state.messages.push(createMessage('assistant', 'Translation mode is off.'));
     speak('Translation mode is off.');
     update();
     return;
   }
 
-  const language = parseLanguage(command);
+  const intentLanguage = serverIntent?.name === 'start_translation' ? String(serverIntent.args?.targetLanguage ?? '') : '';
+  const language = intentLanguage || parseLanguage(command);
   if (language) {
     state.translationActive = true;
     state.mode = 'translate';
     await patchPreferences({ translationTarget: language });
+    void patchRuntimeState({ mode: 'translate', lastTranslationTarget: language });
     const reply = `Live translation is on. I’ll translate incoming speech to ${language}. Say “AGA, stop translation” to end it.`;
     state.messages.push(createMessage('assistant', reply));
     speak(reply);
@@ -559,14 +785,14 @@ async function runCommand(command: string) {
     return;
   }
 
-  if (/\b(stop listening|sleep|go quiet)\b/.test(normalizedCommand)) {
+  if (serverIntent?.name === 'stop_listening' || /\b(stop listening|sleep|go quiet|microphone off)\b/.test(normalizedCommand)) {
     stopListening();
     await patchPreferences({ autoListen: false });
-    speak('I’ll stop listening now. Use the microphone button to wake me again.', { force: true });
+    speak('I’ll stop listening now. Use the microphone button once to wake me again.', { force: true });
     return;
   }
 
-  if (/\b(start listening|keep listening|wake up)\b/.test(normalizedCommand)) {
+  if (serverIntent?.name === 'start_listening' || /\b(start listening|keep listening|wake up|microphone on)\b/.test(normalizedCommand)) {
     shouldKeepListening = true;
     await patchPreferences({ autoListen: true });
     startListening();
@@ -574,31 +800,34 @@ async function runCommand(command: string) {
     return;
   }
 
-  if (/\b(pause|resume|continue|stop|next|previous|volume|mute|unmute)\b/.test(normalizedCommand)) {
-    const handled = controlMedia(normalizedCommand);
+  if (serverIntent?.name === 'media_control' || /\b(pause|resume|continue|stop|next|previous|volume|mute|unmute)\b/.test(normalizedCommand)) {
+    const handled = controlMedia(normalizedCommand, Number(serverIntent?.args?.volume ?? Number.NaN));
     if (handled) return;
   }
 
-  if (/\b(open|watch|youtube|video)\b/.test(normalizedCommand) && !/\bmusic\b/.test(normalizedCommand)) {
-    const query = extractAfter(command, ['open youtube', 'youtube', 'watch', 'play video', 'open video', 'video']);
+  if (serverIntent?.name === 'youtube_search' || (/\b(open|watch|youtube|video)\b/.test(normalizedCommand) && !/\bmusic\b/.test(normalizedCommand))) {
+    const queryFromIntent = typeof serverIntent?.args?.query === 'string' ? serverIntent.args.query : '';
+    const query = queryFromIntent || extractAfter(command, ['open youtube', 'youtube', 'watch', 'play video', 'open video', 'video']);
     await playYouTube(query || command);
     return;
   }
 
-  if (/\b(play|start|open)\b/.test(normalizedCommand) && /\b(music|song|track|playlist|audio)\b/.test(normalizedCommand)) {
-    const query = extractAfter(command, ['play music', 'play song', 'play track', 'music', 'song', 'track', 'playlist']);
+  if (serverIntent?.name === 'play_music' || (/\b(play|start|open)\b/.test(normalizedCommand) && /\b(music|song|track|playlist|audio)\b/.test(normalizedCommand))) {
+    const queryFromIntent = typeof serverIntent?.args?.query === 'string' ? serverIntent.args.query : '';
+    const query = queryFromIntent || extractAfter(command, ['play music', 'play song', 'play track', 'music', 'song', 'track', 'playlist']);
     await playMusic(query || 'relaxing music');
     return;
   }
 
-  if (/\b(change|set|switch)\b/.test(normalizedCommand) && /\b(style|voice)\b/.test(normalizedCommand)) {
+  if (serverIntent?.name === 'configure_voice' || (/\b(change|set|switch)\b/.test(normalizedCommand) && /\b(style|voice|personality)\b/.test(normalizedCommand))) {
     await configureVoice(command);
     return;
   }
 
-  if (/\bwake word\b/.test(normalizedCommand)) {
+  if (serverIntent?.name === 'configure_wake_word' || /\bwake word\b/.test(normalizedCommand)) {
+    const fromIntent = typeof serverIntent?.args?.wakeWord === 'string' ? serverIntent.args.wakeWord : '';
     const match = command.match(/wake word\s+(?:to|is|as)\s+(.+)$/i);
-    const wakeWord = cleanCommand(match?.[1] ?? 'aga').split(' ').slice(0, 3).join(' ');
+    const wakeWord = cleanCommand(fromIntent || match?.[1] || 'aga').split(' ').slice(0, 3).join(' ');
     await patchPreferences({ wakeWord: wakeWord || 'aga' });
     const reply = `Done. My wake word is now ${wakeWord || 'AGA'}.`;
     state.messages.push(createMessage('assistant', reply));
@@ -606,9 +835,10 @@ async function runCommand(command: string) {
     return;
   }
 
-  if (/\b(call yourself|your name|rename yourself)\b/.test(normalizedCommand)) {
+  if (serverIntent?.name === 'configure_name' || /\b(call yourself|your name|rename yourself)\b/.test(normalizedCommand)) {
+    const fromIntent = typeof serverIntent?.args?.assistantName === 'string' ? serverIntent.args.assistantName : '';
     const match = command.match(/(?:call yourself|your name is|rename yourself)\s+(.+)$/i);
-    const assistantName = cleanCommand(match?.[1] ?? 'AGA').split(' ')[0] || 'AGA';
+    const assistantName = cleanCommand(fromIntent || match?.[1] || 'AGA').split(' ')[0] || 'AGA';
     await patchPreferences({ assistantName });
     const reply = `Done. You can call me ${assistantName}.`;
     state.messages.push(createMessage('assistant', reply));
@@ -616,16 +846,16 @@ async function runCommand(command: string) {
     return;
   }
 
-  if (/\b(help|what can you do|commands)\b/.test(normalizedCommand)) {
+  if (serverIntent?.name === 'help' || /\b(help|what can you do|commands|what can i say)\b/.test(normalizedCommand)) {
     const reply =
-      'You can say: AGA, ask a question; AGA, play music; AGA, open YouTube; AGA, translate to Indonesian; AGA, pause; AGA, next; or AGA, change voice to calm.';
+      'You can say: AGA, ask a question; AGA, play music; AGA, open YouTube; AGA, translate to Indonesian; AGA, pause; AGA, repeat; AGA, restart listening; AGA, health check; or AGA, run an agent task.';
     state.messages.push(createMessage('assistant', reply));
-    speak(reply);
+    speak(reply, { force: true });
     update();
     return;
   }
 
-  if (/\b(clear|reset)\b/.test(normalizedCommand) && /\b(chat|conversation|screen)\b/.test(normalizedCommand)) {
+  if (serverIntent?.name === 'reset_conversation' || (/\b(clear|reset)\b/.test(normalizedCommand) && /\b(chat|conversation|screen)\b/.test(normalizedCommand))) {
     state.messages = [createMessage('assistant', 'Fresh conversation started. Say “AGA” whenever you need me.')];
     state.conversationId = null;
     speak('Fresh conversation started.');
@@ -660,7 +890,7 @@ async function configureVoice(command: string) {
   speak(reply, { force: true });
 }
 
-function controlMedia(command: string) {
+function controlMedia(command: string, volumePercent = Number.NaN) {
   const audio = audioPlayer;
 
   if (command.includes('pause')) {
@@ -692,6 +922,15 @@ function controlMedia(command: string) {
 
   if (command.includes('previous') || command.includes('back')) {
     playPreviousTrack();
+    return true;
+  }
+
+  if (Number.isFinite(volumePercent)) {
+    const nextVolume = Math.max(0, Math.min(1, volumePercent / 100));
+    if (youtubePlayer?.setVolume) youtubePlayer.setVolume(Math.round(nextVolume * 100));
+    if (audio) audio.volume = nextVolume;
+    ttsVolume = Math.max(0.25, nextVolume);
+    speak(`Volume set to ${Math.round(nextVolume * 100)} percent.`);
     return true;
   }
 
@@ -977,10 +1216,12 @@ async function playYouTube(query: string) {
 }
 
 function statusLabel() {
+  if (state.mode === 'recovery') return 'Recovering';
+  if (state.mode === 'agent') return 'Agent';
   if (state.translationActive) return 'Translating';
   if (state.loading) return 'Thinking';
   if (state.speaking) return 'Speaking';
-  if (state.listening) return Date.now() < state.awakeUntil ? 'Awake' : 'Listening';
+  if (state.listening) return Date.now() < state.awakeUntil ? 'Awake' : 'Wake listening';
   return 'Sleeping';
 }
 
@@ -1083,9 +1324,9 @@ function MediaPanel() {
       <div class="media-copy">
         <span class="panel-label">Voice-first reliability</span>
         <strong>Say “{state.preferences.wakeWord.toUpperCase()}” before commands</strong>
-        <p>After the wake word, AGA stays awake briefly so follow-up questions feel natural.</p>
+        <p>{state.agentStatus || state.diagnostics || state.lastRecovery || 'After the wake word, AGA stays awake briefly so follow-up questions feel natural.'}</p>
       </div>
-      <div class="media-commands">ask · YouTube · music · translate · configure</div>
+      <div class="media-commands">ask · YouTube · music · translate · agent · health check</div>
     </div>
   );
 }
@@ -1101,7 +1342,7 @@ function AssistantOverlay() {
           <p class="dock-kicker">Voice-only assistant</p>
           <h2>{state.preferences.assistantName} is {statusLabel().toLowerCase()}</h2>
           <p class="dock-copy">
-            Always-listening wake word, voice media controls, SQLite history, configurable personality, and translation mode.
+Always-listening wake word, recovery commands, voice media controls, SQLite memory, health checks, on-demand agents, and translation mode.
           </p>
         </div>
         <div class={`status-badge ${state.listening ? 'is-live' : ''} ${awake ? 'is-awake' : ''}`}>
@@ -1465,6 +1706,17 @@ function initThreeStage() {
   animateStage();
 }
 
+function startWatchdog() {
+  if (watchdogTimer) window.clearInterval(watchdogTimer);
+  watchdogTimer = window.setInterval(() => {
+    if (!state.speechSupported || !state.preferences.autoListen) return;
+    if (!shouldKeepListening) return;
+    if (!state.listening && !recognitionStarting && !state.speaking && !state.loading) {
+      restartVoiceLoop('watchdog detected stopped recognition');
+    }
+  }, 8_000);
+}
+
 export default function mount() {
   root = document.getElementById('assistant-root');
   state.speechSupported = typeof window !== 'undefined' && !!getRecognitionCtor();
@@ -1479,6 +1731,7 @@ export default function mount() {
 
   void loadPreferences().then(() => {
     if (state.preferences.autoListen) startListening();
+    startWatchdog();
   });
 
   initThreeStage();

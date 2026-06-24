@@ -1,5 +1,5 @@
 import { z } from 'sqlite-zod-orm';
-import { getAssistantPreferences } from '../../../src/db';
+import { getAssistantPreferences, saveTranslationSession } from '../../../src/db';
 import { measured } from '../../../src/measure';
 
 const translateRequestSchema = z.object({
@@ -120,10 +120,32 @@ export async function POST(req: Request) {
     const prompt = buildPrompt(parsed.data.text, targetLanguage, sourceLanguage, parsed.data.style);
 
     const provider = process.env.GEMINI_API_KEY ? 'gemini' : process.env.OPENAI_API_KEY ? 'openai' : 'offline';
-    const translated =
-      (await translateWithGemini(prompt)) ??
-      (await translateWithOpenAi(prompt)) ??
-      parsed.data.text;
+    let translated = parsed.data.text;
+
+    try {
+      translated =
+        (await translateWithGemini(prompt)) ??
+        (await translateWithOpenAi(prompt)) ??
+        parsed.data.text;
+      saveTranslationSession({
+        sourceLanguage,
+        targetLanguage,
+        status: 'segment',
+        original: parsed.data.text,
+        translated,
+        provider,
+      });
+    } catch (error) {
+      saveTranslationSession({
+        sourceLanguage,
+        targetLanguage,
+        status: 'failed',
+        original: parsed.data.text,
+        translated: error instanceof Error ? error.message : 'Translation failed.',
+        provider,
+      });
+      throw error;
+    }
 
     return Response.json({
       provider,

@@ -39,7 +39,7 @@ export async function askAssistant(messages: LlmMessage[]) {
     const preferences = getAssistantPreferences();
 
     if (!apiKey) {
-      throw new Error('OPENAI_API_KEY is not set on the AGA TradJS server.');
+      return 'I am running locally, but OPENAI_API_KEY is not set on the AGA TradJS server yet. I can still handle local voice commands like music, YouTube setup checks, translation fallback, preferences, and diagnostics.';
     }
 
     const transcript = messages
@@ -60,6 +60,7 @@ export async function askAssistant(messages: LlmMessage[]) {
           'The device is voice-only. Never rely on taps, keyboard shortcuts, or visual-only instructions unless there is no alternative.',
           'Be concise enough to hear aloud, but keep context and continuity from the conversation history.',
           'When the user asks for app/device actions, explain what you can do and what needs to be configured.',
+          'For complex tasks, describe a safe agentic plan and ask for confirmation before irreversible external actions.',
           `Voice style: ${styleHint(preferences.voiceStyle)}.`,
         ].join('\n'),
         input: `Continue this conversation. Keep the answer voice-friendly and reliable.\n\n${transcript}\n${preferences.assistantName}:`,

@@ -1,4 +1,5 @@
 import { z } from 'sqlite-zod-orm';
+import { saveMediaSession } from '../../../src/db';
 import { measured } from '../../../src/measure';
 
 const youtubeRequestSchema = z.object({
@@ -32,6 +33,7 @@ export async function POST(req: Request) {
     const searchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(parsed.data.query)}`;
 
     if (!apiKey) {
+      saveMediaSession({ provider: 'youtube', query: parsed.data.query, status: 'failed', title: 'YouTube API key missing' });
       return Response.json({
         query: parsed.data.query,
         configured: false,
@@ -70,6 +72,14 @@ export async function POST(req: Request) {
         thumbnailUrl: item.snippet?.thumbnails?.high?.url ?? item.snippet?.thumbnails?.medium?.url ?? null,
         url: `https://www.youtube.com/watch?v=${item.id!.videoId!}`,
       }));
+
+    saveMediaSession({
+      provider: 'youtube',
+      query: parsed.data.query,
+      status: videos.length ? 'started' : 'failed',
+      title: videos[0]?.title ?? '',
+      payload: JSON.stringify({ count: videos.length, searchUrl }),
+    });
 
     return Response.json({ query: parsed.data.query, configured: true, searchUrl, videos });
   });
