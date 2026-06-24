@@ -75,8 +75,11 @@ export type AgaAction =
   | { type: 'setup.test_voice' }
   | { type: 'setup.test_notifications' }
   | { type: 'setup.test_brain' }
-  | { type: 'production.qa_script' }
+  | { type: 'production.qa_script'; suite?: 'build' | 'smoke' | 'voice' | 'media' | 'translation' | 'release' }
   | { type: 'production.dependency_summary' }
+  | { type: 'production.build_commands' }
+  | { type: 'production.release_checklist' }
+  | { type: 'production.full_rc_script' }
   | { type: 'translation.repeat' }
   | { type: 'translation.slower' }
   | { type: 'system.self_repair' }
@@ -135,6 +138,34 @@ export function inferLocalActions(text: string): AgaTurn | null {
 
   if (/\b(dependency summary|build commands|what do i install|apk dependencies)\b/.test(lower)) {
     return { speech: 'I will summarize the APK dependencies.', actions: [{ type: 'production.dependency_summary' }], intent: 'production' };
+  }
+
+  if (/\b(build checklist|build stabilization|compile checklist|run android checklist)\b/.test(lower)) {
+    return { speech: 'I will show the build stabilization checklist.', actions: [{ type: 'production.qa_script', suite: 'build' }, { type: 'production.build_commands' }], intent: 'production' };
+  }
+
+  if (/\b(smoke test|apk smoke test|run smoke)\b/.test(lower)) {
+    return { speech: 'I will show the APK smoke test.', actions: [{ type: 'production.qa_script', suite: 'smoke' }], intent: 'production' };
+  }
+
+  if (/\b(voice soak|soak test|30 minute test|voice reliability test)\b/.test(lower)) {
+    return { speech: 'I will show the voice soak test.', actions: [{ type: 'production.qa_script', suite: 'voice' }], intent: 'production' };
+  }
+
+  if (/\b(media reliability|media test|youtube test|music test)\b/.test(lower)) {
+    return { speech: 'I will show the media reliability test.', actions: [{ type: 'production.qa_script', suite: 'media' }], intent: 'production' };
+  }
+
+  if (/\b(translation memory test|translation test|memory polish test)\b/.test(lower)) {
+    return { speech: 'I will show the translation and memory test.', actions: [{ type: 'production.qa_script', suite: 'translation' }], intent: 'production' };
+  }
+
+  if (/\b(full rc script|full release script|run full qa|all qa)\b/.test(lower)) {
+    return { speech: 'I will show the full release-candidate script.', actions: [{ type: 'production.full_rc_script' }], intent: 'production' };
+  }
+
+  if (/\b(release checklist|release candidate checklist|rc checklist|prepare rc1)\b/.test(lower)) {
+    return { speech: 'I will read the release candidate checklist.', actions: [{ type: 'production.release_checklist' }], intent: 'production' };
   }
 
   if (/\b(voice diagnostics|microphone diagnostics|speech diagnostics)\b/.test(lower)) {
@@ -345,13 +376,13 @@ export function inferLocalActions(text: string): AgaTurn | null {
   }
 
   if (/\b(stop translating|end translation|translation off)\b/.test(lower)) {
-    return { speech: 'Translation mode is off.', actions: [{ type: 'translate.stop' }], intent: 'translate' };
+    return { speech: 'Phrase translation is off.', actions: [{ type: 'translate.stop' }], intent: 'translate' };
   }
 
-  const translateMatch = lower.match(/\b(?:translate|live translate).*\b(?:to|into)\s+([a-zA-Z]+)/);
+  const translateMatch = lower.match(/\b(?:translate|phrase translate|live translate).*\b(?:to|into)\s+([a-zA-Z]+)/);
   if (translateMatch) {
     const to = LANGUAGE_WORDS[translateMatch[1]] ?? translateMatch[1];
-    return { speech: `Translation mode is on. I will translate to ${translateMatch[1]}.`, actions: [{ type: 'translate.start', to }], intent: 'translate' };
+    return { speech: `Phrase translation is on. I will translate each recognized phrase to ${translateMatch[1]}.`, actions: [{ type: 'translate.start', to }], intent: 'translate' };
   }
 
   const personaMatch = lower.match(/\b(?:use|switch to|be|become)\s+(warm|bright|calm|coach|story|playful|wise|supportive|energetic)\b/);

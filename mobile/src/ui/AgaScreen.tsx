@@ -43,15 +43,15 @@ import { runCommandHarness } from '../voice/commandHarness';
 import { SetupPanel } from './SetupPanel';
 import { QaScriptPanel } from './QaScriptPanel';
 import { buildSetupReport, setupReportSpeech, type SetupReport } from '../setup/readiness';
-import { dependencySpeech } from '../setup/dependencies';
-import { qaScriptSpeech } from '../setup/qaScripts';
+import { buildCommandSpeech, dependencySpeech } from '../setup/dependencies';
+import { qaScriptSpeech, releaseChecklistSpeech } from '../setup/qaScripts';
 
 function webviewCommand(type: string, value?: number) {
   return JSON.stringify({ type, value });
 }
 
 function actionProducesOwnSpeech(action: AgaAction) {
-  return action.type === 'media.status' || action.type === 'media.queue.status' || action.type === 'memory.recall' || action.type === 'reminder.list' || action.type === 'system.health' || action.type === 'setup.status' || action.type === 'setup.test_voice' || action.type === 'setup.test_notifications' || action.type === 'setup.test_brain' || action.type === 'production.qa_script' || action.type === 'production.dependency_summary' || action.type === 'translation.repeat' || action.type === 'translation.slower' || action.type === 'notifications.request' || action.type === 'command.harness' || action.type === 'history.search' || action.type === 'backup.export' || action.type === 'backup.summary' || action.type === 'system.self_repair' || action.type === 'system.factory_reset_request' || action.type === 'system.factory_reset_confirm' || action.type === 'setup.complete' || action.type === 'media.favorite.save' || action.type === 'media.favorite.list' || action.type === 'translation.history' || action.type === 'routine.list' || action.type === 'routine.brief' || action.type === 'voice.diagnostics';
+  return action.type === 'media.status' || action.type === 'media.queue.status' || action.type === 'memory.recall' || action.type === 'reminder.list' || action.type === 'system.health' || action.type === 'setup.status' || action.type === 'setup.test_voice' || action.type === 'setup.test_notifications' || action.type === 'setup.test_brain' || action.type === 'production.qa_script' || action.type === 'production.dependency_summary' || action.type === 'production.build_commands' || action.type === 'production.release_checklist' || action.type === 'production.full_rc_script' || action.type === 'translation.repeat' || action.type === 'translation.slower' || action.type === 'notifications.request' || action.type === 'command.harness' || action.type === 'history.search' || action.type === 'backup.export' || action.type === 'backup.summary' || action.type === 'system.self_repair' || action.type === 'system.factory_reset_request' || action.type === 'system.factory_reset_confirm' || action.type === 'setup.complete' || action.type === 'media.favorite.save' || action.type === 'media.favorite.list' || action.type === 'translation.history' || action.type === 'routine.list' || action.type === 'routine.brief' || action.type === 'voice.diagnostics';
 }
 
 export function AgaScreen() {
@@ -84,6 +84,8 @@ export function AgaScreen() {
   const [qaVisible, setQaVisible] = useState(false);
 
   const speechLoopRef = useRef<NativeSpeechLoop | null>(null);
+  const recognizedTextHandlerRef = useRef<(text: string) => void>(() => {});
+  const proactiveQueueHandlerRef = useRef<() => Promise<void>>(async () => {});
   const activeUntilRef = useRef(0);
   const webviewRef = useRef<WebViewType>(null);
   const processingRef = useRef(false);
@@ -209,13 +211,17 @@ export function AgaScreen() {
   }, [conversation, prefs?.proactiveEnabled, refreshLocalContext, refreshLog, speakAga]);
 
   useEffect(() => {
+    proactiveQueueHandlerRef.current = drainProactiveQueue;
+  }, [drainProactiveQueue]);
+
+  useEffect(() => {
     if (!ready) return;
     const interval = setInterval(() => {
-      void drainProactiveQueue();
+      void proactiveQueueHandlerRef.current();
     }, 15_000);
-    void drainProactiveQueue();
+    void proactiveQueueHandlerRef.current();
     return () => clearInterval(interval);
-  }, [drainProactiveQueue, ready]);
+  }, [ready]);
 
 
 
@@ -383,11 +389,25 @@ export function AgaScreen() {
       }
       case 'production.qa_script': {
         setQaVisible(true);
-        speakAga(qaScriptSpeech());
+        speakAga(qaScriptSpeech(action.suite));
         return;
       }
       case 'production.dependency_summary': {
         speakAga(dependencySpeech());
+        return;
+      }
+      case 'production.build_commands': {
+        speakAga(buildCommandSpeech());
+        return;
+      }
+      case 'production.release_checklist': {
+        speakAga(releaseChecklistSpeech());
+        setQaVisible(true);
+        return;
+      }
+      case 'production.full_rc_script': {
+        setQaVisible(true);
+        speakAga(qaScriptSpeech());
         return;
       }
       case 'translation.repeat': {
@@ -398,7 +418,7 @@ export function AgaScreen() {
       case 'translation.slower': {
         const nextPrefs = await updatePreferences({ speechRate: 0.82 });
         setPrefs(nextPrefs);
-        speakAga('Translation speech is slower now.');
+        speakAga('Phrase translation speech is slower now.');
         return;
       }
 
@@ -850,7 +870,13 @@ export function AgaScreen() {
   }, [handleCommand, prefs?.wakePhrase, sendMachine, speakAga]);
 
   useEffect(() => {
+    recognizedTextHandlerRef.current = handleRecognizedText;
+  }, [handleRecognizedText]);
+
+  useEffect(() => {
     if (!ready || !prefs) return;
+    const locale = prefs.voiceLocale || 'en-US';
+    const watchdogEnabled = !!prefs.speechWatchdogEnabled;
     const loop = new NativeSpeechLoop({
       onStart: () => {
         setVoiceDiagnostics(loop.getDiagnostics());
@@ -862,7 +888,7 @@ export function AgaScreen() {
       },
       onFinal: (text) => {
         setVoiceDiagnostics(loop.getDiagnostics());
-        handleRecognizedText(text);
+        recognizedTextHandlerRef.current(text);
       },
       onError: (message) => {
         setError(message);
@@ -873,14 +899,14 @@ export function AgaScreen() {
         setVoiceDiagnostics(diagnostics);
         void logEvent('voice', 'watchdog_restart', diagnostics).then(refreshLog);
       },
-    }, prefs.voiceLocale || 'en-US');
+    }, locale);
     speechLoopRef.current = loop;
-    void loop.start({ watchdogEnabled: !!prefs.speechWatchdogEnabled, locale: prefs.voiceLocale || 'en-US' });
+    void loop.start({ watchdogEnabled, locale });
     return () => {
       void loop.destroy();
       speechLoopRef.current = null;
     };
-  }, [handleRecognizedText, prefs, ready, refreshLog, sendMachine]);
+  }, [ready, prefs?.voiceLocale, prefs?.speechWatchdogEnabled, refreshLog, sendMachine]);
 
   const devSubmit = useCallback(() => {
     const text = devText.trim();
