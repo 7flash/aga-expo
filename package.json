@@ -1,0 +1,15 @@
+{
+  "name": "geeksy-expo-tradjs-ai-assistant",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "server",
+    "mobile"
+  ],
+  "scripts": {
+    "dev:server": "cd server && bun run dev",
+    "dev:mobile": "cd mobile && npm run start",
+    "check:server": "cd server && bun run check",
+    "check:mobile": "cd mobile && npm run check"
+  }
+}

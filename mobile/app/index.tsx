@@ -1,0 +1,106 @@
+import { SafeAreaView, StyleSheet, Text, View } from 'react-native';
+import { WebView } from 'react-native-webview';
+
+const assistantUrl = process.env.EXPO_PUBLIC_ASSISTANT_WEB_URL ?? 'http://localhost:3000';
+
+export default function HomeScreen() {
+  return (
+    <SafeAreaView style={styles.container}>
+      <View style={styles.notice}>
+        <View style={styles.logoBubble}>
+          <Text style={styles.logoText}>✦</Text>
+        </View>
+        <View style={styles.noticeCopy}>
+          <Text style={styles.noticeText}>Geeksy Angel</Text>
+          <Text style={styles.urlText}>v2 angel music · {assistantUrl}</Text>
+        </View>
+        <View style={styles.onlinePill}>
+          <View style={styles.onlineDot} />
+          <Text style={styles.onlineText}>Voice</Text>
+        </View>
+      </View>
+      <WebView
+        source={{ uri: assistantUrl }}
+        originWhitelist={['*']}
+        javaScriptEnabled
+        domStorageEnabled
+        pullToRefreshEnabled
+        startInLoadingState
+        allowsInlineMediaPlayback
+        mediaPlaybackRequiresUserAction={false}
+        style={styles.webview}
+      />
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#081225',
+  },
+  notice: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    backgroundColor: '#140f2f',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#34406f',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  logoBubble: {
+    width: 42,
+    height: 42,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#fef3c7',
+  },
+  logoText: {
+    fontSize: 22,
+    fontWeight: '900',
+    color: '#06111c',
+  },
+  noticeCopy: {
+    flex: 1,
+    minWidth: 0,
+  },
+  noticeText: {
+    color: '#f8f7ff',
+    fontSize: 18,
+    fontWeight: '900',
+    letterSpacing: -0.4,
+  },
+  urlText: {
+    color: '#c8d4f2',
+    fontSize: 11,
+    marginTop: 2,
+  },
+  onlinePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 999,
+    backgroundColor: '#171d3e',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#67e8f9',
+  },
+  onlineDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 7,
+    backgroundColor: '#fef3c7',
+  },
+  onlineText: {
+    color: '#f8f7ff',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  webview: {
+    flex: 1,
+    backgroundColor: '#081225',
+  },
+});

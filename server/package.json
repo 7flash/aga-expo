@@ -1,0 +1,20 @@
+{
+  "name": "geeksy-tradjs-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun run server.ts",
+    "start": "NODE_ENV=production bun run server.ts",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "sqlite-zod-orm": "^3.27.0",
+    "tradjs": "^4.0.0",
+    "three": "^0.179.1"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "latest"
+  }
+}

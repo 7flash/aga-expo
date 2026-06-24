@@ -1,0 +1,21 @@
+{
+  "expo": {
+    "name": "Geeksy",
+    "slug": "geeksy-ai-assistant",
+    "scheme": "geeksy",
+    "plugins": ["expo-router"],
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Geeksy uses the microphone for voice prompts."
+      }
+    },
+    "android": {
+      "usesCleartextTraffic": true,
+      "permissions": ["RECORD_AUDIO"]
+    },
+    "web": {
+      "bundler": "metro"
+    }
+  }
+}
