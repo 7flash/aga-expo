@@ -13,7 +13,7 @@ import { migrate } from '../db/migrations';
 import { createConversation, getOrCreateConversation, listMessages, saveMessage } from '../db/conversations';
 import { getPreferences, updatePreferences } from '../db/preferences';
 import { logEvent, recentEvents } from '../db/eventLog';
-import type { ChatMessage, Conversation, EventLog, MediaQueueItem, MemoryFact, Reminder, UserPreferences } from '../db/schema';
+import type { ChatMessage, Conversation, EventLog, MediaFavorite, MediaQueueItem, MemoryFact, Reminder, Routine, TranslationHistoryItem, UserPreferences } from '../db/schema';
 import { searchLocalRecall, summarizeSearchResults } from '../db/search';
 import { clearEventLog, createBackupJson, factoryResetLocalData, getStorageSummary, selfRepairDatabase, summarizeStorage, type StorageSummary } from '../db/backup';
 import { copyOrShareText } from '../platform/optionalShare';
@@ -25,7 +25,7 @@ import { createAgaTurn } from '../aga/turn';
 import { measureAsync } from '../aga/measure';
 import { extendActiveWindow, extractWakeCommand, isActiveWindow } from '../voice/wakeWindow';
 import { NativeSpeechLoop, isNativeSpeechAvailable } from '../voice/nativeSpeech';
-import { speak, stopSpeaking } from '../voice/tts';
+import { speak, stopSpeaking, ttsDiagnostics } from '../voice/tts';
 import { EMPTY_NOW_PLAYING, type NowPlaying as NowPlayingState } from '../media/nowPlaying';
 import { saveMediaSession, updateLatestMediaState } from '../db/mediaSessions';
 import { clearMemoryFacts, listMemoryFacts, saveMemoryFact, searchMemoryFacts } from '../db/memory';
@@ -34,6 +34,10 @@ import { audioPreviewHtml, searchMusic, type MusicTrack } from '../media/music';
 import { searchYouTube, youtubeEmbedHtml, type YouTubeResult } from '../media/youtube';
 import { translateWithGemini } from '../backend/geminiDirect';
 import { clearMediaQueue, countQueuedMedia, enqueueMedia, listQueuedMedia, markQueueItem, nextQueuedMedia } from '../db/mediaQueue';
+import { clearMediaFavorites, listMediaFavorites, saveMediaFavorite, searchMediaFavorites } from '../db/favorites';
+import { clearTranslationHistory, listTranslationHistory, saveTranslationHistory } from '../db/translationHistory';
+import { clearRoutines, createRoutine, dueRoutines, listRoutines, markRoutineFired } from '../db/routines';
+import type { VoiceDiagnostics } from '../voice/voiceDiagnostics';
 import { cancelReminderNotification, notificationDiagnostics, requestNotificationPermission, scheduleReminderNotification } from '../notifications/localNotifications';
 import { runCommandHarness } from '../voice/commandHarness';
 
@@ -42,7 +46,7 @@ function webviewCommand(type: string, value?: number) {
 }
 
 function actionProducesOwnSpeech(action: AgaAction) {
-  return action.type === 'media.status' || action.type === 'media.queue.status' || action.type === 'memory.recall' || action.type === 'reminder.list' || action.type === 'system.health' || action.type === 'notifications.request' || action.type === 'command.harness' || action.type === 'history.search' || action.type === 'backup.export' || action.type === 'backup.summary' || action.type === 'system.self_repair' || action.type === 'system.factory_reset_request' || action.type === 'system.factory_reset_confirm';
+  return action.type === 'media.status' || action.type === 'media.queue.status' || action.type === 'memory.recall' || action.type === 'reminder.list' || action.type === 'system.health' || action.type === 'notifications.request' || action.type === 'command.harness' || action.type === 'history.search' || action.type === 'backup.export' || action.type === 'backup.summary' || action.type === 'system.self_repair' || action.type === 'system.factory_reset_request' || action.type === 'system.factory_reset_confirm' || action.type === 'setup.complete' || action.type === 'media.favorite.save' || action.type === 'media.favorite.list' || action.type === 'translation.history' || action.type === 'routine.list' || action.type === 'routine.brief' || action.type === 'voice.diagnostics';
 }
 
 export function AgaScreen() {
@@ -62,6 +66,10 @@ export function AgaScreen() {
   const [memories, setMemories] = useState<MemoryFact[]>([]);
   const [reminders, setReminders] = useState<Reminder[]>([]);
   const [queueItems, setQueueItems] = useState<MediaQueueItem[]>([]);
+  const [favorites, setFavorites] = useState<MediaFavorite[]>([]);
+  const [translations, setTranslations] = useState<TranslationHistoryItem[]>([]);
+  const [routines, setRoutines] = useState<Routine[]>([]);
+  const [voiceDiagnostics, setVoiceDiagnostics] = useState<VoiceDiagnostics | null>(null);
   const [notificationStatus, setNotificationStatus] = useState('unknown');
   const [harnessSummary, setHarnessSummary] = useState<string | undefined>();
   const [storageSummary, setStorageSummary] = useState<StorageSummary | null>(null);
@@ -97,10 +105,13 @@ export function AgaScreen() {
   }, []);
 
   const refreshLocalContext = useCallback(async () => {
-    const [nextMemories, nextReminders, nextQueue] = await Promise.all([listMemoryFacts(8), listPendingReminders(8), listQueuedMedia(8)]);
+    const [nextMemories, nextReminders, nextQueue, nextFavorites, nextTranslations, nextRoutines] = await Promise.all([listMemoryFacts(8), listPendingReminders(8), listQueuedMedia(8), listMediaFavorites(8), listTranslationHistory(5), listRoutines(8)]);
     setMemories(nextMemories);
     setReminders(nextReminders);
     setQueueItems(nextQueue);
+    setFavorites(nextFavorites);
+    setTranslations(nextTranslations);
+    setRoutines(nextRoutines);
   }, []);
 
   useEffect(() => {
@@ -154,9 +165,19 @@ export function AgaScreen() {
       });
     }
 
+    const routineDue = await dueRoutines();
+    for (const routine of routineDue) {
+      await markRoutineFired(routine.id);
+      await enqueueProactiveEvent({
+        kind: 'routine',
+        speech: `${routine.title}. ${routine.prompt}`,
+        payload: { routineId: routine.id, timeOfDay: routine.timeOfDay },
+      });
+    }
+
     const event = await nextQueuedProactiveEvent();
     if (!event) {
-      if (due.length) await refreshLocalContext();
+      if (due.length || routineDue.length) await refreshLocalContext();
       return;
     }
 
@@ -290,6 +311,100 @@ export function AgaScreen() {
     await logEvent('action', action.type, action);
     switch (action.type) {
 
+      case 'setup.complete': {
+        const nextPrefs = await updatePreferences({ firstRunComplete: 1 });
+        setPrefs(nextPrefs);
+        speakAga('Setup complete. I am ready as a single APK assistant.');
+        return;
+      }
+      case 'backend.set': {
+        const nextPrefs = await updatePreferences({ backendMode: action.mode });
+        setPrefs(nextPrefs);
+        return;
+      }
+      case 'voice.watchdog': {
+        const nextPrefs = await updatePreferences({ speechWatchdogEnabled: action.enabled ? 1 : 0 });
+        setPrefs(nextPrefs);
+        speechLoopRef.current?.setWatchdogEnabled(action.enabled);
+        return;
+      }
+      case 'voice.diagnostics': {
+        const diag = speechLoopRef.current?.getDiagnostics() ?? voiceDiagnostics;
+        const tts = ttsDiagnostics();
+        const reply = diag
+          ? `Voice diagnostics: ${diag.starts} starts, ${diag.restarts} restarts, ${diag.finals} final transcripts, ${diag.errors} errors. TTS queue depth ${tts.queueDepth}.`
+          : `Voice diagnostics are not available. TTS queue depth ${tts.queueDepth}.`;
+        speakAga(reply);
+        return;
+      }
+      case 'media.favorite.save': {
+        if (!nowPlaying.kind || nowPlaying.state === 'stopped') {
+          speakAga('Nothing is playing to save as a favorite.');
+          return;
+        }
+        await saveMediaFavorite({
+          kind: nowPlaying.kind,
+          title: nowPlaying.title,
+          artist: nowPlaying.subtitle,
+          query: nowPlaying.query,
+          ref: nowPlaying.ref,
+          artworkUrl: nowPlaying.artworkUrl,
+        });
+        await refreshLocalContext();
+        speakAga(`Saved ${nowPlaying.title} as a favorite.`);
+        return;
+      }
+      case 'media.favorite.list': {
+        const matches = await searchMediaFavorites(action.query ?? '', 8);
+        if (!matches.length) speakAga(action.query ? `I do not have favorites about ${action.query}.` : 'You do not have media favorites yet.');
+        else speakAga(`Favorites: ${matches.slice(0, 5).map((item) => item.title).join('; ')}.`);
+        await refreshLocalContext();
+        return;
+      }
+      case 'media.favorite.clear': {
+        await clearMediaFavorites();
+        await refreshLocalContext();
+        return;
+      }
+      case 'translation.history': {
+        const rows = await listTranslationHistory(6);
+        if (!rows.length) speakAga('There is no translation history yet.');
+        else speakAga(`Recent translations: ${rows.map((item) => item.translatedText).join('; ')}.`);
+        await refreshLocalContext();
+        return;
+      }
+      case 'translation.history.clear': {
+        await clearTranslationHistory();
+        await refreshLocalContext();
+        return;
+      }
+      case 'routine.create': {
+        await createRoutine({ title: action.title, prompt: action.prompt, timeOfDay: action.timeOfDay, daysOfWeek: action.daysOfWeek ?? null });
+        await refreshLocalContext();
+        return;
+      }
+      case 'routine.list': {
+        const rows = await listRoutines(10);
+        if (!rows.length) speakAga('You do not have routines yet.');
+        else speakAga(`Routines: ${rows.map((item) => `${item.title} at ${item.timeOfDay}${item.enabled ? '' : ' off'}`).join('; ')}.`);
+        return;
+      }
+      case 'routine.clear': {
+        await clearRoutines();
+        await refreshLocalContext();
+        return;
+      }
+      case 'routine.brief': {
+        const reply = [
+          reminders.length ? `${reminders.length} pending reminders` : 'no pending reminders',
+          memories.length ? `${memories.length} memory notes loaded` : 'no memory notes yet',
+          queueItems.length ? `${queueItems.length} queued media items` : 'empty media queue',
+          favorites.length ? `${favorites.length} media favorites` : 'no favorites yet',
+        ].join(', ');
+        speakAga(`Your local brief: ${reply}.`);
+        return;
+      }
+
       case 'history.search': {
         const results = await searchLocalRecall(action.query, 12);
         const reply = summarizeSearchResults(results, action.query);
@@ -355,6 +470,9 @@ export function AgaScreen() {
         setMemories([]);
         setReminders([]);
         setQueueItems([]);
+        setFavorites([]);
+        setTranslations([]);
+        setRoutines([]);
         setRecentLog([]);
         await refreshStorageSummary();
         speakAga('Factory reset complete. I am fresh and ready.');
@@ -468,7 +586,7 @@ export function AgaScreen() {
         return;
       }
       case 'system.health': {
-        const status = `Voice ${voiceAvailable ? 'ready' : 'not installed'}, SQLite ready, persona ${persona.label}, ${memories.length} memories, ${reminders.length} reminders, ${queueItems.length} queued media items, notifications ${notificationStatus}, storage ${storageSummary ? summarizeStorage(storageSummary) : 'not summarized yet'}.`;
+        const status = `Voice ${voiceAvailable ? 'ready' : 'not installed'}, SQLite ready, persona ${persona.label}, ${memories.length} memories, ${reminders.length} reminders, ${queueItems.length} queued media items, ${routines.length} routines, ${favorites.length} favorites, ${translations.length} translations, notifications ${notificationStatus}, storage ${storageSummary ? summarizeStorage(storageSummary) : 'not summarized yet'}.`;
         speakAga(status);
         return;
       }
@@ -551,7 +669,7 @@ export function AgaScreen() {
         return;
       }
     }
-  }, [factoryResetRequestedAt, memories.length, notificationStatus, nowPlaying, persona.label, playNextQueuedItem, playResolvedMedia, postPlayer, queueItems.length, refreshLocalContext, refreshLog, refreshMessages, refreshStorageSummary, reminders.length, restartSpeechLoop, scheduleReminderIfEnabled, sendMachine, speakAga, storageSummary, voiceAvailable]);
+  }, [factoryResetRequestedAt, favorites.length, memories.length, notificationStatus, nowPlaying, persona.label, playNextQueuedItem, playResolvedMedia, postPlayer, queueItems.length, refreshLocalContext, refreshLog, refreshMessages, refreshStorageSummary, reminders.length, restartSpeechLoop, scheduleReminderIfEnabled, sendMachine, speakAga, routines.length, storageSummary, translations.length, voiceAvailable, voiceDiagnostics]);
 
   const handleCommand = useCallback(async (rawText: string) => {
     const text = rawText.trim();
@@ -581,6 +699,8 @@ export function AgaScreen() {
             }))
           : text;
         speechText = translated;
+        await saveTranslationHistory({ sourceText: text, translatedText: translated, toLang: prefs.translateTargetLang! });
+        await refreshLocalContext();
       } else {
         const turn = await measureAsync('assistant:turn', () => createAgaTurn({
           text,
@@ -638,23 +758,37 @@ export function AgaScreen() {
   }, [handleCommand, prefs?.wakePhrase, sendMachine, speakAga]);
 
   useEffect(() => {
-    if (!ready) return;
+    if (!ready || !prefs) return;
     const loop = new NativeSpeechLoop({
-      onStart: () => sendMachine({ type: 'listen' }),
-      onPartial: setInterim,
-      onFinal: handleRecognizedText,
+      onStart: () => {
+        setVoiceDiagnostics(loop.getDiagnostics());
+        sendMachine({ type: 'listen' });
+      },
+      onPartial: (text) => {
+        setInterim(text);
+        setVoiceDiagnostics(loop.getDiagnostics());
+      },
+      onFinal: (text) => {
+        setVoiceDiagnostics(loop.getDiagnostics());
+        handleRecognizedText(text);
+      },
       onError: (message) => {
         setError(message);
+        setVoiceDiagnostics(loop.getDiagnostics());
         void logEvent('voice', 'speech_error', { message }).then(refreshLog);
       },
-    });
+      onWatchdogRestart: (diagnostics) => {
+        setVoiceDiagnostics(diagnostics);
+        void logEvent('voice', 'watchdog_restart', diagnostics).then(refreshLog);
+      },
+    }, prefs.voiceLocale || 'en-US');
     speechLoopRef.current = loop;
-    void loop.start();
+    void loop.start({ watchdogEnabled: !!prefs.speechWatchdogEnabled, locale: prefs.voiceLocale || 'en-US' });
     return () => {
       void loop.destroy();
       speechLoopRef.current = null;
     };
-  }, [handleRecognizedText, ready, refreshLog, sendMachine]);
+  }, [handleRecognizedText, prefs, ready, refreshLog, sendMachine]);
 
   const devSubmit = useCallback(() => {
     const text = devText.trim();
@@ -681,7 +815,7 @@ export function AgaScreen() {
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
         <View style={styles.header}>
           <View>
-            <Text style={styles.kicker}>Single APK · local-first</Text>
+            <Text style={styles.kicker}>Single APK · local-first · {prefs?.firstRunComplete ? 'setup complete' : 'setup open'}</Text>
             <Text style={styles.title}>AGA</Text>
             <Text style={styles.status}>{stateLabel(agaState)} · {persona.label}</Text>
           </View>
@@ -693,7 +827,7 @@ export function AgaScreen() {
         <AgaAvatar state={agaState} persona={persona} />
         <StateRail state={agaState} />
         <NowPlaying item={nowPlaying} />
-        <MemoryReminderPanel memories={memories} reminders={reminders} />
+        <MemoryReminderPanel memories={memories} reminders={reminders} routines={routines} favorites={favorites} translations={translations} />
         <MediaQueuePanel queue={queueItems} />
 
         {playerHtml && (
@@ -721,9 +855,13 @@ export function AgaScreen() {
           state={agaState}
           prefs={prefs}
           voiceAvailable={voiceAvailable}
+          voiceDiagnostics={voiceDiagnostics}
           nowPlaying={nowPlaying}
           events={recentLog}
           queue={queueItems}
+          routines={routines}
+          favorites={favorites}
+          translations={translations}
           notificationStatus={notificationStatus}
           harnessSummary={harnessSummary}
           storageSummary={storageSummary}

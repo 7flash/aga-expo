@@ -3,7 +3,7 @@ import { migrate } from './migrations';
 
 export type BackupSnapshot = {
   app: 'AGA';
-  version: 2;
+  version: 3;
   exportedAt: string;
   tables: Record<string, unknown[]>;
 };
@@ -15,6 +15,9 @@ export type StorageSummary = {
   reminders: number;
   mediaSessions: number;
   mediaQueue: number;
+  favorites: number;
+  translations: number;
+  routines: number;
   events: number;
   backupBytes: number;
 };
@@ -28,6 +31,9 @@ const TABLES = [
   'proactive_events',
   'media_sessions',
   'media_queue',
+  'media_favorites',
+  'translation_history',
+  'routines',
   'event_log',
 ] as const;
 
@@ -41,7 +47,7 @@ export async function createBackupSnapshot(): Promise<BackupSnapshot> {
   const entries = await Promise.all(TABLES.map(async (table) => [table, await all(`SELECT * FROM ${table} ORDER BY id ASC`)] as const));
   return {
     app: 'AGA',
-    version: 2,
+    version: 3,
     exportedAt: new Date().toISOString(),
     tables: Object.fromEntries(entries),
   };
@@ -52,13 +58,16 @@ export async function createBackupJson() {
 }
 
 export async function getStorageSummary(): Promise<StorageSummary> {
-  const [conversations, messages, memories, reminders, mediaSessions, mediaQueue, events] = await Promise.all([
+  const [conversations, messages, memories, reminders, mediaSessions, mediaQueue, favorites, translations, routines, events] = await Promise.all([
     count('conversations'),
     count('messages'),
     count('memory_facts'),
     count('reminders'),
     count('media_sessions'),
     count('media_queue'),
+    count('media_favorites'),
+    count('translation_history'),
+    count('routines'),
     count('event_log'),
   ]);
   const json = await createBackupJson();
@@ -69,6 +78,9 @@ export async function getStorageSummary(): Promise<StorageSummary> {
     reminders,
     mediaSessions,
     mediaQueue,
+    favorites,
+    translations,
+    routines,
     events,
     backupBytes: json.length,
   };
@@ -81,6 +93,7 @@ export async function clearEventLog() {
 export async function selfRepairDatabase() {
   await migrate();
   await run("UPDATE media_queue SET status = 'cleared', updatedAt = CURRENT_TIMESTAMP WHERE status IN ('played', 'failed', 'skipped') AND id NOT IN (SELECT id FROM media_queue ORDER BY id DESC LIMIT 50)");
+  await run("DELETE FROM translation_history WHERE id NOT IN (SELECT id FROM translation_history ORDER BY id DESC LIMIT 200)");
   await run('DELETE FROM event_log WHERE id NOT IN (SELECT id FROM event_log ORDER BY id DESC LIMIT 500)');
   await run('PRAGMA optimize');
   return getStorageSummary();
@@ -95,6 +108,9 @@ export async function factoryResetLocalData() {
   await run('DELETE FROM proactive_events');
   await run('DELETE FROM media_sessions');
   await run('DELETE FROM media_queue');
+  await run('DELETE FROM media_favorites');
+  await run('DELETE FROM translation_history');
+  await run('DELETE FROM routines');
   await run('DELETE FROM event_log');
   await run('DELETE FROM user_preferences WHERE id = 1');
   await run('INSERT OR IGNORE INTO user_preferences (id) VALUES (1)');
@@ -121,5 +137,5 @@ export async function importBackupJson(json: string) {
 
 export function summarizeStorage(summary: StorageSummary) {
   const kb = Math.max(1, Math.round(summary.backupBytes / 1024));
-  return `${summary.conversations} conversations, ${summary.messages} messages, ${summary.memories} memories, ${summary.reminders} reminders, ${summary.mediaQueue} queued media items, and ${summary.events} log events. Backup size is about ${kb} kilobytes.`;
+  return `${summary.conversations} conversations, ${summary.messages} messages, ${summary.memories} memories, ${summary.reminders} reminders, ${summary.mediaQueue} queued media items, ${summary.favorites} favorites, ${summary.translations} translations, ${summary.routines} routines, and ${summary.events} log events. Backup size is about ${kb} kilobytes.`;
 }

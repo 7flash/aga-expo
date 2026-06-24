@@ -1,4 +1,5 @@
 import { Platform } from 'react-native';
+import { emptyVoiceDiagnostics, type VoiceDiagnostics } from './voiceDiagnostics';
 
 declare const require: any;
 
@@ -8,6 +9,7 @@ type SpeechCallbacks = {
   onError?: (message: string) => void;
   onStart?: () => void;
   onEnd?: () => void;
+  onWatchdogRestart?: (diagnostics: VoiceDiagnostics) => void;
 };
 
 type VoiceModule = {
@@ -44,56 +46,82 @@ export class NativeSpeechLoop {
   private locale: string;
   private running = false;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
+  private watchdogTimer: ReturnType<typeof setInterval> | null = null;
   private lastFinalText = '';
   private lastFinalAt = 0;
+  private lastEngineActivityAt = 0;
   private restartDelayMs = Platform.OS === 'android' ? 450 : 250;
+  private watchdogEnabled = true;
+  private diagnostics = emptyVoiceDiagnostics();
 
   constructor(callbacks: SpeechCallbacks, locale = 'en-US') {
     this.callbacks = callbacks;
     this.locale = locale;
   }
 
-  async start() {
+  async start(options: { watchdogEnabled?: boolean; locale?: string } = {}) {
     const Voice = loadVoice();
     if (!Voice) {
       this.callbacks.onError?.('Native speech recognition is not installed. Add @react-native-voice/voice for full voice input.');
       return;
     }
 
+    this.locale = options.locale ?? this.locale;
+    this.watchdogEnabled = options.watchdogEnabled ?? this.watchdogEnabled;
     this.running = true;
-    Voice.onSpeechStart = () => this.callbacks.onStart?.();
+    this.diagnostics.running = true;
+    Voice.onSpeechStart = () => {
+      this.lastEngineActivityAt = Date.now();
+      this.callbacks.onStart?.();
+    };
     Voice.onSpeechEnd = () => {
+      this.lastEngineActivityAt = Date.now();
       this.callbacks.onEnd?.();
       this.scheduleRestart();
     };
     Voice.onSpeechError = (event: any) => {
-      this.callbacks.onError?.(event?.error?.message ?? event?.error?.code ?? 'Speech recognition error.');
+      const message = event?.error?.message ?? event?.error?.code ?? 'Speech recognition error.';
+      this.diagnostics.errors += 1;
+      this.diagnostics.lastError = String(message);
+      this.lastEngineActivityAt = Date.now();
+      this.callbacks.onError?.(String(message));
       this.scheduleRestart();
     };
     Voice.onSpeechPartialResults = (event: any) => {
       const text = event?.value?.[0];
-      if (text) this.callbacks.onPartial?.(String(text));
+      this.lastEngineActivityAt = Date.now();
+      if (text) {
+        this.diagnostics.partials += 1;
+        this.callbacks.onPartial?.(String(text));
+      }
     };
     Voice.onSpeechResults = (event: any) => {
       const text = event?.value?.[0];
+      this.lastEngineActivityAt = Date.now();
       if (text) {
-        const normalized = String(text).trim();
+        const normalized = String(text).replace(/\s+/g, ' ').trim();
         const now = Date.now();
-        if (normalized && (normalized !== this.lastFinalText || now - this.lastFinalAt > 1200)) {
+        const duplicate = normalized.toLowerCase() === this.lastFinalText.toLowerCase() && now - this.lastFinalAt < 1800;
+        if (normalized && !duplicate) {
           this.lastFinalText = normalized;
           this.lastFinalAt = now;
+          this.diagnostics.finals += 1;
+          this.diagnostics.lastFinalAt = new Date(now).toISOString();
           this.callbacks.onFinal?.(normalized);
         }
       }
       this.scheduleRestart();
     };
 
-    await this.safeStart();
+    this.startWatchdog();
+    await this.safeStart(false);
   }
 
   async stop() {
     this.running = false;
+    this.diagnostics.running = false;
     if (this.restartTimer) clearTimeout(this.restartTimer);
+    if (this.watchdogTimer) clearInterval(this.watchdogTimer);
     const Voice = loadVoice();
     if (!Voice) return;
     try { await Voice.stop(); } catch {}
@@ -101,26 +129,59 @@ export class NativeSpeechLoop {
 
   async destroy() {
     this.running = false;
+    this.diagnostics.running = false;
     if (this.restartTimer) clearTimeout(this.restartTimer);
+    if (this.watchdogTimer) clearInterval(this.watchdogTimer);
     const Voice = loadVoice();
     if (!Voice) return;
     try { await Voice.destroy(); } catch {}
     Voice.removeAllListeners?.();
   }
 
+  setWatchdogEnabled(enabled: boolean) {
+    this.watchdogEnabled = enabled;
+    if (enabled) this.startWatchdog();
+    else if (this.watchdogTimer) clearInterval(this.watchdogTimer);
+  }
+
+  getDiagnostics(): VoiceDiagnostics {
+    return { ...this.diagnostics, running: this.running };
+  }
+
   private scheduleRestart() {
     if (!this.running) return;
     if (this.restartTimer) clearTimeout(this.restartTimer);
-    this.restartTimer = setTimeout(() => void this.safeStart(), this.restartDelayMs);
+    this.diagnostics.restarts += 1;
+    this.restartTimer = setTimeout(() => void this.safeStart(true), this.restartDelayMs);
   }
 
-  private async safeStart() {
+  private startWatchdog() {
+    if (this.watchdogTimer) clearInterval(this.watchdogTimer);
+    if (!this.watchdogEnabled) return;
+    this.watchdogTimer = setInterval(() => {
+      if (!this.running || !this.watchdogEnabled) return;
+      const silentMs = Date.now() - (this.lastEngineActivityAt || Date.now());
+      if (silentMs > 22_000) {
+        this.callbacks.onWatchdogRestart?.(this.getDiagnostics());
+        this.scheduleRestart();
+      }
+    }, 7_500);
+  }
+
+  private async safeStart(isRestart: boolean) {
     const Voice = loadVoice();
     if (!Voice || !this.running) return;
     try {
+      this.lastEngineActivityAt = Date.now();
+      this.diagnostics.starts += 1;
+      this.diagnostics.lastStartAt = new Date().toISOString();
+      if (isRestart) this.diagnostics.restarts += 1;
       await Voice.start(this.locale);
     } catch (error) {
-      this.callbacks.onError?.(error instanceof Error ? error.message : 'Could not restart speech recognition.');
+      const message = error instanceof Error ? error.message : 'Could not restart speech recognition.';
+      this.diagnostics.errors += 1;
+      this.diagnostics.lastError = message;
+      this.callbacks.onError?.(message);
       this.scheduleRestart();
     }
   }

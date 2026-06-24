@@ -1,18 +1,23 @@
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
-import type { EventLog, MediaQueueItem, UserPreferences } from '../db/schema';
+import type { EventLog, MediaFavorite, MediaQueueItem, Routine, TranslationHistoryItem, UserPreferences } from '../db/schema';
 import type { StorageSummary } from '../db/backup';
 import type { AgaState } from '../aga/stateMachine';
 import type { NowPlaying } from '../media/nowPlaying';
+import type { VoiceDiagnostics } from '../voice/voiceDiagnostics';
 
 export function DebugPanel({
   visible,
   state,
   prefs,
   voiceAvailable,
+  voiceDiagnostics,
   nowPlaying,
   events,
   queue,
+  routines = [],
+  favorites = [],
+  translations = [],
   notificationStatus,
   harnessSummary,
   storageSummary,
@@ -23,9 +28,13 @@ export function DebugPanel({
   state: AgaState;
   prefs: UserPreferences | null;
   voiceAvailable: boolean;
+  voiceDiagnostics?: VoiceDiagnostics | null;
   nowPlaying: NowPlaying;
   events: EventLog[];
   queue?: MediaQueueItem[];
+  routines?: Routine[];
+  favorites?: MediaFavorite[];
+  translations?: TranslationHistoryItem[];
   notificationStatus?: string;
   harnessSummary?: string;
   storageSummary?: StorageSummary | null;
@@ -38,12 +47,16 @@ export function DebugPanel({
     <View style={styles.card}>
       <Text style={styles.title}>AGA diagnostics</Text>
       <Text style={styles.line}>state: {state}</Text>
-      <Text style={styles.line}>voice: {voiceAvailable ? 'native module ready' : 'native STT missing'}</Text>
+      <Text style={styles.line}>voice: {voiceAvailable ? 'native module ready' : 'native STT missing'} · locale {prefs?.voiceLocale ?? 'en-US'} · watchdog {prefs?.speechWatchdogEnabled ? 'on' : 'off'}</Text>
+      {!!voiceDiagnostics && (
+        <Text style={styles.line}>speech loop: starts {voiceDiagnostics.starts} · restarts {voiceDiagnostics.restarts} · finals {voiceDiagnostics.finals} · errors {voiceDiagnostics.errors}{voiceDiagnostics.lastError ? ` · last ${voiceDiagnostics.lastError}` : ''}</Text>
+      )}
       <Text style={styles.line}>persona: {prefs?.activePersona ?? 'unknown'} · wake: {prefs?.wakePhrase ?? 'hey aga'}</Text>
       <Text style={styles.line}>brain: {prefs?.backendMode ?? 'unknown'} · translate: {prefs?.translateTargetLang ?? 'off'} · proactive: {prefs?.proactiveEnabled ? 'on' : 'off'}</Text>
+      <Text style={styles.line}>remote: {prefs?.remoteBackendUrl || 'not configured'} · setup {prefs?.firstRunComplete ? 'complete' : 'open'}</Text>
       <Text style={styles.line}>notifications: {notificationStatus ?? (prefs?.localNotificationsEnabled ? 'enabled' : 'off')}</Text>
       <Text style={styles.line}>media: {nowPlaying.kind === null ? 'none' : `${nowPlaying.kind} · ${nowPlaying.state} · ${nowPlaying.title}`}</Text>
-      <Text style={styles.line}>queue: {queue?.length ?? 0} active item{(queue?.length ?? 0) === 1 ? '' : 's'}</Text>
+      <Text style={styles.line}>queue: {queue?.length ?? 0} · routines {routines.length} · favorites {favorites.length} · translations {translations.length}</Text>
       {!!storageSummary && (
         <Text style={styles.line}>
           storage: {storageSummary.conversations} conv · {storageSummary.messages} msg · {storageSummary.memories} mem · {Math.max(1, Math.round(storageSummary.backupBytes / 1024))}KB backup

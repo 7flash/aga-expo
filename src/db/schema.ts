@@ -22,11 +22,16 @@ export type UserPreferences = {
   speechRate: number;
   pitch: number;
   translateTargetLang: string | null;
-  backendMode: 'offline' | 'openai-direct' | 'gemini-direct';
+  backendMode: 'offline' | 'openai-direct' | 'gemini-direct' | 'tradjs-remote';
   openaiApiKey: string | null;
   geminiApiKey: string | null;
   openaiModel: string;
   geminiModel: string;
+  remoteBackendUrl: string | null;
+  remoteBackendToken: string | null;
+  voiceLocale: string;
+  firstRunComplete: number;
+  speechWatchdogEnabled: number;
   proactiveEnabled: number;
   localNotificationsEnabled: number;
   quietHoursStart: string | null;
@@ -68,6 +73,40 @@ export type MediaQueueItem = {
   artworkUrl: string | null;
   status: MediaQueueStatus;
   sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+
+export type MediaFavorite = {
+  id: number;
+  kind: 'youtube' | 'music';
+  title: string;
+  artist: string | null;
+  query: string;
+  ref: string | null;
+  artworkUrl: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type TranslationHistoryItem = {
+  id: number;
+  sourceText: string;
+  translatedText: string;
+  fromLang: string | null;
+  toLang: string;
+  createdAt: string;
+};
+
+export type Routine = {
+  id: number;
+  title: string;
+  prompt: string;
+  timeOfDay: string;
+  daysOfWeek: string | null;
+  enabled: number;
+  lastFiredAt: string | null;
   createdAt: string;
   updatedAt: string;
 };

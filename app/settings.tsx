@@ -10,8 +10,11 @@ import { copyOrShareText } from '../src/platform/optionalShare';
 export default function SettingsScreen() {
   const [prefs, setPrefs] = useState<UserPreferences | null>(null);
   const [wakePhrase, setWakePhrase] = useState('hey aga');
+  const [voiceLocale, setVoiceLocale] = useState('en-US');
   const [openaiKey, setOpenaiKey] = useState('');
   const [geminiKey, setGeminiKey] = useState('');
+  const [remoteUrl, setRemoteUrl] = useState('');
+  const [remoteToken, setRemoteToken] = useState('');
   const [saved, setSaved] = useState(false);
   const [storageNote, setStorageNote] = useState('');
 
@@ -21,25 +24,27 @@ export default function SettingsScreen() {
       await migrate();
       const next = await getPreferences();
       if (!mounted) return;
-      setPrefs(next);
-      setWakePhrase(next.wakePhrase);
-      setOpenaiKey(next.openaiApiKey ?? '');
-      setGeminiKey(next.geminiApiKey ?? '');
+      syncLocalState(next);
     })();
     return () => { mounted = false; };
   }, []);
 
-  async function savePatch(patch: Partial<UserPreferences>) {
-    const next = await updatePreferences(patch);
+  function syncLocalState(next: UserPreferences) {
     setPrefs(next);
     setWakePhrase(next.wakePhrase);
+    setVoiceLocale(next.voiceLocale ?? 'en-US');
     setOpenaiKey(next.openaiApiKey ?? '');
     setGeminiKey(next.geminiApiKey ?? '');
+    setRemoteUrl(next.remoteBackendUrl ?? '');
+    setRemoteToken(next.remoteBackendToken ?? '');
+  }
+
+  async function savePatch(patch: Partial<UserPreferences>) {
+    const next = await updatePreferences(patch);
+    syncLocalState(next);
     setSaved(true);
     setTimeout(() => setSaved(false), 1400);
   }
-
-
 
   async function exportBackup() {
     const json = await createBackupJson();
@@ -64,19 +69,33 @@ export default function SettingsScreen() {
     <SafeAreaView style={styles.container}>
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
         <Text style={styles.title}>AGA settings</Text>
-        <Text style={styles.copy}>Voice commands still control these, but this screen gives you a no-server way to configure the single APK build during development.</Text>
+        <Text style={styles.copy}>Single-APK controls for voice, memory, media, routines, direct model calls, and optional remote TradJS brain.</Text>
 
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>Wake phrase</Text>
-          <TextInput value={wakePhrase} onChangeText={setWakePhrase} style={styles.input} placeholderTextColor="rgba(231,238,255,0.42)" />
-          <Pressable style={styles.button} onPress={() => savePatch({ wakePhrase: wakePhrase.trim().toLowerCase() || 'hey aga' })}>
-            <Text style={styles.buttonText}>Save wake phrase</Text>
+          <Text style={styles.cardTitle}>First-run status</Text>
+          <Text style={styles.copy}>Current setup is {prefs.firstRunComplete ? 'complete' : 'open'}. You can also say “complete setup”.</Text>
+          <Pressable style={styles.button} onPress={() => savePatch({ firstRunComplete: 1 })}>
+            <Text style={styles.buttonText}>Mark setup complete</Text>
           </Pressable>
         </View>
 
         <View style={styles.card}>
+          <Text style={styles.cardTitle}>Wake phrase and language</Text>
+          <TextInput value={wakePhrase} onChangeText={setWakePhrase} style={styles.input} placeholder="Wake phrase" placeholderTextColor="rgba(231,238,255,0.42)" />
+          <TextInput value={voiceLocale} onChangeText={setVoiceLocale} style={styles.input} placeholder="Voice locale, e.g. en-US" placeholderTextColor="rgba(231,238,255,0.42)" />
+          <View style={styles.row}>
+            <Pressable style={styles.buttonSmall} onPress={() => savePatch({ wakePhrase: wakePhrase.trim().toLowerCase() || 'hey aga', voiceLocale: voiceLocale.trim() || 'en-US' })}>
+              <Text style={styles.buttonText}>Save voice setup</Text>
+            </Pressable>
+            <Pressable style={[styles.chip, prefs.speechWatchdogEnabled ? styles.chipActive : null]} onPress={() => savePatch({ speechWatchdogEnabled: prefs.speechWatchdogEnabled ? 0 : 1 })}>
+              <Text style={[styles.chipText, prefs.speechWatchdogEnabled ? styles.chipTextActive : null]}>watchdog {prefs.speechWatchdogEnabled ? 'on' : 'off'}</Text>
+            </Pressable>
+          </View>
+        </View>
+
+        <View style={styles.card}>
           <Text style={styles.cardTitle}>Proactive reminders</Text>
-          <Text style={styles.copy}>When on, AGA checks local reminders while the app is open and speaks due reminders without a wake phrase.</Text>
+          <Text style={styles.copy}>When on, AGA checks local reminders and routines while the app is open and speaks due events without a wake phrase.</Text>
           <View style={styles.row}>
             <Pressable style={[styles.chip, prefs.proactiveEnabled ? styles.chipActive : null]} onPress={() => savePatch({ proactiveEnabled: 1 })}>
               <Text style={[styles.chipText, prefs.proactiveEnabled ? styles.chipTextActive : null]}>on</Text>
@@ -89,7 +108,7 @@ export default function SettingsScreen() {
 
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Local notifications</Text>
-          <Text style={styles.copy}>When on, new reminders are also scheduled as native local notifications. The foreground spoken reminder loop still works even if this module is not installed yet.</Text>
+          <Text style={styles.copy}>When on, new reminders are also scheduled as native local notifications. Foreground spoken reminders still work without notifications.</Text>
           <View style={styles.row}>
             <Pressable style={[styles.chip, prefs.localNotificationsEnabled ? styles.chipActive : null]} onPress={() => savePatch({ localNotificationsEnabled: 1 })}>
               <Text style={[styles.chipText, prefs.localNotificationsEnabled ? styles.chipTextActive : null]}>on</Text>
@@ -103,7 +122,7 @@ export default function SettingsScreen() {
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Brain mode</Text>
           <View style={styles.row}>
-            {(['offline', 'openai-direct', 'gemini-direct'] as const).map((mode) => (
+            {(['offline', 'openai-direct', 'gemini-direct', 'tradjs-remote'] as const).map((mode) => (
               <Pressable key={mode} style={[styles.chip, prefs.backendMode === mode && styles.chipActive]} onPress={() => savePatch({ backendMode: mode })}>
                 <Text style={[styles.chipText, prefs.backendMode === mode && styles.chipTextActive]}>{mode}</Text>
               </Pressable>
@@ -111,16 +130,16 @@ export default function SettingsScreen() {
           </View>
           <TextInput value={openaiKey} onChangeText={setOpenaiKey} style={styles.input} placeholder="OpenAI key" placeholderTextColor="rgba(231,238,255,0.42)" secureTextEntry />
           <TextInput value={geminiKey} onChangeText={setGeminiKey} style={styles.input} placeholder="Gemini key" placeholderTextColor="rgba(231,238,255,0.42)" secureTextEntry />
-          <Pressable style={styles.button} onPress={() => savePatch({ openaiApiKey: openaiKey || null, geminiApiKey: geminiKey || null })}>
-            <Text style={styles.buttonText}>Save API keys</Text>
+          <TextInput value={remoteUrl} onChangeText={setRemoteUrl} style={styles.input} placeholder="Remote TradJS URL, optional" placeholderTextColor="rgba(231,238,255,0.42)" autoCapitalize="none" />
+          <TextInput value={remoteToken} onChangeText={setRemoteToken} style={styles.input} placeholder="Remote token, optional" placeholderTextColor="rgba(231,238,255,0.42)" secureTextEntry />
+          <Pressable style={styles.button} onPress={() => savePatch({ openaiApiKey: openaiKey || null, geminiApiKey: geminiKey || null, remoteBackendUrl: remoteUrl || null, remoteBackendToken: remoteToken || null })}>
+            <Text style={styles.buttonText}>Save brain credentials</Text>
           </Pressable>
         </View>
 
-
-
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Backup and local storage</Text>
-          <Text style={styles.copy}>Create a JSON backup of AGA's local conversations, memories, reminders, media state, preferences, and diagnostics.</Text>
+          <Text style={styles.copy}>Create a JSON backup of AGA's local conversations, memories, reminders, routines, favorites, media state, preferences, and diagnostics.</Text>
           <View style={styles.row}>
             <Pressable style={styles.chip} onPress={summarizeLocalStorage}>
               <Text style={styles.chipText}>summary</Text>
@@ -163,6 +182,7 @@ const styles = StyleSheet.create({
   chipText: { color: '#dbeafe', fontSize: 11, fontWeight: '900' },
   chipTextActive: { color: '#06111c' },
   button: { alignItems: 'center', justifyContent: 'center', minHeight: 44, borderRadius: 14, backgroundColor: '#67e8f9' },
+  buttonSmall: { alignItems: 'center', justifyContent: 'center', minHeight: 38, borderRadius: 999, paddingHorizontal: 14, backgroundColor: '#67e8f9' },
   buttonText: { color: '#06111c', fontWeight: '900' },
   persona: { padding: 12, borderRadius: 16, backgroundColor: 'rgba(255,255,255,0.05)', borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(255,255,255,0.12)' },
   personaActive: { borderColor: '#fef3c7', backgroundColor: 'rgba(254,243,199,0.1)' },

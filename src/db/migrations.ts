@@ -34,6 +34,11 @@ export async function migrate() {
       geminiApiKey TEXT,
       openaiModel TEXT NOT NULL DEFAULT 'gpt-5.5',
       geminiModel TEXT NOT NULL DEFAULT 'gemini-2.5-flash',
+      remoteBackendUrl TEXT,
+      remoteBackendToken TEXT,
+      voiceLocale TEXT NOT NULL DEFAULT 'en-US',
+      firstRunComplete INTEGER NOT NULL DEFAULT 0,
+      speechWatchdogEnabled INTEGER NOT NULL DEFAULT 1,
       proactiveEnabled INTEGER NOT NULL DEFAULT 1,
       localNotificationsEnabled INTEGER NOT NULL DEFAULT 1,
       quietHoursStart TEXT,
@@ -109,6 +114,41 @@ export async function migrate() {
       updatedAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
 
+
+
+    CREATE TABLE IF NOT EXISTS media_favorites (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind TEXT NOT NULL CHECK(kind IN ('youtube', 'music')),
+      title TEXT NOT NULL,
+      artist TEXT,
+      query TEXT NOT NULL,
+      ref TEXT,
+      artworkUrl TEXT,
+      createdAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updatedAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS translation_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sourceText TEXT NOT NULL,
+      translatedText TEXT NOT NULL,
+      fromLang TEXT,
+      toLang TEXT NOT NULL,
+      createdAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS routines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      timeOfDay TEXT NOT NULL,
+      daysOfWeek TEXT,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      lastFiredAt TEXT,
+      createdAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updatedAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
     CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversationId, id);
     CREATE INDEX IF NOT EXISTS idx_event_log_created ON event_log(createdAt);
     CREATE INDEX IF NOT EXISTS idx_media_sessions_updated ON media_sessions(updatedAt);
@@ -116,8 +156,16 @@ export async function migrate() {
     CREATE INDEX IF NOT EXISTS idx_memory_facts_updated ON memory_facts(updatedAt);
     CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(status, dueAt);
     CREATE INDEX IF NOT EXISTS idx_proactive_status ON proactive_events(status, id);
+    CREATE INDEX IF NOT EXISTS idx_media_favorites_updated ON media_favorites(updatedAt);
+    CREATE INDEX IF NOT EXISTS idx_translation_history_created ON translation_history(createdAt);
+    CREATE INDEX IF NOT EXISTS idx_routines_enabled ON routines(enabled, timeOfDay);
   `);
 
+  await ensureColumn('user_preferences', 'remoteBackendUrl', 'TEXT');
+  await ensureColumn('user_preferences', 'remoteBackendToken', 'TEXT');
+  await ensureColumn('user_preferences', 'voiceLocale', "TEXT NOT NULL DEFAULT 'en-US'");
+  await ensureColumn('user_preferences', 'firstRunComplete', 'INTEGER NOT NULL DEFAULT 0');
+  await ensureColumn('user_preferences', 'speechWatchdogEnabled', 'INTEGER NOT NULL DEFAULT 1');
   await ensureColumn('user_preferences', 'proactiveEnabled', 'INTEGER NOT NULL DEFAULT 1');
   await ensureColumn('user_preferences', 'localNotificationsEnabled', 'INTEGER NOT NULL DEFAULT 1');
   await ensureColumn('user_preferences', 'quietHoursStart', 'TEXT');

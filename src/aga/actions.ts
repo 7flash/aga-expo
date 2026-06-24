@@ -5,6 +5,9 @@ export type AssistantIntent =
   | 'media_control'
   | 'media_queue'
   | 'notifications'
+  | 'favorite'
+  | 'routine'
+  | 'voice'
   | 'translate'
   | 'persona'
   | 'agent'
@@ -53,6 +56,19 @@ export type AgaAction =
   | { type: 'backup.export' }
   | { type: 'backup.summary' }
   | { type: 'diagnostics.clear_logs' }
+  | { type: 'media.favorite.save' }
+  | { type: 'media.favorite.list'; query?: string }
+  | { type: 'media.favorite.clear' }
+  | { type: 'translation.history' }
+  | { type: 'translation.history.clear' }
+  | { type: 'routine.create'; title: string; prompt: string; timeOfDay: string; daysOfWeek?: string | null }
+  | { type: 'routine.list' }
+  | { type: 'routine.clear' }
+  | { type: 'routine.brief' }
+  | { type: 'voice.diagnostics' }
+  | { type: 'voice.watchdog'; enabled: boolean }
+  | { type: 'backend.set'; mode: 'offline' | 'openai-direct' | 'gemini-direct' | 'tradjs-remote' }
+  | { type: 'setup.complete' }
   | { type: 'system.self_repair' }
   | { type: 'system.factory_reset_request' }
   | { type: 'system.factory_reset_confirm' };
@@ -80,6 +96,74 @@ export function inferLocalActions(text: string): AgaTurn | null {
   const lower = clean.toLowerCase();
 
   if (!clean) return null;
+
+
+  if (/\b(complete setup|finish setup|i am ready)\b/.test(lower)) {
+    return { speech: 'Setup is complete. I will stay in voice-first mode.', actions: [{ type: 'setup.complete' }], intent: 'settings' };
+  }
+
+  if (/\b(voice diagnostics|microphone diagnostics|speech diagnostics)\b/.test(lower)) {
+    return { speech: 'I will read my voice diagnostics.', actions: [{ type: 'voice.diagnostics' }], intent: 'voice' };
+  }
+
+  if (/\b(turn|switch)\s+(speech\s+)?watchdog\s+on\b/.test(lower)) {
+    return { speech: 'Speech watchdog is on.', actions: [{ type: 'voice.watchdog', enabled: true }], intent: 'voice' };
+  }
+
+  if (/\b(turn|switch)\s+(speech\s+)?watchdog\s+off\b/.test(lower)) {
+    return { speech: 'Speech watchdog is off.', actions: [{ type: 'voice.watchdog', enabled: false }], intent: 'voice' };
+  }
+
+  if (/\b(use|switch to)\s+offline\s+(brain|mode)\b/.test(lower)) {
+    return { speech: 'Offline brain mode is active.', actions: [{ type: 'backend.set', mode: 'offline' }], intent: 'settings' };
+  }
+  if (/\b(use|switch to)\s+openai\s+(brain|mode)\b/.test(lower)) {
+    return { speech: 'OpenAI direct brain mode is active.', actions: [{ type: 'backend.set', mode: 'openai-direct' }], intent: 'settings' };
+  }
+  if (/\b(use|switch to)\s+gemini\s+(brain|mode)\b/.test(lower)) {
+    return { speech: 'Gemini direct brain mode is active.', actions: [{ type: 'backend.set', mode: 'gemini-direct' }], intent: 'settings' };
+  }
+  if (/\b(use|switch to)\s+(remote|tradjs)\s+(brain|backend|mode)\b/.test(lower)) {
+    return { speech: 'Remote TradJS brain mode is active.', actions: [{ type: 'backend.set', mode: 'tradjs-remote' }], intent: 'settings' };
+  }
+
+  if (/\b(save|favorite|favourite)\s+(this|that)\b/.test(lower) || /\b(add this to favorites|remember this track|remember this video)\b/.test(lower)) {
+    return { speech: 'I will save the current media as a favorite.', actions: [{ type: 'media.favorite.save' }], intent: 'favorite' };
+  }
+
+  const favoriteSearch = clean.match(/(?:play|show|list|search)\s+(?:my\s+)?favorites?(?:\s+(?:about|for)\s+(.+))?/i);
+  if (favoriteSearch && /\bfavorites?\b/.test(lower)) {
+    return { speech: 'I will check your media favorites.', actions: [{ type: 'media.favorite.list', query: favoriteSearch[1]?.trim() }], intent: 'favorite' };
+  }
+
+  if (/\b(clear|delete)\s+(my\s+)?favorites?\b/.test(lower)) {
+    return { speech: 'I cleared your media favorites.', actions: [{ type: 'media.favorite.clear' }], intent: 'favorite' };
+  }
+
+  if (/\b(translation history|what did you translate|show translations)\b/.test(lower)) {
+    return { speech: 'I will show recent translations.', actions: [{ type: 'translation.history' }], intent: 'translate' };
+  }
+
+  if (/\b(clear|delete)\s+translation\s+history\b/.test(lower)) {
+    return { speech: 'I cleared translation history.', actions: [{ type: 'translation.history.clear' }], intent: 'translate' };
+  }
+
+  if (/\b(morning brief|daily brief|brief me)\b/.test(lower)) {
+    return { speech: 'Here is your local brief.', actions: [{ type: 'routine.brief' }], intent: 'routine' };
+  }
+
+  if (/\b(list|show|what are)\s+(my\s+)?routines\b/.test(lower)) {
+    return { speech: 'I will check your routines.', actions: [{ type: 'routine.list' }], intent: 'routine' };
+  }
+
+  if (/\b(clear|delete)\s+(all\s+)?routines\b/.test(lower)) {
+    return { speech: 'I cleared your routines.', actions: [{ type: 'routine.clear' }], intent: 'routine' };
+  }
+
+  const routine = parseRoutineCommand(clean);
+  if (routine) {
+    return { speech: `I created the routine ${routine.title} at ${routine.timeOfDay}.`, actions: [{ type: 'routine.create', ...routine }], intent: 'routine' };
+  }
 
 
   if (/\b(self\s*repair|repair yourself|heal yourself|fix yourself|restart voice|restart listening)\b/.test(lower)) {
@@ -303,6 +387,35 @@ export function inferLocalActions(text: string): AgaTurn | null {
   return null;
 }
 
+
+
+type ParsedRoutine = { title: string; prompt: string; timeOfDay: string; daysOfWeek?: string | null };
+
+function parseRoutineCommand(text: string): ParsedRoutine | null {
+  const match = text.match(/(?:create|add|set)\s+(?:a\s+)?routine\s+(?:called\s+)?(.+?)\s+(?:at|for)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s+to\s+(.+))?$/i)
+    ?? text.match(/(?:every day|daily)\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s+(.+)/i);
+
+  if (!match) return null;
+  if (match.length >= 6 && match[1] && isNaN(Number(match[1]))) {
+    const title = match[1].trim();
+    const timeOfDay = normalizeTime(match[2], match[3], match[4]);
+    const prompt = match[5]?.trim() || `Run the ${title} routine.`;
+    return { title, prompt, timeOfDay, daysOfWeek: null };
+  }
+
+  const timeOfDay = normalizeTime(match[1], match[2], match[3]);
+  const prompt = match[4]?.trim() || 'Give me my daily brief.';
+  return { title: 'Daily routine', prompt, timeOfDay, daysOfWeek: null };
+}
+
+function normalizeTime(hourText: string, minuteText?: string, meridianText?: string) {
+  let hour = Number(hourText);
+  const minute = Number(minuteText ?? 0);
+  const meridian = meridianText?.toLowerCase();
+  if (meridian === 'pm' && hour < 12) hour += 12;
+  if (meridian === 'am' && hour === 12) hour = 0;
+  return `${String(Math.max(0, Math.min(23, hour))).padStart(2, '0')}:${String(Math.max(0, Math.min(59, minute))).padStart(2, '0')}`;
+}
 
 type ParsedReminder = { title: string; dueAt: string };
 

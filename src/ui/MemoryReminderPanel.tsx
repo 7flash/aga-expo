@@ -1,6 +1,6 @@
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
-import type { MemoryFact, Reminder } from '../db/schema';
+import type { MediaFavorite, MemoryFact, Reminder, Routine, TranslationHistoryItem } from '../db/schema';
 
 function formatDue(dueAt: string) {
   const date = new Date(dueAt);
@@ -13,8 +13,20 @@ function formatDue(dueAt: string) {
   return date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
-export function MemoryReminderPanel({ memories, reminders }: { memories: MemoryFact[]; reminders: Reminder[] }) {
-  if (!memories.length && !reminders.length) return null;
+export function MemoryReminderPanel({
+  memories,
+  reminders,
+  routines = [],
+  favorites = [],
+  translations = [],
+}: {
+  memories: MemoryFact[];
+  reminders: Reminder[];
+  routines?: Routine[];
+  favorites?: MediaFavorite[];
+  translations?: TranslationHistoryItem[];
+}) {
+  if (!memories.length && !reminders.length && !routines.length && !favorites.length && !translations.length) return null;
 
   return (
     <View style={styles.card}>
@@ -27,12 +39,34 @@ export function MemoryReminderPanel({ memories, reminders }: { memories: MemoryF
           ))}
         </View>
       )}
+      {routines.length > 0 && (
+        <View style={styles.block}>
+          <Text style={styles.subtitle}>Routines</Text>
+          {routines.slice(0, 3).map((routine) => (
+            <Text style={styles.line} key={routine.id}>• {routine.title} · {routine.timeOfDay}{routine.enabled ? '' : ' · off'}</Text>
+          ))}
+        </View>
+      )}
       {memories.length > 0 && (
         <View style={styles.block}>
           <Text style={styles.subtitle}>Memory notes</Text>
           {memories.slice(0, 3).map((memory) => (
             <Text style={styles.line} key={memory.id}>• {memory.text}</Text>
           ))}
+        </View>
+      )}
+      {favorites.length > 0 && (
+        <View style={styles.block}>
+          <Text style={styles.subtitle}>Favorites</Text>
+          {favorites.slice(0, 3).map((favorite) => (
+            <Text style={styles.line} key={favorite.id}>• {favorite.title}{favorite.artist ? ` · ${favorite.artist}` : ''}</Text>
+          ))}
+        </View>
+      )}
+      {translations.length > 0 && (
+        <View style={styles.block}>
+          <Text style={styles.subtitle}>Recent translation</Text>
+          <Text style={styles.line}>• {translations[0].translatedText}</Text>
         </View>
       )}
     </View>

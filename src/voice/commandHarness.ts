@@ -21,6 +21,13 @@ const FIXTURES: { input: string; expected: string }[] = [
   { input: 'export local backup', expected: 'backup.export' },
   { input: 'storage summary', expected: 'backup.summary' },
   { input: 'repair yourself', expected: 'system.self_repair' },
+  { input: 'voice diagnostics', expected: 'voice.diagnostics' },
+  { input: 'save this to favorites', expected: 'media.favorite.save' },
+  { input: 'show favorites', expected: 'media.favorite.list' },
+  { input: 'translation history', expected: 'translation.history' },
+  { input: 'create routine called morning brief at 9 am to summarize my reminders', expected: 'routine.create' },
+  { input: 'show routines', expected: 'routine.list' },
+  { input: 'use offline brain mode', expected: 'backend.set' },
 ];
 
 export function runCommandHarness(): CommandHarnessResult {
