@@ -1,195 +1,136 @@
-import { Platform } from 'react-native';
-import { emptyVoiceDiagnostics, type VoiceDiagnostics } from './voiceDiagnostics';
-
-declare const require: any;
-
 type SpeechCallbacks = {
   onPartial?: (text: string) => void;
   onFinal?: (text: string) => void;
   onError?: (message: string) => void;
-  onStart?: () => void;
-  onEnd?: () => void;
-  onWatchdogRestart?: (diagnostics: VoiceDiagnostics) => void;
+  onStatus?: (status: string) => void;
 };
 
-type VoiceModule = {
-  start: (locale: string) => Promise<void>;
-  stop: () => Promise<void>;
-  cancel: () => Promise<void>;
-  destroy: () => Promise<void>;
-  removeAllListeners?: () => void;
-  onSpeechStart?: () => void;
-  onSpeechEnd?: () => void;
-  onSpeechError?: (event: any) => void;
-  onSpeechResults?: (event: any) => void;
-  onSpeechPartialResults?: (event: any) => void;
+type VoiceModule = any;
+
+type Diagnostics = {
+  available: boolean;
+  listening: boolean;
+  restarts: number;
+  lastError: string | null;
+  lastFinal: string | null;
+  lastStartedAt: string | null;
 };
 
-let cachedVoice: VoiceModule | null | undefined;
-
-function loadVoice(): VoiceModule | null {
-  if (cachedVoice !== undefined) return cachedVoice;
+async function importVoice(): Promise<VoiceModule | null> {
   try {
-    cachedVoice = require('@react-native-voice/voice').default as VoiceModule;
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const mod = require('@react-native-voice/voice');
+    return mod?.default ?? mod;
   } catch {
-    cachedVoice = null;
+    return null;
   }
-  return cachedVoice;
-}
-
-export function isNativeSpeechAvailable() {
-  return !!loadVoice();
 }
 
 export class NativeSpeechLoop {
   private callbacks: SpeechCallbacks;
   private locale: string;
-  private running = false;
+  private voice: VoiceModule | null = null;
+  private destroyed = false;
+  private restarting = false;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
-  private restartReason: string | null = null;
-  private watchdogTimer: ReturnType<typeof setInterval> | null = null;
-  private lastFinalText = '';
-  private lastFinalAt = 0;
-  private lastEngineActivityAt = 0;
-  private restartDelayMs = Platform.OS === 'android' ? 450 : 250;
-  private watchdogEnabled = true;
-  private diagnostics = emptyVoiceDiagnostics();
+  private lastFinalFingerprint = '';
+  diagnostics: Diagnostics = {
+    available: false,
+    listening: false,
+    restarts: 0,
+    lastError: null,
+    lastFinal: null,
+    lastStartedAt: null,
+  };
 
   constructor(callbacks: SpeechCallbacks, locale = 'en-US') {
     this.callbacks = callbacks;
     this.locale = locale;
   }
 
-  async start(options: { watchdogEnabled?: boolean; locale?: string } = {}) {
-    const Voice = loadVoice();
-    if (!Voice) {
-      this.callbacks.onError?.('Native speech recognition is not installed. Add @react-native-voice/voice for full voice input.');
+  updateCallbacks(callbacks: SpeechCallbacks) {
+    this.callbacks = callbacks;
+  }
+
+  async start() {
+    this.destroyed = false;
+    this.voice = await importVoice();
+    this.diagnostics.available = !!this.voice;
+    if (!this.voice) {
+      this.diagnostics.lastError = '@react-native-voice/voice is not installed in this build.';
+      this.callbacks.onError?.(this.diagnostics.lastError);
       return;
     }
 
-    this.locale = options.locale ?? this.locale;
-    this.watchdogEnabled = options.watchdogEnabled ?? this.watchdogEnabled;
-    this.running = true;
-    this.diagnostics.running = true;
-    Voice.onSpeechStart = () => {
-      this.lastEngineActivityAt = Date.now();
-      this.callbacks.onStart?.();
+    this.voice.onSpeechStart = () => {
+      this.diagnostics.listening = true;
+      this.callbacks.onStatus?.('listening');
     };
-    Voice.onSpeechEnd = () => {
-      this.lastEngineActivityAt = Date.now();
-      this.callbacks.onEnd?.();
+    this.voice.onSpeechEnd = () => {
+      this.diagnostics.listening = false;
+      this.callbacks.onStatus?.('restarting');
       this.scheduleRestart('speech_end');
     };
-    Voice.onSpeechError = (event: any) => {
-      const message = event?.error?.message ?? event?.error?.code ?? 'Speech recognition error.';
-      this.diagnostics.errors += 1;
+    this.voice.onSpeechPartialResults = (event: any) => {
+      const text = event?.value?.[0] ?? '';
+      if (text) this.callbacks.onPartial?.(text);
+    };
+    this.voice.onSpeechResults = (event: any) => {
+      const text = String(event?.value?.[0] ?? '').trim();
+      if (!text) return;
+      const fingerprint = `${text.toLowerCase()}::${Math.floor(Date.now() / 1200)}`;
+      if (fingerprint === this.lastFinalFingerprint) return;
+      this.lastFinalFingerprint = fingerprint;
+      this.diagnostics.lastFinal = text;
+      this.callbacks.onFinal?.(text);
+      this.scheduleRestart('result');
+    };
+    this.voice.onSpeechError = (event: any) => {
+      const message = event?.error?.message || event?.error?.code || 'Speech recognition error.';
       this.diagnostics.lastError = String(message);
-      this.lastEngineActivityAt = Date.now();
+      this.diagnostics.listening = false;
       this.callbacks.onError?.(String(message));
-      this.scheduleRestart('speech_error');
-    };
-    Voice.onSpeechPartialResults = (event: any) => {
-      const text = event?.value?.[0];
-      this.lastEngineActivityAt = Date.now();
-      if (text) {
-        this.diagnostics.partials += 1;
-        this.callbacks.onPartial?.(String(text));
-      }
-    };
-    Voice.onSpeechResults = (event: any) => {
-      const text = event?.value?.[0];
-      this.lastEngineActivityAt = Date.now();
-      if (text) {
-        const normalized = String(text).replace(/\s+/g, ' ').trim();
-        const now = Date.now();
-        const duplicate = normalized.toLowerCase() === this.lastFinalText.toLowerCase() && now - this.lastFinalAt < 1800;
-        if (normalized && !duplicate) {
-          this.lastFinalText = normalized;
-          this.lastFinalAt = now;
-          this.diagnostics.finals += 1;
-          this.diagnostics.lastFinalAt = new Date(now).toISOString();
-          this.callbacks.onFinal?.(normalized);
-        }
-      }
-      this.scheduleRestart('speech_results');
+      this.scheduleRestart('error');
     };
 
-    this.startWatchdog();
-    await this.safeStart(false);
+    await this.safeStart(false, 'initial');
   }
 
-  async stop() {
-    this.running = false;
-    this.diagnostics.running = false;
-    if (this.restartTimer) { clearTimeout(this.restartTimer); this.restartTimer = null; }
-    if (this.watchdogTimer) { clearInterval(this.watchdogTimer); this.watchdogTimer = null; }
-    const Voice = loadVoice();
-    if (!Voice) return;
-    try { await Voice.stop(); } catch {}
+  private scheduleRestart(reason: string) {
+    if (this.destroyed || this.restarting || this.restartTimer) return;
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = null;
+      void this.safeStart(true, reason);
+    }, 450);
+  }
+
+  private async safeStart(isRestart: boolean, reason: string) {
+    if (this.destroyed || !this.voice) return;
+    this.restarting = true;
+    try {
+      try { await this.voice.cancel?.(); } catch {}
+      try { await this.voice.stop?.(); } catch {}
+      if (isRestart) this.diagnostics.restarts += 1;
+      this.diagnostics.lastStartedAt = new Date().toISOString();
+      await this.voice.start(this.locale);
+      this.diagnostics.listening = true;
+      this.callbacks.onStatus?.(isRestart ? `restarted:${reason}` : 'started');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not start speech recognition.';
+      this.diagnostics.lastError = message;
+      this.diagnostics.listening = false;
+      this.callbacks.onError?.(message);
+    } finally {
+      this.restarting = false;
+    }
   }
 
   async destroy() {
-    this.running = false;
-    this.diagnostics.running = false;
-    if (this.restartTimer) { clearTimeout(this.restartTimer); this.restartTimer = null; }
-    if (this.watchdogTimer) { clearInterval(this.watchdogTimer); this.watchdogTimer = null; }
-    const Voice = loadVoice();
-    if (!Voice) return;
-    try { await Voice.destroy(); } catch {}
-    Voice.removeAllListeners?.();
-  }
-
-  setWatchdogEnabled(enabled: boolean) {
-    this.watchdogEnabled = enabled;
-    if (enabled) this.startWatchdog();
-    else if (this.watchdogTimer) clearInterval(this.watchdogTimer);
-  }
-
-  getDiagnostics(): VoiceDiagnostics {
-    return { ...this.diagnostics, running: this.running };
-  }
-
-  private scheduleRestart(reason = 'restart') {
-    if (!this.running) return;
-    if (this.restartTimer) return;
-    this.restartReason = reason;
-    this.restartTimer = setTimeout(() => {
-      this.restartTimer = null;
-      const nextReason = this.restartReason ?? reason;
-      this.restartReason = null;
-      void this.safeStart(true, nextReason);
-    }, this.restartDelayMs);
-  }
-
-  private startWatchdog() {
-    if (this.watchdogTimer) { clearInterval(this.watchdogTimer); this.watchdogTimer = null; }
-    if (!this.watchdogEnabled) return;
-    this.watchdogTimer = setInterval(() => {
-      if (!this.running || !this.watchdogEnabled) return;
-      const silentMs = Date.now() - (this.lastEngineActivityAt || Date.now());
-      if (silentMs > 22_000) {
-        this.callbacks.onWatchdogRestart?.(this.getDiagnostics());
-        this.scheduleRestart('watchdog_silence');
-      }
-    }, 7_500);
-  }
-
-  private async safeStart(isRestart: boolean, reason = 'start') {
-    const Voice = loadVoice();
-    if (!Voice || !this.running) return;
-    try {
-      this.lastEngineActivityAt = Date.now();
-      this.diagnostics.starts += 1;
-      this.diagnostics.lastStartAt = new Date().toISOString();
-      if (isRestart) this.diagnostics.restarts += 1;
-      this.diagnostics.lastRestartReason = isRestart ? reason : this.diagnostics.lastRestartReason;
-      await Voice.start(this.locale);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Could not restart speech recognition.';
-      this.diagnostics.errors += 1;
-      this.diagnostics.lastError = message;
-      this.callbacks.onError?.(message);
-      this.scheduleRestart('safe_start_failed');
-    }
+    this.destroyed = true;
+    if (this.restartTimer) clearTimeout(this.restartTimer);
+    this.restartTimer = null;
+    try { await this.voice?.destroy?.(); } catch {}
+    try { this.voice?.removeAllListeners?.(); } catch {}
+    this.diagnostics.listening = false;
   }
 }

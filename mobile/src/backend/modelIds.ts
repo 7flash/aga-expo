@@ -1,17 +1,9 @@
 export const MODEL_IDS = {
-  openaiChat: 'gpt-5.5',
-  geminiText: 'gemini-2.5-flash',
-  geminiLiveTranslate: 'gemini-3.5-live-translate-preview',
+  openaiChat: process.env.EXPO_PUBLIC_OPENAI_MODEL || 'gpt-5.5',
+  geminiText: process.env.EXPO_PUBLIC_GEMINI_MODEL || 'gemini-2.5-flash',
 } as const;
 
-export type ModelIdKey = keyof typeof MODEL_IDS;
-
-export function normalizeOpenAIModel(model?: string | null) {
-  return model?.trim() || MODEL_IDS.openaiChat;
-}
-
-export function normalizeGeminiTextModel(model?: string | null) {
-  const clean = model?.trim();
-  if (!clean || clean === MODEL_IDS.geminiLiveTranslate) return MODEL_IDS.geminiText;
-  return clean;
-}
+export const PROVIDER_ENDPOINTS = {
+  openaiResponses: 'https://api.openai.com/v1/responses',
+  geminiGenerateContentBase: 'https://generativelanguage.googleapis.com/v1beta/models',
+} as const;

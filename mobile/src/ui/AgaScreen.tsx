@@ -1,390 +1,346 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Pressable, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Link } from 'expo-router';
+import { AgaAvatar } from './AgaAvatar';
+import { colors, radius, spacing } from './theme';
+import { hasWakeWord, parseVoiceCommand, type AgaAction, type AgaMode } from '../aga/actions';
+import { askBrain, translatePhrase } from '../backend/brain';
 import {
-  Animated,
-  Easing,
-  Pressable,
-  SafeAreaView,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
-} from 'react-native';
-import * as Speech from 'expo-speech';
-import Voice, { SpeechErrorEvent, SpeechResultsEvent } from '@react-native-voice/voice';
+  addMemory,
+  addMessage,
+  getDiagnostics,
+  initializeLocalStore,
+  listEvents,
+  listMessages,
+  loadPreferences,
+  logEvent,
+  savePreferences,
+  searchMemories,
+  type Preferences,
+  clearMessages,
+} from '../db/localStore';
+import { NativeSpeechLoop } from '../voice/nativeSpeech';
+import { speak, stopSpeaking } from '../voice/tts';
 
-type AgaStatus = 'starting' | 'listening' | 'awake' | 'thinking' | 'speaking' | 'error';
-
-type ChatMessage = {
-  id: string;
-  role: 'aga' | 'you';
-  text: string;
+const initialPrefs: Preferences = {
+  wakePhrase: 'hey aga',
+  persona: 'warm',
+  voiceLocale: 'en-US',
+  openaiApiKey: process.env.EXPO_PUBLIC_OPENAI_API_KEY ?? '',
+  geminiApiKey: process.env.EXPO_PUBLIC_GEMINI_API_KEY ?? '',
+  brainMode: ((process.env.EXPO_PUBLIC_AGA_BRAIN_MODE as Preferences['brainMode']) || 'openai') as Preferences['brainMode'],
+  translateTarget: null,
+  showDiagnostics: false,
 };
 
-const WAKE_PATTERN = /\b(?:hey\s+aga|okay\s+aga|ok\s+aga|aga|angel)\b/i;
-const ACTIVE_WINDOW_MS = 35_000;
-
-function nowId(prefix: string) {
-  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-function stripWake(text: string) {
-  return text.replace(/^.*?\b(?:hey\s+aga|okay\s+aga|ok\s+aga|aga|angel)\b[:,\s-]*/i, '').trim();
-}
-
-function getLocalReply(command: string) {
-  const lower = command.toLowerCase().trim();
-
-  if (!lower || /^(hi|hello|hey|yes|help)$/.test(lower)) {
-    return 'I am here inside the APK now. Say, AGA help, AGA test voice, AGA status, or AGA stop.';
-  }
-
-  if (/\b(help|what can i say|commands)\b/.test(lower)) {
-    return 'You can say: AGA help, AGA status, AGA test voice, AGA stop, AGA speak slower, or AGA remember that this is working. This screen does not need localhost or a TradJS server.';
-  }
-
-  if (/\b(status|setup status|health|diagnostics)\b/.test(lower)) {
-    return 'AGA is running fully from the Expo APK screen. No localhost backend is required for this interface.';
-  }
-
-  if (/\b(test voice|voice test|say something)\b/.test(lower)) {
-    return 'Voice output is working. If you can hear me, AGA can speak from inside the APK.';
-  }
-
-  if (/\b(stop|cancel|quiet|silence)\b/.test(lower)) {
-    return 'Stopped. I am listening again.';
-  }
-
-  if (/\b(slower|slow down)\b/.test(lower)) {
-    return 'Okay, I will speak more slowly for this session.';
-  }
-
-  if (/\bremember that\b/.test(lower)) {
-    const memory = command.replace(/.*?remember that\s*/i, '').trim();
-    return memory ? `I heard the memory: ${memory}. Local SQLite memory will be reconnected after this no-backend boot fix.` : 'Tell me what to remember after the words remember that.';
-  }
-
-  if (/\b(youtube|music|translate|agent|reminder|backup)\b/.test(lower)) {
-    return 'That feature belongs to the native AGA modules. This hotfix proves the APK boots without the backend first, then we reconnect those modules one by one.';
-  }
-
-  return `I heard: ${command}. I am responding locally from the APK, not from localhost.`;
-}
-
-function AngelAvatar({ status, mouth }: { status: AgaStatus; mouth: Animated.Value }) {
-  const breathe = useRef(new Animated.Value(0)).current;
-  const halo = useRef(new Animated.Value(0)).current;
-
-  useEffect(() => {
-    const breathingLoop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(breathe, {
-          toValue: 1,
-          duration: 2400,
-          easing: Easing.inOut(Easing.sin),
-          useNativeDriver: true,
-        }),
-        Animated.timing(breathe, {
-          toValue: 0,
-          duration: 2400,
-          easing: Easing.inOut(Easing.sin),
-          useNativeDriver: true,
-        }),
-      ])
-    );
-    const haloLoop = Animated.loop(
-      Animated.timing(halo, {
-        toValue: 1,
-        duration: 4200,
-        easing: Easing.linear,
-        useNativeDriver: true,
-      })
-    );
-    breathingLoop.start();
-    haloLoop.start();
-    return () => {
-      breathingLoop.stop();
-      haloLoop.stop();
-    };
-  }, [breathe, halo]);
-
-  const scale = breathe.interpolate({ inputRange: [0, 1], outputRange: [1, 1.035] });
-  const haloRotate = halo.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
-  const mouthScale = mouth.interpolate({ inputRange: [0, 1], outputRange: [0.35, 1.35] });
-  const isLive = status === 'listening' || status === 'awake';
-
-  return (
-    <View style={styles.avatarStage}>
-      <Animated.View style={[styles.halo, { transform: [{ rotate: haloRotate }] }]} />
-      <View style={[styles.wing, styles.leftWing]} />
-      <View style={[styles.wing, styles.rightWing]} />
-      <Animated.View style={[styles.face, { transform: [{ scale }] }]}>
-        <View style={[styles.cheek, styles.leftCheek]} />
-        <View style={[styles.cheek, styles.rightCheek]} />
-        <View style={[styles.eye, styles.leftEye, isLive && styles.eyeLive]} />
-        <View style={[styles.eye, styles.rightEye, isLive && styles.eyeLive]} />
-        <Animated.View style={[styles.mouth, { transform: [{ scaleY: mouthScale }] }]} />
-      </Animated.View>
-      <View style={[styles.statusOrb, isLive && styles.statusOrbLive]} />
-    </View>
-  );
-}
-
-export default function AgaScreen() {
-  const [status, setStatus] = useState<AgaStatus>('starting');
-  const [heard, setHeard] = useState('');
-  const [error, setError] = useState<string | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: 'welcome',
-      role: 'aga',
-      text: 'I booted from the APK. No localhost backend is required for this screen.',
-    },
-  ]);
+export function AgaScreen() {
+  const [ready, setReady] = useState(false);
+  const [prefs, setPrefs] = useState<Preferences>(initialPrefs);
+  const [mode, setMode] = useState<AgaMode>('sleeping');
+  const [interim, setInterim] = useState('');
+  const [messages, setMessages] = useState<Array<{ role: string; content: string; createdAt?: string }>>([]);
+  const [events, setEvents] = useState<Array<{ label: string; detail: string; createdAt: string }>>([]);
+  const [diagnostics, setDiagnostics] = useState<any>(null);
+  const [manualText, setManualText] = useState('');
+  const [speechStatus, setSpeechStatus] = useState('starting');
+  const loopRef = useRef<NativeSpeechLoop | null>(null);
+  const prefsRef = useRef(prefs);
+  const processingRef = useRef(false);
   const activeUntilRef = useRef(0);
-  const finalGuardRef = useRef('');
-  const startingRef = useRef(false);
-  const mouth = useRef(new Animated.Value(0)).current;
 
-  const addMessage = useCallback((role: ChatMessage['role'], text: string) => {
-    setMessages((current) => [{ id: nowId(role), role, text }, ...current].slice(0, 8));
+  prefsRef.current = prefs;
+
+  const refresh = useCallback(async () => {
+    setMessages(await listMessages(12));
+    setEvents(await listEvents(8));
+    setDiagnostics(await getDiagnostics());
   }, []);
 
-  const pulseMouth = useCallback((duration = 1200) => {
-    mouth.stopAnimation();
-    mouth.setValue(0.15);
-    Animated.loop(
-      Animated.sequence([
-        Animated.timing(mouth, { toValue: 1, duration: 140, easing: Easing.out(Easing.quad), useNativeDriver: true }),
-        Animated.timing(mouth, { toValue: 0.2, duration: 180, easing: Easing.in(Easing.quad), useNativeDriver: true }),
-      ]),
-      { iterations: Math.max(2, Math.round(duration / 320)) }
-    ).start(() => mouth.setValue(0));
-  }, [mouth]);
+  const say = useCallback(async (text: string) => {
+    const currentPrefs = prefsRef.current;
+    setMode('speaking');
+    await addMessage('assistant', text);
+    setMessages(await listMessages(12));
+    await speak(text, currentPrefs, {
+      onDone: () => setMode(currentPrefs.translateTarget ? 'translating' : 'sleeping'),
+    });
+  }, []);
 
-  const speak = useCallback(
-    async (text: string) => {
-      setStatus('speaking');
-      pulseMouth(Math.min(4200, Math.max(900, text.length * 45)));
-      try {
-        await Speech.stop();
-        Speech.speak(text, {
-          language: 'en-US',
-          pitch: 1.08,
-          rate: /slowly|slower/.test(text.toLowerCase()) ? 0.82 : 0.96,
-          onDone: () => setStatus('listening'),
-          onStopped: () => setStatus('listening'),
-          onError: () => setStatus('listening'),
-        });
-      } catch {
-        setStatus('listening');
+  const applyAction = useCallback(async (action: AgaAction) => {
+    const currentPrefs = prefsRef.current;
+    switch (action.type) {
+      case 'speak':
+        await say(action.text);
+        return;
+      case 'stop_speaking':
+        await stopSpeaking();
+        setMode('listening');
+        await logEvent('voice.stop', 'Stopped TTS by command');
+        return;
+      case 'remember':
+        await addMemory(action.text);
+        await logEvent('memory.add', action.text);
+        await refresh();
+        return;
+      case 'recall': {
+        const found = await searchMemories(action.query, 6);
+        const speech = found.length
+          ? `I remember ${found.map((m) => m.text).join('; ')}`
+          : action.query
+            ? `I do not have a memory about ${action.query} yet.`
+            : 'I do not have saved memories yet.';
+        await say(speech);
+        return;
       }
-    },
-    [pulseMouth]
-  );
+      case 'set_persona': {
+        const next = await savePreferences({ persona: action.persona });
+        setPrefs(next);
+        await logEvent('prefs.persona', action.persona);
+        return;
+      }
+      case 'set_wake_phrase': {
+        const next = await savePreferences({ wakePhrase: action.phrase.toLowerCase() });
+        setPrefs(next);
+        await logEvent('prefs.wakePhrase', action.phrase);
+        return;
+      }
+      case 'translate_start': {
+        const next = await savePreferences({ translateTarget: action.target });
+        setPrefs(next);
+        setMode('translating');
+        await logEvent('translate.start', action.target);
+        return;
+      }
+      case 'translate_stop': {
+        const next = await savePreferences({ translateTarget: null });
+        setPrefs(next);
+        setMode('sleeping');
+        await logEvent('translate.stop');
+        return;
+      }
+      case 'show_diagnostics': {
+        const next = await savePreferences({ showDiagnostics: !currentPrefs.showDiagnostics });
+        setPrefs(next);
+        await refresh();
+        return;
+      }
+      case 'open_settings':
+        await say('Use the settings link on screen. I am ready without any backend.');
+        return;
+      case 'reset_conversation':
+        await clearMessages();
+        setMessages([]);
+        await refresh();
+        return;
+      case 'chat':
+        return;
+    }
+  }, [refresh, say]);
 
-  const handleText = useCallback(
-    (rawText: string) => {
-      const text = rawText.trim();
-      if (!text) return;
+  const handleRecognizedText = useCallback(async (recognized: string) => {
+    const text = recognized.trim();
+    if (!text || processingRef.current) return;
+    const currentPrefs = prefsRef.current;
+    const now = Date.now();
+    const woke = hasWakeWord(text, currentPrefs.wakePhrase);
+    const active = now < activeUntilRef.current;
 
-      const guardKey = text.toLowerCase();
-      if (guardKey === finalGuardRef.current) return;
-      finalGuardRef.current = guardKey;
-      setTimeout(() => {
-        if (finalGuardRef.current === guardKey) finalGuardRef.current = '';
-      }, 2500);
+    if (!woke && !active && !currentPrefs.translateTarget) {
+      setInterim(text);
+      return;
+    }
 
-      setHeard(text);
-      const now = Date.now();
-      const hasWake = WAKE_PATTERN.test(text);
-      const active = now < activeUntilRef.current;
+    activeUntilRef.current = Date.now() + 35000;
+    processingRef.current = true;
+    setMode(currentPrefs.translateTarget ? 'translating' : 'thinking');
+    setInterim(text);
+    await addMessage('user', text);
+    await logEvent('voice.final', text);
+    setMessages(await listMessages(12));
 
-      if (!hasWake && !active) {
-        setStatus('listening');
+    try {
+      if (currentPrefs.translateTarget && !woke) {
+        const translated = await translatePhrase(text, currentPrefs.translateTarget, currentPrefs);
+        await say(translated);
         return;
       }
 
-      activeUntilRef.current = now + ACTIVE_WINDOW_MS;
-      const command = hasWake ? stripWake(text) : text;
-      setStatus('awake');
-      addMessage('you', command || text);
+      const parsed = parseVoiceCommand(text, currentPrefs.wakePhrase);
+      for (const action of parsed.actions) {
+        if (action.type !== 'chat') await applyAction(action);
+      }
 
-      const reply = getLocalReply(command || 'help');
-      addMessage('aga', reply);
-      void speak(reply);
-    },
-    [addMessage, speak]
-  );
-
-  const startListening = useCallback(async () => {
-    if (startingRef.current) return;
-    startingRef.current = true;
-    setError(null);
-
-    try {
-      await Voice.stop().catch(() => undefined);
-      await Voice.cancel().catch(() => undefined);
-      await Voice.start('en-US');
-      setStatus('listening');
-    } catch (err) {
-      setStatus('error');
-      setError(err instanceof Error ? err.message : 'Speech recognition did not start. Check microphone and speech recognition permissions.');
+      const chatAction = parsed.actions.find((action) => action.type === 'chat') as AgaAction | undefined;
+      if (chatAction?.type === 'chat') {
+        const [history, memories] = await Promise.all([listMessages(20), searchMemories(undefined, 8)]);
+        const reply = await askBrain({ text: chatAction.text, prefs: currentPrefs, history, memories });
+        await say(reply);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'I hit a local error.';
+      await logEvent('turn.error', message);
+      await say(`I hit a small glitch, but I am still here. ${message}`);
     } finally {
-      startingRef.current = false;
+      processingRef.current = false;
+      await refresh();
     }
-  }, []);
+  }, [applyAction, refresh, say]);
+
+  const handlersRef = useRef({ onFinal: handleRecognizedText });
+  handlersRef.current.onFinal = handleRecognizedText;
 
   useEffect(() => {
-    Voice.onSpeechStart = () => {
-      setStatus((current) => (current === 'speaking' ? 'awake' : 'listening'));
-      setError(null);
-    };
-    Voice.onSpeechPartialResults = (event: SpeechResultsEvent) => {
-      const value = event.value?.[0]?.trim();
-      if (value) setHeard(value);
-    };
-    Voice.onSpeechResults = (event: SpeechResultsEvent) => {
-      const value = event.value?.[0]?.trim();
-      if (value) handleText(value);
-    };
-    Voice.onSpeechError = (event: SpeechErrorEvent) => {
-      const message = event.error?.message || event.error?.code || 'Speech recognition error.';
-      setError(message);
-      setStatus('error');
-      setTimeout(() => void startListening(), 900);
-    };
-    Voice.onSpeechEnd = () => {
-      setTimeout(() => void startListening(), 350);
-    };
+    let mounted = true;
+    (async () => {
+      await initializeLocalStore();
+      const loaded = await loadPreferences();
+      if (!mounted) return;
+      setPrefs(loaded);
+      await refresh();
+      setReady(true);
+    })();
+    return () => { mounted = false; };
+  }, [refresh]);
 
-    const timer = setTimeout(() => void startListening(), 550);
-    return () => {
-      clearTimeout(timer);
-      Voice.destroy().then(Voice.removeAllListeners).catch(() => undefined);
-    };
-  }, [handleText, startListening]);
+  useEffect(() => {
+    if (!ready) return;
+    const loop = new NativeSpeechLoop({
+      onPartial: setInterim,
+      onFinal: (text) => handlersRef.current.onFinal(text),
+      onError: async (message) => {
+        setSpeechStatus(`mic error: ${message}`);
+        await logEvent('voice.error', message);
+        await refresh();
+      },
+      onStatus: (status) => setSpeechStatus(status),
+    }, prefs.voiceLocale || 'en-US');
+    loopRef.current = loop;
+    void loop.start();
+    return () => { void loop.destroy(); loopRef.current = null; };
+  }, [ready, prefs.voiceLocale, refresh]);
 
-  const statusCopy = useMemo(() => {
-    if (status === 'starting') return 'Starting local APK voice loop';
-    if (status === 'listening') return 'Listening for “Hey AGA”';
-    if (status === 'awake') return 'AGA is awake';
-    if (status === 'thinking') return 'Thinking locally';
-    if (status === 'speaking') return 'Speaking — say AGA stop';
-    return 'Voice needs attention';
-  }, [status]);
+  async function submitManual() {
+    const text = manualText.trim();
+    if (!text) return;
+    setManualText('');
+    await handleRecognizedText(text);
+  }
+
+  const statusText = mode === 'sleeping'
+    ? `Listening for “${prefs.wakePhrase}”`
+    : mode === 'thinking'
+      ? 'Thinking…'
+      : mode === 'speaking'
+        ? 'Speaking — say AGA stop'
+        : mode === 'translating'
+          ? `Phrase translating to ${prefs.translateTarget}`
+          : 'Listening now';
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <ScrollView contentContainerStyle={styles.page}>
-        <View style={styles.headerRow}>
-          <View style={styles.brandPill}>
-            <View style={styles.brandMark}><Text style={styles.brandMarkText}>A</Text></View>
-            <View>
-              <Text style={styles.brandTitle}>AGA</Text>
-              <Text style={styles.brandSub}>Angel companion · APK local mode</Text>
-            </View>
+    <SafeAreaView style={styles.safe}>
+      <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
+        <View style={styles.topBar}>
+          <View style={styles.brandDot}><Text style={styles.brandLetter}>A</Text></View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.brand}>AGA</Text>
+            <Text style={styles.brandSub}>single APK • no backend required</Text>
           </View>
-          <View style={styles.statusPill}>
-            <View style={[styles.dot, status === 'listening' || status === 'awake' ? styles.dotLive : null]} />
-            <Text style={styles.statusPillText}>{statusCopy}</Text>
-          </View>
+          <Link href="/settings" asChild><Pressable style={styles.settingsButton}><Text style={styles.settingsText}>Settings</Text></Pressable></Link>
         </View>
 
-        <View style={styles.hero}>
-          <AngelAvatar status={status} mouth={mouth} />
-          <View style={styles.controlCard}>
-            <Text style={styles.kicker}>NO BACKEND REQUIRED</Text>
-            <Text style={styles.title}>{status === 'listening' ? 'AGA is listening' : status === 'speaking' ? 'AGA is speaking' : 'AGA is awake'}</Text>
-            <Text style={styles.subtitle}>This screen is rendered by React Native inside the APK. It does not load http://localhost:3000.</Text>
+        <AgaAvatar mode={mode} />
 
-            <View style={styles.hearsCard}>
-              <Text style={styles.hearsLabel}>AGA HEARS</Text>
-              <Text style={styles.hearsText}>{heard || 'Say “Hey AGA, help” or tap Start listening.'}</Text>
-            </View>
-
-            {error ? <Text style={styles.errorText}>{error}</Text> : null}
-
-            <View style={styles.buttonRow}>
-              <Pressable style={styles.primaryButton} onPress={startListening}>
-                <Text style={styles.primaryButtonText}>Start listening</Text>
-              </Pressable>
-              <Pressable style={styles.secondaryButton} onPress={() => handleText('Hey AGA help')}>
-                <Text style={styles.secondaryButtonText}>Test reply</Text>
-              </Pressable>
-              <Pressable
-                style={styles.secondaryButton}
-                onPress={() => {
-                  Speech.stop();
-                  setStatus('listening');
-                }}
-              >
-                <Text style={styles.secondaryButtonText}>Stop speech</Text>
-              </Pressable>
-            </View>
-          </View>
+        <View style={styles.statusPanel}>
+          <Text style={styles.kicker}>VOICE STATUS</Text>
+          <Text style={styles.status}>{statusText}</Text>
+          <Text style={styles.statusSub}>Speech module: {speechStatus}. The app does not load localhost or TradJS to boot.</Text>
         </View>
 
-        <View style={styles.messagesCard}>
-          <Text style={styles.kicker}>RECENT LOCAL CONVERSATION</Text>
-          {messages.map((message) => (
-            <View key={message.id} style={[styles.message, message.role === 'you' ? styles.userMessage : styles.agaMessage]}>
-              <Text style={styles.messageRole}>{message.role === 'you' ? 'You' : 'AGA'}</Text>
-              <Text style={styles.messageText}>{message.text}</Text>
+        <View style={styles.hearsPanel}>
+          <Text style={styles.kicker}>AGA HEARS</Text>
+          <Text style={styles.hears}>{interim || 'Say “Hey AGA, help” or type below while testing.'}</Text>
+        </View>
+
+        <View style={styles.manualRow}>
+          <TextInput
+            value={manualText}
+            onChangeText={setManualText}
+            placeholder="Type a test command, e.g. Hey AGA, remember that this works"
+            placeholderTextColor={colors.faint}
+            style={styles.input}
+            onSubmitEditing={submitManual}
+          />
+          <Pressable style={styles.sendButton} onPress={submitManual}><Text style={styles.sendText}>Send</Text></Pressable>
+        </View>
+
+        <View style={styles.cardsRow}>
+          <InfoCard title="Try" body={`“${prefs.wakePhrase}, help”\n“${prefs.wakePhrase}, remember that this boots”\n“${prefs.wakePhrase}, what do you remember?”`} />
+          <InfoCard title="Brain" body={`${prefs.brainMode}\nOpenAI key: ${prefs.openaiApiKey ? 'set' : 'not set'}\nGemini key: ${prefs.geminiApiKey ? 'set' : 'not set'}`} />
+        </View>
+
+        <View style={styles.messagesPanel}>
+          <Text style={styles.kicker}>RECENT CONVERSATION</Text>
+          {messages.length === 0 ? <Text style={styles.empty}>No local messages yet.</Text> : messages.map((message, index) => (
+            <View key={`${message.createdAt ?? index}-${index}`} style={styles.messageBubble}>
+              <Text style={styles.messageRole}>{message.role === 'assistant' ? 'AGA' : 'You'}</Text>
+              <Text style={styles.messageText}>{message.content}</Text>
             </View>
           ))}
         </View>
+
+        {prefs.showDiagnostics && (
+          <View style={styles.diagnosticsPanel}>
+            <Text style={styles.kicker}>DIAGNOSTICS</Text>
+            <Text style={styles.diagText}>{JSON.stringify({ diagnostics, speech: loopRef.current?.diagnostics }, null, 2)}</Text>
+            {events.map((event, index) => <Text key={`${event.createdAt}-${index}`} style={styles.eventText}>[{event.label}] {event.detail}</Text>)}
+          </View>
+        )}
       </ScrollView>
     </SafeAreaView>
   );
 }
 
+function InfoCard({ title, body }: { title: string; body: string }) {
+  return (
+    <View style={styles.infoCard}>
+      <Text style={styles.infoTitle}>{title}</Text>
+      <Text style={styles.infoBody}>{body}</Text>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: '#070b1d' },
-  page: { minHeight: '100%' as any, padding: 18, gap: 18 },
-  headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' },
-  brandPill: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 12, borderRadius: 22, backgroundColor: 'rgba(255,255,255,0.08)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.14)' },
-  brandMark: { width: 42, height: 42, borderRadius: 16, alignItems: 'center', justifyContent: 'center', backgroundColor: '#bff6ff' },
-  brandMarkText: { color: '#14172b', fontWeight: '900', fontSize: 18 },
-  brandTitle: { color: '#fff', fontWeight: '900', fontSize: 18 },
-  brandSub: { color: 'rgba(238,244,255,0.72)', fontSize: 12, marginTop: 2 },
-  statusPill: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 14, paddingVertical: 11, borderRadius: 999, backgroundColor: 'rgba(255,255,255,0.08)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.14)' },
-  dot: { width: 9, height: 9, borderRadius: 9, backgroundColor: '#f9a8d4' },
-  dotLive: { backgroundColor: '#67e8f9' },
-  statusPillText: { color: '#fff', fontWeight: '800', fontSize: 12 },
-  hero: { flex: 1, minHeight: 620, justifyContent: 'center', alignItems: 'center', gap: 18 },
-  avatarStage: { width: 310, height: 270, alignItems: 'center', justifyContent: 'center' },
-  halo: { position: 'absolute', top: 4, width: 128, height: 34, borderRadius: 64, borderWidth: 7, borderColor: '#fef3c7', opacity: 0.84 },
-  wing: { position: 'absolute', width: 112, height: 150, borderRadius: 80, backgroundColor: 'rgba(255,255,255,0.18)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.28)' },
-  leftWing: { left: 20, transform: [{ rotate: '-22deg' }] },
-  rightWing: { right: 20, transform: [{ rotate: '22deg' }] },
-  face: { width: 190, height: 190, borderRadius: 96, backgroundColor: '#bff6ff', borderWidth: 1, borderColor: 'rgba(255,255,255,0.55)', shadowColor: '#67e8f9', shadowOpacity: 0.5, shadowRadius: 24, shadowOffset: { width: 0, height: 14 } },
-  cheek: { position: 'absolute', bottom: 60, width: 30, height: 18, borderRadius: 18, backgroundColor: 'rgba(249,168,212,0.42)' },
-  leftCheek: { left: 36 },
-  rightCheek: { right: 36 },
-  eye: { position: 'absolute', top: 78, width: 18, height: 24, borderRadius: 18, backgroundColor: '#15172a' },
-  eyeLive: { height: 30, backgroundColor: '#0f172a' },
-  leftEye: { left: 58 },
-  rightEye: { right: 58 },
-  mouth: { position: 'absolute', left: 84, bottom: 48, width: 22, height: 12, borderRadius: 10, backgroundColor: '#8b5cf6' },
-  statusOrb: { position: 'absolute', bottom: 18, width: 18, height: 18, borderRadius: 18, backgroundColor: '#f9a8d4' },
-  statusOrbLive: { backgroundColor: '#67e8f9', shadowColor: '#67e8f9', shadowOpacity: 0.9, shadowRadius: 16 },
-  controlCard: { width: '100%', maxWidth: 720, padding: 22, borderRadius: 30, backgroundColor: 'rgba(255,255,255,0.1)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.16)' },
-  kicker: { color: '#67e8f9', fontSize: 11, fontWeight: '900', letterSpacing: 2, marginBottom: 8 },
-  title: { color: '#fff', fontSize: 34, fontWeight: '900', letterSpacing: -1.2 },
-  subtitle: { color: 'rgba(238,244,255,0.78)', marginTop: 8, lineHeight: 20 },
-  hearsCard: { marginTop: 18, padding: 16, borderRadius: 22, backgroundColor: 'rgba(103,232,249,0.12)', borderWidth: 1, borderColor: 'rgba(103,232,249,0.28)' },
-  hearsLabel: { color: '#67e8f9', fontSize: 11, fontWeight: '900', letterSpacing: 1.8, marginBottom: 6 },
-  hearsText: { color: '#fff', fontSize: 18, fontWeight: '800', lineHeight: 25 },
-  errorText: { marginTop: 12, color: '#fecdd3', fontWeight: '700' },
-  buttonRow: { flexDirection: 'row', gap: 10, flexWrap: 'wrap', marginTop: 18 },
-  primaryButton: { paddingHorizontal: 18, paddingVertical: 14, borderRadius: 18, backgroundColor: '#67e8f9' },
-  primaryButtonText: { color: '#0f172a', fontWeight: '900' },
-  secondaryButton: { paddingHorizontal: 18, paddingVertical: 14, borderRadius: 18, backgroundColor: 'rgba(255,255,255,0.1)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.18)' },
-  secondaryButtonText: { color: '#fff', fontWeight: '900' },
-  messagesCard: { width: '100%', maxWidth: 920, alignSelf: 'center', padding: 18, borderRadius: 26, backgroundColor: 'rgba(255,255,255,0.07)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)' },
-  message: { padding: 14, borderRadius: 18, marginTop: 10 },
-  agaMessage: { backgroundColor: 'rgba(255,255,255,0.08)' },
-  userMessage: { backgroundColor: 'rgba(103,232,249,0.14)' },
-  messageRole: { color: '#fef3c7', fontSize: 11, fontWeight: '900', marginBottom: 5, textTransform: 'uppercase' },
-  messageText: { color: '#fff', lineHeight: 20 },
+  safe: { flex: 1, backgroundColor: colors.bg },
+  scroll: { padding: spacing.lg, paddingBottom: 64, gap: spacing.md },
+  topBar: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, backgroundColor: colors.panel, borderColor: colors.border, borderWidth: 1, padding: spacing.md, borderRadius: radius.lg },
+  brandDot: { width: 44, height: 44, borderRadius: 16, backgroundColor: colors.cyan, alignItems: 'center', justifyContent: 'center' },
+  brandLetter: { color: '#0f172a', fontWeight: '900', fontSize: 20 },
+  brand: { color: colors.text, fontSize: 20, fontWeight: '900' },
+  brandSub: { color: colors.muted, fontSize: 12, marginTop: 2 },
+  settingsButton: { paddingHorizontal: 14, paddingVertical: 9, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.panelStrong },
+  settingsText: { color: colors.text, fontWeight: '800' },
+  statusPanel: { backgroundColor: colors.panel, borderColor: colors.border, borderWidth: 1, padding: spacing.lg, borderRadius: radius.lg },
+  kicker: { color: colors.cyan, letterSpacing: 2, fontSize: 11, fontWeight: '900', marginBottom: 7 },
+  status: { color: colors.text, fontSize: 30, fontWeight: '900', letterSpacing: -1 },
+  statusSub: { color: colors.muted, fontSize: 13, lineHeight: 20, marginTop: 8 },
+  hearsPanel: { backgroundColor: 'rgba(103, 232, 249, 0.1)', borderColor: 'rgba(103, 232, 249, 0.35)', borderWidth: 1, padding: spacing.lg, borderRadius: radius.lg },
+  hears: { color: colors.text, fontSize: 21, fontWeight: '800', lineHeight: 30 },
+  manualRow: { flexDirection: 'row', gap: spacing.sm, alignItems: 'center' },
+  input: { flex: 1, minHeight: 52, color: colors.text, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.panel, borderRadius: radius.md, paddingHorizontal: spacing.md },
+  sendButton: { minHeight: 52, paddingHorizontal: spacing.lg, borderRadius: radius.md, backgroundColor: colors.lavender, alignItems: 'center', justifyContent: 'center' },
+  sendText: { color: colors.text, fontWeight: '900' },
+  cardsRow: { flexDirection: 'row', gap: spacing.md, flexWrap: 'wrap' },
+  infoCard: { flex: 1, minWidth: 240, backgroundColor: colors.panel, borderColor: colors.border, borderWidth: 1, padding: spacing.lg, borderRadius: radius.lg },
+  infoTitle: { color: colors.gold, fontWeight: '900', fontSize: 16, marginBottom: 8 },
+  infoBody: { color: colors.muted, lineHeight: 22 },
+  messagesPanel: { backgroundColor: colors.panel, borderColor: colors.border, borderWidth: 1, padding: spacing.lg, borderRadius: radius.lg, gap: spacing.sm },
+  empty: { color: colors.faint },
+  messageBubble: { padding: spacing.md, borderRadius: radius.md, backgroundColor: 'rgba(255,255,255,0.07)' },
+  messageRole: { color: colors.cyan, fontWeight: '900', marginBottom: 4 },
+  messageText: { color: colors.text, lineHeight: 21 },
+  diagnosticsPanel: { backgroundColor: 'rgba(15, 23, 42, 0.88)', borderColor: colors.border, borderWidth: 1, padding: spacing.lg, borderRadius: radius.lg },
+  diagText: { color: colors.good, fontFamily: 'monospace', fontSize: 11 },
+  eventText: { color: colors.muted, fontSize: 11, marginTop: 4 },
 });
+
+export default AgaScreen;

@@ -1,163 +1,85 @@
-import React, { useEffect, useMemo, useRef } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { Animated, Easing, StyleSheet, Text, View } from 'react-native';
-import type { AgaState } from '../aga/stateMachine';
-import type { Persona } from '../aga/personas';
+import { colors } from './theme';
+import type { AgaMode } from '../aga/actions';
 
-function moodLabel(state: AgaState) {
-  switch (state) {
-    case 'listening':
-    case 'wake_confirmed': return 'leaning in';
-    case 'thinking': return 'thinking';
-    case 'speaking': return 'speaking';
-    case 'playing_media': return 'music glow';
-    case 'translating': return 'interpreter';
-    case 'recovering': return 'self repair';
-    case 'offline': return 'offline';
-    default: return 'soft idle';
-  }
-}
-
-export function AgaAvatar({ state, persona }: { state: AgaState; persona: Persona }) {
+export function AgaAvatar({ mode }: { mode: AgaMode }) {
   const breathe = useRef(new Animated.Value(0)).current;
-  const pulse = useRef(new Animated.Value(0)).current;
-  const tilt = useRef(new Animated.Value(0)).current;
-  const sparkle = useRef(new Animated.Value(0)).current;
-  const speechEnvelope = useRef(new Animated.Value(0)).current;
+  const mouth = useRef(new Animated.Value(0)).current;
+  const halo = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     const loop = Animated.loop(
       Animated.sequence([
-        Animated.timing(breathe, { toValue: 1, duration: state === 'recovering' ? 900 : 2600, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
-        Animated.timing(breathe, { toValue: 0, duration: state === 'recovering' ? 900 : 2600, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+        Animated.timing(breathe, { toValue: 1, duration: 2600, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+        Animated.timing(breathe, { toValue: 0, duration: 2600, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
       ])
     );
     loop.start();
     return () => loop.stop();
-  }, [breathe, state]);
+  }, [breathe]);
 
   useEffect(() => {
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulse, { toValue: 1, duration: state === 'speaking' ? 280 : state === 'playing_media' ? 460 : 850, easing: Easing.out(Easing.quad), useNativeDriver: true }),
-        Animated.timing(pulse, { toValue: 0, duration: state === 'speaking' ? 280 : state === 'playing_media' ? 460 : 850, easing: Easing.in(Easing.quad), useNativeDriver: true }),
-      ])
+    const haloLoop = Animated.loop(
+      Animated.timing(halo, { toValue: 1, duration: mode === 'listening' ? 900 : 1800, easing: Easing.linear, useNativeDriver: true })
     );
-    loop.start();
-    return () => loop.stop();
-  }, [pulse, state]);
+    halo.setValue(0);
+    haloLoop.start();
+    return () => haloLoop.stop();
+  }, [halo, mode]);
 
   useEffect(() => {
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(tilt, { toValue: 1, duration: 3400, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
-        Animated.timing(tilt, { toValue: -1, duration: 3400, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
-        Animated.timing(tilt, { toValue: 0, duration: 2200, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
-      ])
-    );
-    loop.start();
-    return () => loop.stop();
-  }, [tilt]);
-
-
-  useEffect(() => {
-    if (state !== 'speaking') {
-      speechEnvelope.stopAnimation();
-      Animated.timing(speechEnvelope, { toValue: 0, duration: 180, easing: Easing.out(Easing.quad), useNativeDriver: true }).start();
+    if (mode !== 'speaking') {
+      Animated.timing(mouth, { toValue: 0, duration: 180, useNativeDriver: true }).start();
       return;
     }
-
     const loop = Animated.loop(
       Animated.sequence([
-        Animated.timing(speechEnvelope, { toValue: 1, duration: 120, easing: Easing.out(Easing.quad), useNativeDriver: true }),
-        Animated.timing(speechEnvelope, { toValue: 0.32, duration: 95, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
-        Animated.timing(speechEnvelope, { toValue: 0.78, duration: 150, easing: Easing.out(Easing.quad), useNativeDriver: true }),
-        Animated.timing(speechEnvelope, { toValue: 0.12, duration: 130, easing: Easing.in(Easing.quad), useNativeDriver: true }),
+        Animated.timing(mouth, { toValue: 1, duration: 170, useNativeDriver: true }),
+        Animated.timing(mouth, { toValue: 0.2, duration: 130, useNativeDriver: true }),
       ])
     );
     loop.start();
     return () => loop.stop();
-  }, [speechEnvelope, state]);
+  }, [mode, mouth]);
 
-  useEffect(() => {
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(sparkle, { toValue: 1, duration: 1200, easing: Easing.out(Easing.quad), useNativeDriver: true }),
-        Animated.timing(sparkle, { toValue: 0, duration: 1200, easing: Easing.in(Easing.quad), useNativeDriver: true }),
-      ])
-    );
-    loop.start();
-    return () => loop.stop();
-  }, [sparkle]);
-
-  const stateStyle = useMemo(() => {
-    if (state === 'offline') return styles.avatarOffline;
-    if (state === 'recovering') return styles.avatarRecovering;
-    if (state === 'translating') return styles.avatarTranslating;
-    if (state === 'playing_media') return styles.avatarMedia;
-    return null;
-  }, [state]);
-
-  const scale = Animated.add(1, breathe.interpolate({ inputRange: [0, 1], outputRange: [0, state === 'speaking' ? 0.045 : 0.018] }));
-  const mouthDriver = state === 'speaking' ? speechEnvelope : pulse;
-  const mouthScale = mouthDriver.interpolate({ inputRange: [0, 1], outputRange: [state === 'speaking' ? 0.42 : 0.22, state === 'speaking' ? 2.25 : state === 'thinking' ? 1.0 : 0.55] });
-  const ringScale = pulse.interpolate({ inputRange: [0, 1], outputRange: [1, state === 'listening' || state === 'wake_confirmed' ? 1.18 : state === 'playing_media' ? 1.1 : 1.04] });
-  const opacity = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.25, state === 'offline' ? 0.35 : 0.85] });
-  const rotate = tilt.interpolate({ inputRange: [-1, 1], outputRange: ['-3deg', '3deg'] });
-  const sparkleScale = sparkle.interpolate({ inputRange: [0, 1], outputRange: [0.85, 1.25] });
+  const scale = breathe.interpolate({ inputRange: [0, 1], outputRange: [1, 1.025] });
+  const mouthScale = mouth.interpolate({ inputRange: [0, 1], outputRange: [0.35, 1.25] });
+  const haloSpin = halo.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
 
   return (
-    <View style={styles.wrap}>
-      <Animated.View style={[styles.halo, { borderColor: persona.hue, opacity, transform: [{ scale: ringScale }] }]} />
-      <Animated.View style={[styles.orb, styles.orbLeft, { backgroundColor: persona.hue, opacity, transform: [{ scale: sparkleScale }] }]} />
-      <Animated.View style={[styles.orb, styles.orbRight, { backgroundColor: persona.hue, opacity, transform: [{ scale: sparkleScale }] }]} />
-      <Animated.View style={[styles.avatar, stateStyle, { transform: [{ scale }, { rotate }] }]}> 
-        <View style={[styles.antenna, { backgroundColor: persona.hue }]} />
-        <Animated.View style={[styles.antennaTip, { backgroundColor: persona.hue, opacity }]} />
-        <View style={styles.face}>
-          <View style={styles.eyeRow}>
-            <View style={[styles.eye, (state === 'listening' || state === 'wake_confirmed') && styles.eyeWide, state === 'thinking' && styles.eyeThinking]} />
-            <View style={[styles.eye, (state === 'listening' || state === 'wake_confirmed') && styles.eyeWide, state === 'thinking' && styles.eyeThinking]} />
+    <View style={styles.wrap} pointerEvents="none">
+      <Animated.View style={[styles.halo, { transform: [{ rotate: haloSpin }] }]} />
+      <View style={styles.wingsRow}>
+        <View style={[styles.wing, styles.leftWing]} />
+        <Animated.View style={[styles.face, { transform: [{ scale }] }]}>
+          <View style={styles.antenna}><View style={styles.antennaDot} /></View>
+          <View style={styles.eyesRow}>
+            <View style={styles.eye}><View style={styles.pupil} /></View>
+            <View style={styles.eye}><View style={styles.pupil} /></View>
           </View>
-          <Animated.View style={[styles.mouth, { backgroundColor: persona.hue, transform: [{ scaleY: mouthScale }] }]} />
-        </View>
-        <Text style={styles.monogram}>AGA</Text>
-        <Text style={styles.mood}>{moodLabel(state)}</Text>
-      </Animated.View>
+          <Animated.View style={[styles.mouth, { transform: [{ scaleY: mouthScale }] }]} />
+          <Text style={styles.mode}>{mode === 'sleeping' ? 'Listening for wake phrase' : mode}</Text>
+        </Animated.View>
+        <View style={[styles.wing, styles.rightWing]} />
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  wrap: { height: 270, alignItems: 'center', justifyContent: 'center' },
-  halo: { position: 'absolute', top: 10, width: 136, height: 36, borderRadius: 999, borderWidth: 2, transform: [{ rotateX: '64deg' }] },
-  orb: { position: 'absolute', width: 18, height: 18, borderRadius: 18, shadowColor: '#fff', shadowOpacity: 0.5, shadowRadius: 16 },
-  orbLeft: { left: 82, top: 82 },
-  orbRight: { right: 82, bottom: 86 },
-  avatar: {
-    width: 190,
-    height: 212,
-    borderRadius: 74,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(191,248,255,0.20)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.28)',
-    shadowColor: '#67e8f9',
-    shadowOpacity: 0.35,
-    shadowRadius: 28,
-  },
-  avatarMedia: { backgroundColor: 'rgba(167,139,250,0.23)' },
-  avatarTranslating: { backgroundColor: 'rgba(103,232,249,0.16)', borderColor: 'rgba(254,243,199,0.5)' },
-  avatarRecovering: { backgroundColor: 'rgba(251,113,133,0.14)', borderColor: 'rgba(251,113,133,0.42)' },
-  avatarOffline: { opacity: 0.72, backgroundColor: 'rgba(148,163,184,0.12)' },
-  antenna: { position: 'absolute', top: -26, width: 8, height: 34, borderRadius: 999 },
-  antennaTip: { position: 'absolute', top: -42, width: 24, height: 24, borderRadius: 24 },
-  face: { width: 124, height: 98, borderRadius: 42, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(224,242,254,0.86)' },
-  eyeRow: { flexDirection: 'row', gap: 28, marginBottom: 18 },
-  eye: { width: 15, height: 15, borderRadius: 15, backgroundColor: '#0f172a' },
-  eyeWide: { width: 18, height: 18, borderRadius: 18 },
-  eyeThinking: { height: 9, borderRadius: 9 },
-  mouth: { width: 34, height: 8, borderRadius: 999 },
-  monogram: { position: 'absolute', bottom: 25, color: '#fef3c7', fontSize: 12, fontWeight: '900', letterSpacing: 2 },
-  mood: { position: 'absolute', bottom: 9, color: 'rgba(248,251,255,0.64)', fontSize: 9, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 1.1 },
+  wrap: { alignItems: 'center', justifyContent: 'center', paddingTop: 24, paddingBottom: 6 },
+  halo: { width: 126, height: 34, borderRadius: 999, borderWidth: 4, borderColor: colors.gold, opacity: 0.72, marginBottom: -6 },
+  wingsRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center' },
+  wing: { width: 82, height: 132, backgroundColor: 'rgba(255,255,255,0.18)', borderRadius: 80, borderWidth: 1, borderColor: 'rgba(255,255,255,0.34)' },
+  leftWing: { transform: [{ rotate: '-18deg' }], marginRight: -14 },
+  rightWing: { transform: [{ rotate: '18deg' }], marginLeft: -14 },
+  face: { width: 196, height: 196, borderRadius: 98, backgroundColor: '#bff7ff', alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: 'rgba(255,255,255,0.78)', shadowColor: colors.cyan, shadowOpacity: 0.4, shadowRadius: 28 },
+  antenna: { position: 'absolute', top: -45, width: 12, height: 48, backgroundColor: '#dbeafe', borderRadius: 999, alignItems: 'center' },
+  antennaDot: { width: 34, height: 34, borderRadius: 17, backgroundColor: colors.gold, marginTop: -18 },
+  eyesRow: { flexDirection: 'row', gap: 34, marginTop: 24 },
+  eye: { width: 44, height: 44, borderRadius: 22, backgroundColor: 'rgba(255,255,255,0.58)', alignItems: 'center', justifyContent: 'center' },
+  pupil: { width: 18, height: 18, borderRadius: 9, backgroundColor: '#172033' },
+  mouth: { width: 34, height: 12, borderRadius: 8, backgroundColor: colors.violet, marginTop: 24 },
+  mode: { color: '#0f172a', fontWeight: '800', fontSize: 10, opacity: 0.48, marginTop: 12, textTransform: 'uppercase', letterSpacing: 1.4 },
 });
