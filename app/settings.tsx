@@ -59,6 +59,19 @@ export default function SettingsScreen() {
         </View>
 
         <View style={styles.card}>
+          <Text style={styles.cardTitle}>Proactive reminders</Text>
+          <Text style={styles.copy}>When on, AGA checks local reminders while the app is open and speaks due reminders without a wake phrase.</Text>
+          <View style={styles.row}>
+            <Pressable style={[styles.chip, prefs.proactiveEnabled ? styles.chipActive : null]} onPress={() => savePatch({ proactiveEnabled: 1 })}>
+              <Text style={[styles.chipText, prefs.proactiveEnabled ? styles.chipTextActive : null]}>on</Text>
+            </Pressable>
+            <Pressable style={[styles.chip, !prefs.proactiveEnabled ? styles.chipActive : null]} onPress={() => savePatch({ proactiveEnabled: 0 })}>
+              <Text style={[styles.chipText, !prefs.proactiveEnabled ? styles.chipTextActive : null]}>off</Text>
+            </Pressable>
+          </View>
+        </View>
+
+        <View style={styles.card}>
           <Text style={styles.cardTitle}>Brain mode</Text>
           <View style={styles.row}>
             {(['offline', 'openai-direct', 'gemini-direct'] as const).map((mode) => (

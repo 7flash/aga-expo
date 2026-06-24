@@ -8,6 +8,8 @@ export type AssistantIntent =
   | 'agent'
   | 'system'
   | 'settings'
+  | 'memory'
+  | 'reminder'
   | 'unknown';
 
 export type AgaAction =
@@ -19,7 +21,6 @@ export type AgaAction =
   | { type: 'translate.start'; from?: string; to: string }
   | { type: 'translate.stop' }
   | { type: 'agent.spawn'; goal: string }
-  | { type: 'memory.save'; text: string }
   | { type: 'system.health' }
   | { type: 'system.help' }
   | { type: 'conversation.reset' }
@@ -28,7 +29,14 @@ export type AgaAction =
   | { type: 'voice.rate'; value: number }
   | { type: 'voice.pitch'; value: number }
   | { type: 'wake.set'; phrase: string }
-  | { type: 'media.status' };
+  | { type: 'media.status' }
+  | { type: 'memory.save'; text: string }
+  | { type: 'memory.recall'; query?: string }
+  | { type: 'memory.clear' }
+  | { type: 'reminder.create'; title: string; dueAt: string }
+  | { type: 'reminder.list' }
+  | { type: 'reminder.clear' }
+  | { type: 'proactive.toggle'; enabled: boolean };
 
 export type AgaTurn = {
   speech: string;
@@ -53,6 +61,45 @@ export function inferLocalActions(text: string): AgaTurn | null {
   const lower = clean.toLowerCase();
 
   if (!clean) return null;
+
+
+  if (/\b(turn|switch)\s+(proactive|reminders|nudges)\s+on\b/.test(lower)) {
+    return { speech: 'Proactive reminders are on.', actions: [{ type: 'proactive.toggle', enabled: true }], intent: 'settings' };
+  }
+
+  if (/\b(turn|switch)\s+(proactive|reminders|nudges)\s+off\b/.test(lower)) {
+    return { speech: 'Proactive reminders are off.', actions: [{ type: 'proactive.toggle', enabled: false }], intent: 'settings' };
+  }
+
+  const rememberMatch = clean.match(/^(?:please\s+)?remember\s+(?:that\s+)?(.+)/i);
+  if (rememberMatch) {
+    const text = rememberMatch[1].replace(/[.!?]+$/g, '').trim();
+    if (text.length > 2) {
+      return { speech: `I will remember that ${text}.`, actions: [{ type: 'memory.save', text }], intent: 'memory' };
+    }
+  }
+
+  if (/\b(clear|forget)\s+(everything\s+)?(?:you\s+)?remember\b/.test(lower)) {
+    return { speech: 'I cleared my local memory notes.', actions: [{ type: 'memory.clear' }], intent: 'memory' };
+  }
+
+  const recallMatch = clean.match(/\b(?:what do you remember|recall memory|search memory|what have you remembered)(?:\s+(?:about|for)\s+(.+))?/i);
+  if (recallMatch) {
+    return { speech: 'I will check my local memory.', actions: [{ type: 'memory.recall', query: recallMatch[1]?.trim() }], intent: 'memory' };
+  }
+
+  if (/\b(list|show|what are)\s+(my\s+)?reminders\b/.test(lower)) {
+    return { speech: 'I will check your reminders.', actions: [{ type: 'reminder.list' }], intent: 'reminder' };
+  }
+
+  if (/\b(cancel|clear|delete)\s+(all\s+)?reminders\b/.test(lower)) {
+    return { speech: 'I cancelled your pending reminders.', actions: [{ type: 'reminder.clear' }], intent: 'reminder' };
+  }
+
+  const reminder = parseReminderCommand(clean);
+  if (reminder) {
+    return { speech: `Okay. I will remind you to ${reminder.title} ${formatDueForSpeech(reminder.dueAt)}.`, actions: [{ type: 'reminder.create', title: reminder.title, dueAt: reminder.dueAt }], intent: 'reminder' };
+  }
 
 
   if (/\b(show|open)\s+(debug|diagnostics|logs|metrics)\b/.test(lower)) {
@@ -162,6 +209,67 @@ export function inferLocalActions(text: string): AgaTurn | null {
   }
 
   return null;
+}
+
+
+type ParsedReminder = { title: string; dueAt: string };
+
+function parseReminderCommand(text: string): ParsedReminder | null {
+  const clean = text.trim();
+  const starter = clean.match(/\bremind me to\s+(.+)/i) ?? clean.match(/\breminder to\s+(.+)/i);
+  if (!starter) return null;
+
+  const rest = starter[1].replace(/[.!?]+$/g, '').trim();
+  const inMatch = rest.match(/(.+?)\s+in\s+(\d{1,3})\s*(minute|minutes|min|hour|hours|hr|hrs)\b/i);
+  if (inMatch) {
+    const amount = Number(inMatch[2]);
+    const unit = inMatch[3].toLowerCase();
+    const due = new Date();
+    if (unit.startsWith('hour') || unit === 'hr' || unit === 'hrs') due.setHours(due.getHours() + amount);
+    else due.setMinutes(due.getMinutes() + amount);
+    return { title: inMatch[1].trim(), dueAt: due.toISOString() };
+  }
+
+  const tomorrowMatch = rest.match(/(.+?)\s+tomorrow(?:\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?)?\b/i);
+  if (tomorrowMatch) {
+    const due = new Date();
+    due.setDate(due.getDate() + 1);
+    const hourRaw = tomorrowMatch[2] ? Number(tomorrowMatch[2]) : 9;
+    const minute = tomorrowMatch[3] ? Number(tomorrowMatch[3]) : 0;
+    const meridian = tomorrowMatch[4]?.toLowerCase();
+    let hour = hourRaw;
+    if (meridian === 'pm' && hour < 12) hour += 12;
+    if (meridian === 'am' && hour === 12) hour = 0;
+    due.setHours(hour, minute, 0, 0);
+    return { title: tomorrowMatch[1].trim(), dueAt: due.toISOString() };
+  }
+
+  const atMatch = rest.match(/(.+?)\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/i);
+  if (atMatch) {
+    const due = new Date();
+    const hourRaw = Number(atMatch[2]);
+    const minute = atMatch[3] ? Number(atMatch[3]) : 0;
+    const meridian = atMatch[4]?.toLowerCase();
+    let hour = hourRaw;
+    if (meridian === 'pm' && hour < 12) hour += 12;
+    if (meridian === 'am' && hour === 12) hour = 0;
+    due.setHours(hour, minute, 0, 0);
+    if (due.getTime() < Date.now() - 30_000) due.setDate(due.getDate() + 1);
+    return { title: atMatch[1].trim(), dueAt: due.toISOString() };
+  }
+
+  return null;
+}
+
+function formatDueForSpeech(dueAt: string) {
+  const date = new Date(dueAt);
+  const now = Date.now();
+  const ms = date.getTime() - now;
+  if (ms > 0 && ms < 2 * 60 * 60 * 1000) {
+    const minutes = Math.max(1, Math.round(ms / 60_000));
+    return `in ${minutes} minute${minutes === 1 ? '' : 's'}`;
+  }
+  return `at ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
 }
 
 export function sanitizeTurn(input: unknown): AgaTurn | null {

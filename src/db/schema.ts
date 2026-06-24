@@ -27,6 +27,9 @@ export type UserPreferences = {
   geminiApiKey: string | null;
   openaiModel: string;
   geminiModel: string;
+  proactiveEnabled: number;
+  quietHoursStart: string | null;
+  quietHoursEnd: string | null;
   updatedAt: string;
 };
 
@@ -48,6 +51,37 @@ export type MediaSession = {
   ref: string | null;
   artworkUrl: string | null;
   state: 'playing' | 'paused' | 'stopped';
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type MemoryFact = {
+  id: number;
+  text: string;
+  source: 'voice' | 'assistant' | 'settings';
+  pinned: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ReminderStatus = 'pending' | 'fired' | 'cancelled';
+
+export type Reminder = {
+  id: number;
+  title: string;
+  dueAt: string;
+  status: ReminderStatus;
+  source: 'voice' | 'settings';
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ProactiveEvent = {
+  id: number;
+  kind: 'reminder' | 'routine' | 'agent' | 'system';
+  speech: string;
+  payload: string | null;
+  status: 'queued' | 'spoken' | 'dismissed';
   createdAt: string;
   updatedAt: string;
 };

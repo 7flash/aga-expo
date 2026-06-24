@@ -9,6 +9,7 @@ export async function askOpenAIDirect(input: {
   text: string;
   history: ChatMessage[];
   persona: Persona;
+  localContext?: string;
 }): Promise<AgaTurn> {
   const transcript = input.history
     .slice(-16)
@@ -23,8 +24,8 @@ export async function askOpenAIDirect(input: {
     },
     body: JSON.stringify({
       model: input.model,
-      instructions: `${input.persona.systemPrompt}\n\nReturn ONLY JSON in this shape: {"speech":"spoken response","intent":"chat|play_music|play_youtube|media_control|translate|persona|agent|system|settings|unknown","actions":[]}. Keep speech natural and short for voice. Use actions only when the user asked for a device/media/config action. Supported action examples: youtube.play, youtube.control, music.play, music.control, persona.set, translate.start, translate.stop, agent.spawn, memory.save, system.health, system.help, conversation.reset, diagnostics.show, diagnostics.hide, voice.rate, wake.set, media.status.`,
-      input: `${transcript}\nUser: ${input.text}\nAGA JSON:`,
+      instructions: `${input.persona.systemPrompt}\n\nReturn ONLY JSON in this shape: {"speech":"spoken response","intent":"chat|play_music|play_youtube|media_control|translate|persona|agent|system|settings|memory|reminder|unknown","actions":[]}. Keep speech natural and short for voice. Use actions only when the user asked for a device/media/config action. Supported action examples: youtube.play, youtube.control, music.play, music.control, persona.set, translate.start, translate.stop, agent.spawn, memory.save, memory.recall, reminder.create, reminder.list, reminder.clear, proactive.toggle, system.health, system.help, conversation.reset, diagnostics.show, diagnostics.hide, voice.rate, wake.set, media.status.`,
+      input: `${input.localContext ? `Local context:\n${input.localContext}\n\n` : ''}${transcript}\nUser: ${input.text}\nAGA JSON:`,
     }),
   });
 

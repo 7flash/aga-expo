@@ -7,11 +7,12 @@ import { StateRail } from './StateRail';
 import { TranscriptStrip } from './TranscriptStrip';
 import { NowPlaying } from './NowPlaying';
 import { DebugPanel } from './DebugPanel';
+import { MemoryReminderPanel } from './MemoryReminderPanel';
 import { migrate } from '../db/migrations';
 import { createConversation, getOrCreateConversation, listMessages, saveMessage } from '../db/conversations';
 import { getPreferences, updatePreferences } from '../db/preferences';
 import { logEvent, recentEvents } from '../db/eventLog';
-import type { ChatMessage, Conversation, EventLog, UserPreferences } from '../db/schema';
+import type { ChatMessage, Conversation, EventLog, MemoryFact, Reminder, UserPreferences } from '../db/schema';
 import type { AgaAction } from '../aga/actions';
 import type { AgaState } from '../aga/stateMachine';
 import { stateLabel, transition } from '../aga/stateMachine';
@@ -23,12 +24,18 @@ import { NativeSpeechLoop, isNativeSpeechAvailable } from '../voice/nativeSpeech
 import { speak, stopSpeaking } from '../voice/tts';
 import { EMPTY_NOW_PLAYING, type NowPlaying as NowPlayingState } from '../media/nowPlaying';
 import { saveMediaSession, updateLatestMediaState } from '../db/mediaSessions';
+import { clearMemoryFacts, listMemoryFacts, saveMemoryFact, searchMemoryFacts } from '../db/memory';
+import { cancelPendingReminders, createReminder, dueReminders, enqueueProactiveEvent, listPendingReminders, markProactiveEventSpoken, markReminderFired, nextQueuedProactiveEvent } from '../db/reminders';
 import { audioPreviewHtml, searchMusic } from '../media/music';
 import { searchYouTube, youtubeEmbedHtml } from '../media/youtube';
 import { translateWithGemini } from '../backend/geminiDirect';
 
 function webviewCommand(type: string, value?: number) {
   return JSON.stringify({ type, value });
+}
+
+function actionProducesOwnSpeech(action: AgaAction) {
+  return action.type === 'media.status' || action.type === 'memory.recall' || action.type === 'reminder.list' || action.type === 'system.health';
 }
 
 export function AgaScreen() {
@@ -45,11 +52,18 @@ export function AgaScreen() {
   const [voiceAvailable, setVoiceAvailable] = useState(false);
   const [debugVisible, setDebugVisible] = useState(false);
   const [recentLog, setRecentLog] = useState<EventLog[]>([]);
+  const [memories, setMemories] = useState<MemoryFact[]>([]);
+  const [reminders, setReminders] = useState<Reminder[]>([]);
 
   const speechLoopRef = useRef<NativeSpeechLoop | null>(null);
   const activeUntilRef = useRef(0);
   const webviewRef = useRef<WebViewType>(null);
   const processingRef = useRef(false);
+  const agaStateRef = useRef<AgaState>('idle');
+
+  useEffect(() => {
+    agaStateRef.current = agaState;
+  }, [agaState]);
 
   const persona = useMemo(() => {
     const base = getPersona(prefs?.activePersona);
@@ -68,6 +82,12 @@ export function AgaScreen() {
     setRecentLog(await recentEvents(24));
   }, []);
 
+  const refreshLocalContext = useCallback(async () => {
+    const [nextMemories, nextReminders] = await Promise.all([listMemoryFacts(8), listPendingReminders(8)]);
+    setMemories(nextMemories);
+    setReminders(nextReminders);
+  }, []);
+
   useEffect(() => {
     let mounted = true;
     void (async () => {
@@ -83,13 +103,14 @@ export function AgaScreen() {
         sendMachine({ type: 'boot' });
         await logEvent('system', 'apk_boot', { mode: 'single-apk' });
         await refreshLog();
+        await refreshLocalContext();
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Could not start AGA.');
         setAgaState('recovering');
       }
     })();
     return () => { mounted = false; };
-  }, [refreshLog, refreshMessages, sendMachine]);
+  }, [refreshLocalContext, refreshLog, refreshMessages, sendMachine]);
 
   const speakAga = useCallback((text: string) => {
     sendMachine({ type: 'reply' });
@@ -99,6 +120,46 @@ export function AgaScreen() {
   const postPlayer = useCallback((type: string, value?: number) => {
     webviewRef.current?.postMessage(webviewCommand(type, value));
   }, []);
+
+  const drainProactiveQueue = useCallback(async () => {
+    if (!prefs?.proactiveEnabled || processingRef.current) return;
+    const state = agaStateRef.current;
+    if (state === 'thinking' || state === 'speaking' || state === 'listening' || state === 'wake_confirmed') return;
+
+    const due = await dueReminders();
+    for (const reminder of due) {
+      await markReminderFired(reminder.id);
+      await enqueueProactiveEvent({
+        kind: 'reminder',
+        speech: `Reminder: ${reminder.title}.`,
+        payload: { reminderId: reminder.id, dueAt: reminder.dueAt },
+      });
+    }
+
+    const event = await nextQueuedProactiveEvent();
+    if (!event) {
+      if (due.length) await refreshLocalContext();
+      return;
+    }
+
+    await markProactiveEventSpoken(event.id);
+    await logEvent('proactive', event.kind, { eventId: event.id });
+    if (conversation) {
+      const assistantMessage = await saveMessage(conversation.id, 'assistant', event.speech);
+      setMessages((current) => [...current, assistantMessage].slice(-100));
+    }
+    speakAga(event.speech);
+    await Promise.all([refreshLocalContext(), refreshLog()]);
+  }, [conversation, prefs?.proactiveEnabled, refreshLocalContext, refreshLog, speakAga]);
+
+  useEffect(() => {
+    if (!ready) return;
+    const interval = setInterval(() => {
+      void drainProactiveQueue();
+    }, 15_000);
+    void drainProactiveQueue();
+    return () => clearInterval(interval);
+  }, [drainProactiveQueue, ready]);
 
   const applyAction = useCallback(async (action: AgaAction) => {
     await logEvent('action', action.type, action);
@@ -136,6 +197,50 @@ export function AgaScreen() {
         }
         return;
       }
+      case 'proactive.toggle': {
+        const nextPrefs = await updatePreferences({ proactiveEnabled: action.enabled ? 1 : 0 });
+        setPrefs(nextPrefs);
+        await refreshLocalContext();
+        return;
+      }
+      case 'memory.save': {
+        await saveMemoryFact(action.text, 'voice');
+        await refreshLocalContext();
+        return;
+      }
+      case 'memory.recall': {
+        const facts = await searchMemoryFacts(action.query ?? '', 6);
+        const reply = facts.length
+          ? `I remember: ${facts.map((fact) => fact.text).join('; ')}.`
+          : action.query
+            ? `I do not have a memory note about ${action.query} yet.`
+            : 'I do not have memory notes yet.';
+        speakAga(reply);
+        return;
+      }
+      case 'memory.clear': {
+        await clearMemoryFacts();
+        await refreshLocalContext();
+        return;
+      }
+      case 'reminder.create': {
+        await createReminder({ title: action.title, dueAt: action.dueAt, source: 'voice' });
+        await refreshLocalContext();
+        return;
+      }
+      case 'reminder.list': {
+        const pending = await listPendingReminders(8);
+        const reply = pending.length
+          ? `Pending reminders: ${pending.map((item) => `${item.title} at ${new Date(item.dueAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`).join('; ')}.`
+          : 'You do not have pending reminders.';
+        speakAga(reply);
+        return;
+      }
+      case 'reminder.clear': {
+        await cancelPendingReminders();
+        await refreshLocalContext();
+        return;
+      }
       case 'conversation.reset': {
         const next = await createConversation('AGA chat');
         setConversation(next);
@@ -143,7 +248,7 @@ export function AgaScreen() {
         return;
       }
       case 'system.health': {
-        const status = `Voice ${voiceAvailable ? 'ready' : 'not installed'}, SQLite ready, persona ${persona.label}.`;
+        const status = `Voice ${voiceAvailable ? 'ready' : 'not installed'}, SQLite ready, persona ${persona.label}, ${memories.length} memories, ${reminders.length} reminders.`;
         speakAga(status);
         return;
       }
@@ -233,12 +338,8 @@ export function AgaScreen() {
         await logEvent('agent', 'queued', { goal: action.goal });
         return;
       }
-      case 'memory.save': {
-        await logEvent('memory', 'save', { text: action.text });
-        return;
-      }
     }
-  }, [nowPlaying, persona.label, postPlayer, refreshLog, sendMachine, speakAga, voiceAvailable]);
+  }, [memories.length, nowPlaying, persona.label, postPlayer, refreshLocalContext, refreshLog, reminders.length, sendMachine, speakAga, voiceAvailable]);
 
   const handleCommand = useCallback(async (rawText: string) => {
     const text = rawText.trim();
@@ -282,12 +383,14 @@ export function AgaScreen() {
       const assistantMessage = await saveMessage(conversation.id, 'assistant', speechText);
       setMessages((current) => [...current.filter((item) => item.id !== assistantMessage.id), assistantMessage]);
 
+      let actionSpoke = false;
       for (const action of actions) {
+        if (actionProducesOwnSpeech(action)) actionSpoke = true;
         await applyAction(action);
       }
 
-      speakAga(speechText);
-      await refreshMessages(conversation.id);
+      if (!actionSpoke) speakAga(speechText);
+      await Promise.all([refreshMessages(conversation.id), refreshLocalContext()]);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'I hit a local glitch.';
       setError(message);
@@ -298,7 +401,7 @@ export function AgaScreen() {
     } finally {
       processingRef.current = false;
     }
-  }, [applyAction, conversation, messages, persona, prefs, refreshLog, refreshMessages, sendMachine, speakAga]);
+  }, [applyAction, conversation, messages, persona, prefs, refreshLocalContext, refreshLog, refreshMessages, sendMachine, speakAga]);
 
   const handleRecognizedText = useCallback((text: string) => {
     const wake = extractWakeCommand(text, [prefs?.wakePhrase ?? 'hey aga', 'okay aga', 'aga', 'angel']);
@@ -378,6 +481,7 @@ export function AgaScreen() {
         <AgaAvatar state={agaState} persona={persona} />
         <StateRail state={agaState} />
         <NowPlaying item={nowPlaying} />
+        <MemoryReminderPanel memories={memories} reminders={reminders} />
 
         {playerHtml && (
           <View style={styles.playerCard}>

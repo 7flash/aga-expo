@@ -27,7 +27,7 @@ export function DebugPanel({
       <Text style={styles.line}>state: {state}</Text>
       <Text style={styles.line}>voice: {voiceAvailable ? 'native module ready' : 'native STT missing'}</Text>
       <Text style={styles.line}>persona: {prefs?.activePersona ?? 'unknown'} · wake: {prefs?.wakePhrase ?? 'hey aga'}</Text>
-      <Text style={styles.line}>brain: {prefs?.backendMode ?? 'unknown'} · translate: {prefs?.translateTargetLang ?? 'off'}</Text>
+      <Text style={styles.line}>brain: {prefs?.backendMode ?? 'unknown'} · translate: {prefs?.translateTargetLang ?? 'off'} · proactive: {prefs?.proactiveEnabled ? 'on' : 'off'}</Text>
       <Text style={styles.line}>media: {nowPlaying.kind === null ? 'none' : `${nowPlaying.kind} · ${nowPlaying.state} · ${nowPlaying.title}`}</Text>
       <Text style={styles.subtitle}>Recent events</Text>
       {events.slice(0, 8).map((event) => (
