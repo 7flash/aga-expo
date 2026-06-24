@@ -6,11 +6,12 @@ import { AgaAvatar } from './AgaAvatar';
 import { StateRail } from './StateRail';
 import { TranscriptStrip } from './TranscriptStrip';
 import { NowPlaying } from './NowPlaying';
+import { DebugPanel } from './DebugPanel';
 import { migrate } from '../db/migrations';
 import { createConversation, getOrCreateConversation, listMessages, saveMessage } from '../db/conversations';
 import { getPreferences, updatePreferences } from '../db/preferences';
-import { logEvent } from '../db/eventLog';
-import type { ChatMessage, Conversation, UserPreferences } from '../db/schema';
+import { logEvent, recentEvents } from '../db/eventLog';
+import type { ChatMessage, Conversation, EventLog, UserPreferences } from '../db/schema';
 import type { AgaAction } from '../aga/actions';
 import type { AgaState } from '../aga/stateMachine';
 import { stateLabel, transition } from '../aga/stateMachine';
@@ -21,6 +22,7 @@ import { extendActiveWindow, extractWakeCommand, isActiveWindow } from '../voice
 import { NativeSpeechLoop, isNativeSpeechAvailable } from '../voice/nativeSpeech';
 import { speak, stopSpeaking } from '../voice/tts';
 import { EMPTY_NOW_PLAYING, type NowPlaying as NowPlayingState } from '../media/nowPlaying';
+import { saveMediaSession, updateLatestMediaState } from '../db/mediaSessions';
 import { audioPreviewHtml, searchMusic } from '../media/music';
 import { searchYouTube, youtubeEmbedHtml } from '../media/youtube';
 import { translateWithGemini } from '../backend/geminiDirect';
@@ -41,13 +43,18 @@ export function AgaScreen() {
   const [playerHtml, setPlayerHtml] = useState<string | null>(null);
   const [devText, setDevText] = useState('');
   const [voiceAvailable, setVoiceAvailable] = useState(false);
+  const [debugVisible, setDebugVisible] = useState(false);
+  const [recentLog, setRecentLog] = useState<EventLog[]>([]);
 
   const speechLoopRef = useRef<NativeSpeechLoop | null>(null);
   const activeUntilRef = useRef(0);
   const webviewRef = useRef<WebViewType>(null);
   const processingRef = useRef(false);
 
-  const persona = useMemo(() => getPersona(prefs?.activePersona), [prefs?.activePersona]);
+  const persona = useMemo(() => {
+    const base = getPersona(prefs?.activePersona);
+    return prefs ? { ...base, speechRate: prefs.speechRate ?? base.speechRate, pitch: prefs.pitch ?? base.pitch } : base;
+  }, [prefs]);
 
   const sendMachine = useCallback((event: Parameters<typeof transition>[1]) => {
     setAgaState((state) => transition(state, event));
@@ -55,6 +62,10 @@ export function AgaScreen() {
 
   const refreshMessages = useCallback(async (conversationId: number) => {
     setMessages(await listMessages(conversationId));
+  }, []);
+
+  const refreshLog = useCallback(async () => {
+    setRecentLog(await recentEvents(24));
   }, []);
 
   useEffect(() => {
@@ -71,13 +82,14 @@ export function AgaScreen() {
         setReady(true);
         sendMachine({ type: 'boot' });
         await logEvent('system', 'apk_boot', { mode: 'single-apk' });
+        await refreshLog();
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Could not start AGA.');
         setAgaState('recovering');
       }
     })();
     return () => { mounted = false; };
-  }, [refreshMessages, sendMachine]);
+  }, [refreshLog, refreshMessages, sendMachine]);
 
   const speakAga = useCallback((text: string) => {
     sendMachine({ type: 'reply' });
@@ -91,6 +103,39 @@ export function AgaScreen() {
   const applyAction = useCallback(async (action: AgaAction) => {
     await logEvent('action', action.type, action);
     switch (action.type) {
+
+      case 'diagnostics.show': {
+        setDebugVisible(true);
+        await refreshLog();
+        return;
+      }
+      case 'diagnostics.hide': {
+        setDebugVisible(false);
+        return;
+      }
+      case 'voice.rate': {
+        const nextPrefs = await updatePreferences({ speechRate: Math.max(0.5, Math.min(2, action.value)) });
+        setPrefs(nextPrefs);
+        return;
+      }
+      case 'voice.pitch': {
+        const nextPrefs = await updatePreferences({ pitch: Math.max(0.5, Math.min(2, action.value)) });
+        setPrefs(nextPrefs);
+        return;
+      }
+      case 'wake.set': {
+        const nextPrefs = await updatePreferences({ wakePhrase: action.phrase });
+        setPrefs(nextPrefs);
+        return;
+      }
+      case 'media.status': {
+        if (nowPlaying.kind === null || nowPlaying.state === 'stopped') {
+          speakAga('Nothing is playing right now.');
+        } else {
+          speakAga(`${nowPlaying.title} is ${nowPlaying.state}.`);
+        }
+        return;
+      }
       case 'conversation.reset': {
         const next = await createConversation('AGA chat');
         setConversation(next);
@@ -128,15 +173,18 @@ export function AgaScreen() {
         if (result.videoId) {
           setPlayerHtml(youtubeEmbedHtml(result.videoId));
         }
-        setNowPlaying({
-          kind: 'youtube',
+        const session = {
+          kind: 'youtube' as const,
           title: result.title,
           subtitle: 'YouTube',
           artworkUrl: result.thumbnailUrl,
           ref: result.videoId || result.url,
           query: action.query,
-          state: 'playing',
-        });
+          state: 'playing' as const,
+        };
+        setNowPlaying(session);
+        await saveMediaSession({ kind: 'youtube', title: result.title, query: action.query, ref: result.videoId || result.url, artworkUrl: result.thumbnailUrl, state: 'playing' });
+        await refreshLog();
         return;
       }
       case 'music.play': {
@@ -147,15 +195,18 @@ export function AgaScreen() {
           return;
         }
         setPlayerHtml(audioPreviewHtml(track.previewUrl));
-        setNowPlaying({
-          kind: 'music',
+        const session = {
+          kind: 'music' as const,
           title: track.title,
           subtitle: track.artist,
           artworkUrl: track.artworkUrl,
           ref: track.id,
           query: action.query,
-          state: 'playing',
-        });
+          state: 'playing' as const,
+        };
+        setNowPlaying(session);
+        await saveMediaSession({ kind: 'music', title: track.title, artist: track.artist, query: action.query, ref: track.id, artworkUrl: track.artworkUrl, state: 'playing' });
+        await refreshLog();
         return;
       }
       case 'youtube.control':
@@ -164,11 +215,14 @@ export function AgaScreen() {
         postPlayer(command, action.value);
         if (command === 'stop') {
           setNowPlaying((item) => ({ ...item, state: 'stopped' }));
+          await updateLatestMediaState(action.type === 'youtube.control' ? 'youtube' : 'music', 'stopped');
           sendMachine({ type: 'media_stop' });
         } else if (command === 'pause') {
           setNowPlaying((item) => ({ ...item, state: 'paused' }));
+          await updateLatestMediaState(action.type === 'youtube.control' ? 'youtube' : 'music', 'paused');
         } else if (command === 'resume') {
           setNowPlaying((item) => ({ ...item, state: 'playing' }));
+          await updateLatestMediaState(action.type === 'youtube.control' ? 'youtube' : 'music', 'playing');
           sendMachine({ type: 'media_start' });
         }
         return;
@@ -184,7 +238,7 @@ export function AgaScreen() {
         return;
       }
     }
-  }, [persona.label, postPlayer, sendMachine, speakAga, voiceAvailable]);
+  }, [nowPlaying, persona.label, postPlayer, refreshLog, sendMachine, speakAga, voiceAvailable]);
 
   const handleCommand = useCallback(async (rawText: string) => {
     const text = rawText.trim();
@@ -240,10 +294,11 @@ export function AgaScreen() {
       sendMachine({ type: 'recover' });
       speakAga(`I hit a glitch: ${message}`);
       await logEvent('error', 'command_failed', { message, text });
+      await refreshLog();
     } finally {
       processingRef.current = false;
     }
-  }, [applyAction, conversation, messages, persona, prefs, refreshMessages, sendMachine, speakAga]);
+  }, [applyAction, conversation, messages, persona, prefs, refreshLog, refreshMessages, sendMachine, speakAga]);
 
   const handleRecognizedText = useCallback((text: string) => {
     const wake = extractWakeCommand(text, [prefs?.wakePhrase ?? 'hey aga', 'okay aga', 'aga', 'angel']);
@@ -275,7 +330,7 @@ export function AgaScreen() {
       onFinal: handleRecognizedText,
       onError: (message) => {
         setError(message);
-        void logEvent('voice', 'speech_error', { message });
+        void logEvent('voice', 'speech_error', { message }).then(refreshLog);
       },
     });
     speechLoopRef.current = loop;
@@ -284,7 +339,7 @@ export function AgaScreen() {
       void loop.destroy();
       speechLoopRef.current = null;
     };
-  }, [handleRecognizedText, ready, sendMachine]);
+  }, [handleRecognizedText, ready, refreshLog, sendMachine]);
 
   const devSubmit = useCallback(() => {
     const text = devText.trim();
@@ -342,6 +397,15 @@ export function AgaScreen() {
         <TranscriptStrip messages={messages} interim={interim} />
 
         {!!error && <Text style={styles.error}>Recovery note: {error}</Text>}
+
+        <DebugPanel
+          visible={debugVisible}
+          state={agaState}
+          prefs={prefs}
+          voiceAvailable={voiceAvailable}
+          nowPlaying={nowPlaying}
+          events={recentLog}
+        />
 
         <View style={styles.devBox}>
           <Text style={styles.devLabel}>Dev voice fallback</Text>

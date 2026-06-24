@@ -1,4 +1,4 @@
-import { NativeEventEmitter, Platform } from 'react-native';
+import { Platform } from 'react-native';
 
 declare const require: any;
 
@@ -44,6 +44,9 @@ export class NativeSpeechLoop {
   private locale: string;
   private running = false;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastFinalText = '';
+  private lastFinalAt = 0;
+  private restartDelayMs = Platform.OS === 'android' ? 450 : 250;
 
   constructor(callbacks: SpeechCallbacks, locale = 'en-US') {
     this.callbacks = callbacks;
@@ -73,7 +76,15 @@ export class NativeSpeechLoop {
     };
     Voice.onSpeechResults = (event: any) => {
       const text = event?.value?.[0];
-      if (text) this.callbacks.onFinal?.(String(text));
+      if (text) {
+        const normalized = String(text).trim();
+        const now = Date.now();
+        if (normalized && (normalized !== this.lastFinalText || now - this.lastFinalAt > 1200)) {
+          this.lastFinalText = normalized;
+          this.lastFinalAt = now;
+          this.callbacks.onFinal?.(normalized);
+        }
+      }
       this.scheduleRestart();
     };
 
@@ -100,7 +111,7 @@ export class NativeSpeechLoop {
   private scheduleRestart() {
     if (!this.running) return;
     if (this.restartTimer) clearTimeout(this.restartTimer);
-    this.restartTimer = setTimeout(() => void this.safeStart(), Platform.OS === 'android' ? 450 : 250);
+    this.restartTimer = setTimeout(() => void this.safeStart(), this.restartDelayMs);
   }
 
   private async safeStart() {

@@ -7,6 +7,7 @@ export type AssistantIntent =
   | 'persona'
   | 'agent'
   | 'system'
+  | 'settings'
   | 'unknown';
 
 export type AgaAction =
@@ -21,7 +22,13 @@ export type AgaAction =
   | { type: 'memory.save'; text: string }
   | { type: 'system.health' }
   | { type: 'system.help' }
-  | { type: 'conversation.reset' };
+  | { type: 'conversation.reset' }
+  | { type: 'diagnostics.show' }
+  | { type: 'diagnostics.hide' }
+  | { type: 'voice.rate'; value: number }
+  | { type: 'voice.pitch'; value: number }
+  | { type: 'wake.set'; phrase: string }
+  | { type: 'media.status' };
 
 export type AgaTurn = {
   speech: string;
@@ -46,6 +53,39 @@ export function inferLocalActions(text: string): AgaTurn | null {
   const lower = clean.toLowerCase();
 
   if (!clean) return null;
+
+
+  if (/\b(show|open)\s+(debug|diagnostics|logs|metrics)\b/.test(lower)) {
+    return { speech: 'Diagnostics are on screen.', actions: [{ type: 'diagnostics.show' }], intent: 'system' };
+  }
+
+  if (/\b(hide|close)\s+(debug|diagnostics|logs|metrics)\b/.test(lower)) {
+    return { speech: 'Diagnostics are hidden.', actions: [{ type: 'diagnostics.hide' }], intent: 'system' };
+  }
+
+  const wakePhraseMatch = clean.match(/(?:change|set)\s+(?:your\s+)?wake\s+(?:word|phrase)\s+(?:to\s+)?(.+)/i);
+  if (wakePhraseMatch) {
+    const phrase = wakePhraseMatch[1].replace(/[.!?]+$/g, '').trim().toLowerCase();
+    if (phrase.length >= 3 && phrase.length <= 32) {
+      return { speech: `Okay. My wake phrase is now ${phrase}.`, actions: [{ type: 'wake.set', phrase }], intent: 'settings' };
+    }
+  }
+
+  if (/\b(what'?s playing|what is playing|now playing)\b/.test(lower)) {
+    return { speech: 'I will check what is playing.', actions: [{ type: 'media.status' }], intent: 'media_control' };
+  }
+
+  if (/\b(speak|talk)\s+(slower|more slowly)\b/.test(lower)) {
+    return { speech: 'I will speak more slowly.', actions: [{ type: 'voice.rate', value: 0.9 }], intent: 'settings' };
+  }
+
+  if (/\b(speak|talk)\s+(faster|quicker)\b/.test(lower)) {
+    return { speech: 'I will speak faster.', actions: [{ type: 'voice.rate', value: 1.12 }], intent: 'settings' };
+  }
+
+  if (/\b(speak|talk)\s+(normally|normal speed)\b/.test(lower)) {
+    return { speech: 'Back to normal speaking speed.', actions: [{ type: 'voice.rate', value: 1 }], intent: 'settings' };
+  }
 
   if (/\b(reset|new conversation|clear conversation)\b/.test(lower)) {
     return { speech: 'Fresh conversation started.', actions: [{ type: 'conversation.reset' }], intent: 'system' };
@@ -78,6 +118,21 @@ export function inferLocalActions(text: string): AgaTurn | null {
     const raw = personaMatch[1];
     const persona = raw === 'supportive' ? 'warm' : raw === 'wise' ? 'calm' : raw === 'playful' ? 'bright' : raw === 'energetic' ? 'coach' : raw;
     return { speech: `Okay, I will use my ${persona} voice.`, actions: [{ type: 'persona.set', persona }], intent: 'persona' };
+  }
+
+
+  const volumeMatch = lower.match(/\b(?:volume|set volume)\s+(?:to\s+)?(\d{1,3})\b/);
+  if (volumeMatch) {
+    const value = Math.max(0, Math.min(100, Number(volumeMatch[1])));
+    return { speech: `Volume ${value} percent.`, actions: [{ type: 'youtube.control', command: 'volume', value }, { type: 'music.control', command: 'volume', value }], intent: 'media_control' };
+  }
+
+  if (/\b(volume up|louder)\b/.test(lower)) {
+    return { speech: 'Turning it up.', actions: [{ type: 'youtube.control', command: 'volume', value: 75 }, { type: 'music.control', command: 'volume', value: 75 }], intent: 'media_control' };
+  }
+
+  if (/\b(volume down|quieter|softer)\b/.test(lower)) {
+    return { speech: 'Turning it down.', actions: [{ type: 'youtube.control', command: 'volume', value: 35 }, { type: 'music.control', command: 'volume', value: 35 }], intent: 'media_control' };
   }
 
   if (/\b(pause|hold on)\b/.test(lower)) {

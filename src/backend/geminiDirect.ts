@@ -10,7 +10,7 @@ export async function askGeminiDirect(input: {
   history: ChatMessage[];
   persona: Persona;
 }): Promise<AgaTurn> {
-  const prompt = `${input.persona.systemPrompt}\n\nReturn ONLY JSON in this shape: {"speech":"spoken response","intent":"chat|play_music|play_youtube|media_control|translate|persona|agent|system|unknown","actions":[]}. Keep speech natural and short for voice.\n\nHistory:\n${input.history
+  const prompt = `${input.persona.systemPrompt}\n\nReturn ONLY JSON in this shape: {"speech":"spoken response","intent":"chat|play_music|play_youtube|media_control|translate|persona|agent|system|settings|unknown","actions":[]}. Keep speech natural and short for voice. Supported action examples: youtube.play, youtube.control, music.play, music.control, persona.set, translate.start, translate.stop, agent.spawn, memory.save, system.health, system.help, conversation.reset, diagnostics.show, diagnostics.hide, voice.rate, wake.set, media.status.\n\nHistory:\n${input.history
     .slice(-16)
     .map((message) => `${message.role}: ${message.content}`)
     .join('\n')}\n\nUser: ${input.text}`;
