@@ -5,21 +5,27 @@
   "main": "expo-router/entry",
   "scripts": {
     "start": "expo start",
-    "android": "expo start --android",
-    "ios": "expo start --ios",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
     "web": "expo start --web",
     "check": "tsc --noEmit"
   },
   "dependencies": {
     "expo": "latest",
+    "expo-clipboard": "~56.0.4",
+    "expo-file-system": "~56.0.8",
+    "expo-notifications": "~56.0.18",
     "expo-router": "latest",
+    "expo-sharing": "~56.0.18",
+    "expo-speech": "~56.0.3",
+    "expo-sqlite": "~56.0.5",
     "react": "latest",
     "react-dom": "latest",
     "react-native": "latest",
     "react-native-safe-area-context": "latest",
     "react-native-screens": "latest",
     "react-native-web": "latest",
-    "react-native-webview": "latest"
+    "react-native-webview": "13.16.1"
   },
   "devDependencies": {
     "@types/react": "latest",

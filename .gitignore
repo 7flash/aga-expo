@@ -4,3 +4,4 @@ package-lock.json
 bun.lock
 .expo
 data
+android
