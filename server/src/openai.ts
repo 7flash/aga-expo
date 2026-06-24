@@ -1,4 +1,5 @@
-import type { Role } from './db';
+import { getAssistantPreferences, type Role } from './db';
+import { measured } from './measure';
 
 export type LlmMessage = {
   role: Role;
@@ -16,38 +17,61 @@ function getOutputText(data: any): string {
   return chunks?.join('\n').trim() || 'I could not generate a response.';
 }
 
+function styleHint(style: string) {
+  switch (style) {
+    case 'bright':
+      return 'sound upbeat, energetic, and reassuring';
+    case 'calm':
+      return 'sound calm, slow, and grounding';
+    case 'coach':
+      return 'sound like a practical coach with clear next steps';
+    case 'story':
+      return 'sound vivid, expressive, and friendly';
+    default:
+      return 'sound warm, feminine, friendly, and supportive';
+  }
+}
+
 export async function askAssistant(messages: LlmMessage[]) {
-  const apiKey = process.env.OPENAI_API_KEY;
-  const model = process.env.OPENAI_MODEL || 'gpt-5.5';
+  return measured('openai.askAssistant', async () => {
+    const apiKey = process.env.OPENAI_API_KEY;
+    const model = process.env.OPENAI_MODEL || 'gpt-5.5';
+    const preferences = getAssistantPreferences();
 
-  if (!apiKey) {
-    throw new Error('OPENAI_API_KEY is not set on the Geeksy TradJS server.');
-  }
+    if (!apiKey) {
+      throw new Error('OPENAI_API_KEY is not set on the AGA TradJS server.');
+    }
 
-  const transcript = messages
-    .slice(-16)
-    .map((message) => `${message.role === 'user' ? 'User' : 'Assistant'}: ${message.content}`)
-    .join('\n');
+    const transcript = messages
+      .slice(-18)
+      .map((message) => `${message.role === 'user' ? 'User' : preferences.assistantName}: ${message.content}`)
+      .join('\n');
 
-  const response = await fetch('https://api.openai.com/v1/responses', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model,
-      instructions:
-        'You are Geeksy, a stylish voice-first AI assistant represented by a futuristic avatar. Be helpful, concise, clear, and natural to hear spoken aloud. Prefer short paragraphs and avoid sounding robotic.',
-      input: `Continue this conversation. Keep the answer voice-friendly.\n\n${transcript}\nAssistant:`,
-    }),
+    const response = await fetch('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        instructions: [
+          `You are ${preferences.assistantName}, a feminine voice-first AI assistant and the friendly counterpart to Geeksy.`,
+          'The device is voice-only. Never rely on taps, keyboard shortcuts, or visual-only instructions unless there is no alternative.',
+          'Be concise enough to hear aloud, but keep context and continuity from the conversation history.',
+          'When the user asks for app/device actions, explain what you can do and what needs to be configured.',
+          `Voice style: ${styleHint(preferences.voiceStyle)}.`,
+        ].join('\n'),
+        input: `Continue this conversation. Keep the answer voice-friendly and reliable.\n\n${transcript}\n${preferences.assistantName}:`,
+      }),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data?.error?.message ?? 'OpenAI request failed.');
+    }
+
+    return getOutputText(data);
   });
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(data?.error?.message ?? 'OpenAI request failed.');
-  }
-
-  return getOutputText(data);
 }

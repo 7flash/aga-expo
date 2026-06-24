@@ -8,7 +8,7 @@ const iframeStyle: React.CSSProperties = {
   width: '100%',
   flex: 1,
   minHeight: 0,
-  backgroundColor: '#081225',
+  backgroundColor: '#050817',
 };
 
 export default function HomeScreen() {
@@ -16,11 +16,11 @@ export default function HomeScreen() {
     <SafeAreaView style={styles.container}>
       <View style={styles.notice}>
         <View style={styles.logoBubble}>
-          <Text style={styles.logoText}>✦</Text>
+          <Text style={styles.logoText}>A</Text>
         </View>
         <View style={styles.noticeCopy}>
-          <Text style={styles.noticeText}>Geeksy Angel</Text>
-          <Text style={styles.urlText}>v2 angel music · {assistantUrl}</Text>
+          <Text style={styles.noticeText}>AGA</Text>
+          <Text style={styles.urlText}>voice-only assistant · {assistantUrl}</Text>
         </View>
         <Pressable style={styles.openButton} onPress={() => Linking.openURL(assistantUrl)}>
           <Text style={styles.openButtonText}>Open direct</Text>
@@ -28,10 +28,10 @@ export default function HomeScreen() {
       </View>
       {React.createElement('iframe', {
         src: assistantUrl,
-        title: 'Geeksy AI Assistant',
+        title: 'AGA voice assistant',
         style: iframeStyle,
-        allow: 'clipboard-write; microphone; camera; autoplay',
-        sandbox: 'allow-scripts allow-same-origin allow-forms allow-popups',
+        allow: 'clipboard-write; microphone; camera; autoplay; fullscreen',
+        sandbox: 'allow-scripts allow-same-origin allow-forms allow-popups allow-presentation',
       })}
     </SafeAreaView>
   );
@@ -40,15 +40,15 @@ export default function HomeScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#081225',
+    backgroundColor: '#050817',
     minHeight: '100vh' as any,
   },
   notice: {
     paddingHorizontal: 14,
     paddingVertical: 10,
-    backgroundColor: '#140f2f',
+    backgroundColor: '#080a20',
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#34406f',
+    borderBottomColor: '#273569',
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
@@ -60,25 +60,25 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#fef3c7',
+    backgroundColor: '#f9a8d4',
   },
   logoText: {
     fontSize: 22,
     fontWeight: '900',
-    color: '#06111c',
+    color: '#07111f',
   },
   noticeCopy: {
     flex: 1,
     minWidth: 0,
   },
   noticeText: {
-    color: '#f8f7ff',
+    color: '#f8fbff',
     fontSize: 18,
     fontWeight: '900',
     letterSpacing: -0.4,
   },
   urlText: {
-    color: '#c8d4f2',
+    color: '#c9d7ff',
     fontSize: 11,
     marginTop: 2,
   },
@@ -88,10 +88,10 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     paddingHorizontal: 13,
     paddingVertical: 8,
-    backgroundColor: '#171d3e',
+    backgroundColor: '#111733',
   },
   openButtonText: {
-    color: '#f8f7ff',
+    color: '#f8fbff',
     fontSize: 12,
     fontWeight: '800',
   },

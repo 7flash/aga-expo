@@ -5,23 +5,23 @@ export default function HomePage() {
       <div class="ambient ambient-two" aria-hidden="true" />
       <div class="ambient ambient-three" aria-hidden="true" />
 
-      <section class="experience-shell" aria-label="Geeksy voice assistant experience">
+      <section class="experience-shell" aria-label="AGA voice assistant experience">
         <div class="brand-pill">
-          <span class="brand-mark">G</span>
+          <span class="brand-mark">A</span>
           <div class="brand-copy">
-            <strong>Geeksy</strong>
-            <span>Voice-first cute glass robot</span>
+            <strong>AGA</strong>
+            <span>Always-listening voice companion</span>
           </div>
         </div>
 
         <div class="top-status-pill" aria-hidden="true">
           <span class="status-dot" />
-          <span>Three.js robot · voice only input</span>
+          <span>Wake word: “AGA” · YouTube · music · live translate</span>
         </div>
 
         <div id="three-stage" class="three-stage">
           <div class="stage-fallback">
-            <p>Loading Geeksy…</p>
+            <p>Waking AGA…</p>
           </div>
         </div>
 

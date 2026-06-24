@@ -8,15 +8,15 @@ export default function HomeScreen() {
     <SafeAreaView style={styles.container}>
       <View style={styles.notice}>
         <View style={styles.logoBubble}>
-          <Text style={styles.logoText}>✦</Text>
+          <Text style={styles.logoText}>A</Text>
         </View>
         <View style={styles.noticeCopy}>
-          <Text style={styles.noticeText}>Geeksy Angel</Text>
-          <Text style={styles.urlText}>v2 angel music · {assistantUrl}</Text>
+          <Text style={styles.noticeText}>AGA</Text>
+          <Text style={styles.urlText}>voice-only assistant · {assistantUrl}</Text>
         </View>
         <View style={styles.onlinePill}>
           <View style={styles.onlineDot} />
-          <Text style={styles.onlineText}>Voice</Text>
+          <Text style={styles.onlineText}>Hands-free</Text>
         </View>
       </View>
       <WebView
@@ -24,10 +24,17 @@ export default function HomeScreen() {
         originWhitelist={['*']}
         javaScriptEnabled
         domStorageEnabled
-        pullToRefreshEnabled
+        pullToRefreshEnabled={false}
         startInLoadingState
         allowsInlineMediaPlayback
         mediaPlaybackRequiresUserAction={false}
+        javaScriptCanOpenWindowsAutomatically
+        setSupportMultipleWindows={false}
+        allowsFullscreenVideo
+        thirdPartyCookiesEnabled
+        sharedCookiesEnabled
+        mixedContentMode="compatibility"
+        androidLayerType="hardware"
         style={styles.webview}
       />
     </SafeAreaView>
@@ -37,14 +44,14 @@ export default function HomeScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#081225',
+    backgroundColor: '#050817',
   },
   notice: {
     paddingHorizontal: 14,
     paddingVertical: 10,
-    backgroundColor: '#140f2f',
+    backgroundColor: '#080a20',
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#34406f',
+    borderBottomColor: '#273569',
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
@@ -55,25 +62,25 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#fef3c7',
+    backgroundColor: '#f9a8d4',
   },
   logoText: {
     fontSize: 22,
     fontWeight: '900',
-    color: '#06111c',
+    color: '#07111f',
   },
   noticeCopy: {
     flex: 1,
     minWidth: 0,
   },
   noticeText: {
-    color: '#f8f7ff',
+    color: '#f8fbff',
     fontSize: 18,
     fontWeight: '900',
     letterSpacing: -0.4,
   },
   urlText: {
-    color: '#c8d4f2',
+    color: '#c9d7ff',
     fontSize: 11,
     marginTop: 2,
   },
@@ -84,7 +91,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 7,
     borderRadius: 999,
-    backgroundColor: '#171d3e',
+    backgroundColor: '#111733',
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: '#67e8f9',
   },
@@ -92,15 +99,15 @@ const styles = StyleSheet.create({
     width: 7,
     height: 7,
     borderRadius: 7,
-    backgroundColor: '#fef3c7',
+    backgroundColor: '#67e8f9',
   },
   onlineText: {
-    color: '#f8f7ff',
+    color: '#f8fbff',
     fontSize: 11,
     fontWeight: '800',
   },
   webview: {
     flex: 1,
-    backgroundColor: '#081225',
+    backgroundColor: '#050817',
   },
 });

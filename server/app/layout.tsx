@@ -4,8 +4,8 @@ export default function RootLayout({ children }: { children: any }) {
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
-        <meta name="theme-color" content="#1d1148" />
-        <title>Geeksy AI Assistant</title>
+        <meta name="theme-color" content="#080a20" />
+        <title>AGA — Voice Assistant</title>
       </head>
       <body>{children}</body>
     </html>

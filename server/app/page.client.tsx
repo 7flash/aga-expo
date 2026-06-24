@@ -2,6 +2,8 @@ import { render } from 'tradjs/client';
 import * as THREE from 'three';
 
 type Role = 'user' | 'assistant';
+type VoiceStyle = 'warm' | 'bright' | 'calm' | 'coach' | 'story';
+type AssistantMode = 'idle' | 'listening' | 'thinking' | 'speaking' | 'translate' | 'youtube' | 'music' | 'config';
 
 type ChatMessage = {
   id: string;
@@ -10,23 +12,90 @@ type ChatMessage = {
   createdAt: string;
 };
 
+type Preferences = {
+  assistantName: string;
+  wakeWord: string;
+  voiceStyle: VoiceStyle;
+  voiceName?: string | null;
+  autoListen: boolean;
+  spokenReplies: boolean;
+  translationTarget: string;
+  translationSource: string;
+  youtubeAutoplay: boolean;
+  musicAutoplay: boolean;
+};
+
+type Track = {
+  id: string;
+  title: string;
+  artist: string;
+  album?: string | null;
+  previewUrl: string;
+  artworkUrl?: string | null;
+  storeUrl?: string | null;
+};
+
+type Video = {
+  id: string;
+  title: string;
+  channel: string;
+  thumbnailUrl?: string | null;
+  url: string;
+};
+
+type TranslationLine = {
+  id: string;
+  original: string;
+  translated: string;
+  targetLanguage: string;
+  provider: string;
+};
+
 type ChatState = {
   conversationId: number | null;
   messages: ChatMessage[];
   transcript: string;
+  passiveHeard: string;
   loading: boolean;
   listening: boolean;
   speaking: boolean;
   speechSupported: boolean;
   error: string | null;
+  mode: AssistantMode;
+  awakeUntil: number;
+  translationActive: boolean;
+  translationLines: TranslationLine[];
+  preferences: Preferences;
+  musicQueue: Track[];
+  musicIndex: number;
+  musicQuery: string;
+  video: Video | null;
+  youtubeQuery: string;
+  youtubeConfigured: boolean;
+  availableVoices: string[];
 };
 
 declare global {
   interface Window {
     SpeechRecognition?: any;
     webkitSpeechRecognition?: any;
+    YT?: any;
+    onYouTubeIframeAPIReady?: () => void;
   }
 }
+
+const defaultPreferences: Preferences = {
+  assistantName: 'AGA',
+  wakeWord: 'aga',
+  voiceStyle: 'warm',
+  voiceName: null,
+  autoListen: true,
+  spokenReplies: true,
+  translationTarget: 'English',
+  translationSource: 'auto',
+  youtubeAutoplay: true,
+  musicAutoplay: true,
+};
 
 const state: ChatState = {
   conversationId: null,
@@ -36,42 +105,62 @@ const state: ChatState = {
       role: 'assistant',
       createdAt: new Date().toISOString(),
       content:
-        'I’m Geeksy. Tap the mic, speak naturally, and I’ll answer with the avatar front and center.',
+        'Hi, I’m AGA. Say “AGA” and then ask a question, play music, open a YouTube video, or start live translation.',
     },
   ],
   transcript: '',
+  passiveHeard: '',
   loading: false,
   listening: false,
   speaking: false,
   speechSupported: false,
   error: null,
+  mode: 'idle',
+  awakeUntil: 0,
+  translationActive: false,
+  translationLines: [],
+  preferences: { ...defaultPreferences },
+  musicQueue: [],
+  musicIndex: -1,
+  musicQuery: '',
+  video: null,
+  youtubeQuery: '',
+  youtubeConfigured: true,
+  availableVoices: [],
 };
 
 let root: HTMLElement | null = null;
 let recognition: any = null;
+let shouldKeepListening = true;
+let recognitionStarting = false;
+let lastHandledTranscript = '';
+let lastSpoken = '';
+let audioPlayer: HTMLAudioElement | null = null;
+let youtubeApiPromise: Promise<void> | null = null;
+let youtubePlayer: any = null;
+let pendingVideoId: string | null = null;
 
 let stageHost: HTMLElement | null = null;
 let stageRenderer: THREE.WebGLRenderer | null = null;
 let stageScene: THREE.Scene | null = null;
 let stageCamera: THREE.PerspectiveCamera | null = null;
 let avatarGroup: THREE.Group | null = null;
-let orbGroup: THREE.Group | null = null;
 let faceGroup: THREE.Group | null = null;
+let orbitGroup: THREE.Group | null = null;
 let eyeLeft: THREE.Mesh | null = null;
 let eyeRight: THREE.Mesh | null = null;
 let mouthMesh: THREE.Mesh | null = null;
-let antennaTipMesh: THREE.Mesh | null = null;
-let blushLeft: THREE.Mesh | null = null;
-let blushRight: THREE.Mesh | null = null;
-let hoverRing: THREE.Mesh | null = null;
+let heartMesh: THREE.Mesh | null = null;
+let haloMesh: THREE.Mesh | null = null;
 let resizeObserver: ResizeObserver | null = null;
 let animationFrame = 0;
 let clock: THREE.Clock | null = null;
 
-const spokenHints = [
-  '“Geeksy, plan my day”',
-  '“Summarize this idea”',
-  '“Help me debug my app”',
+const commandHints = [
+  '“AGA, play calm music”',
+  '“AGA, open YouTube lofi study”',
+  '“AGA, translate to Indonesian”',
+  '“AGA, change voice to calm”',
 ];
 
 function createMessage(role: Role, content: string): ChatMessage {
@@ -83,14 +172,187 @@ function createMessage(role: Role, content: string): ChatMessage {
   };
 }
 
+function createLine(original: string, translated: string, targetLanguage: string, provider: string): TranslationLine {
+  return {
+    id: `translation-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    original,
+    translated,
+    targetLanguage,
+    provider,
+  };
+}
+
 function formatTime(value: string) {
   return new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' }).format(
     new Date(value)
   );
 }
 
+function normalize(text: string) {
+  return text
+    .toLowerCase()
+    .replace(/[’']/g, '')
+    .replace(/[^a-z0-9\s]+/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function cleanCommand(text: string) {
+  return text.replace(/^[,\s:;.!-]+/, '').replace(/\s+/g, ' ').trim();
+}
+
 function getRecognitionCtor() {
   return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+}
+
+function getAudioPlayer() {
+  if (!audioPlayer) {
+    audioPlayer = new Audio();
+    audioPlayer.preload = 'auto';
+    audioPlayer.autoplay = false;
+    audioPlayer.onplay = () => {
+      state.mode = 'music';
+      update();
+    };
+    audioPlayer.onpause = () => update();
+    audioPlayer.onended = () => playNextTrack();
+  }
+
+  return audioPlayer;
+}
+
+function logVoiceEvent(kind: string, payload: unknown = {}) {
+  void fetch('/api/voice/event', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind, payload }),
+  }).catch(() => undefined);
+}
+
+async function loadPreferences() {
+  try {
+    const response = await fetch('/api/preferences');
+    const data = await response.json();
+    if (response.ok && data?.preferences) {
+      state.preferences = { ...defaultPreferences, ...data.preferences };
+      shouldKeepListening = state.preferences.autoListen;
+    }
+  } catch {
+    state.preferences = { ...defaultPreferences };
+  }
+
+  updateVoiceList();
+  update();
+}
+
+async function patchPreferences(partial: Partial<Preferences>) {
+  state.preferences = { ...state.preferences, ...partial };
+  shouldKeepListening = state.preferences.autoListen;
+  update();
+
+  try {
+    const response = await fetch('/api/preferences', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(partial),
+    });
+    const data = await response.json();
+    if (response.ok && data?.preferences) state.preferences = { ...defaultPreferences, ...data.preferences };
+  } catch {
+    // Keep local preferences if the server is briefly unavailable.
+  }
+
+  update();
+}
+
+function updateVoiceList() {
+  if (!('speechSynthesis' in window)) return;
+  state.availableVoices = window.speechSynthesis.getVoices().map((voice) => voice.name).slice(0, 12);
+}
+
+function chooseVoice() {
+  if (!('speechSynthesis' in window)) return null;
+
+  const voices = window.speechSynthesis.getVoices();
+  const preferred = state.preferences.voiceName?.toLowerCase();
+  if (preferred) {
+    const exact = voices.find((voice) => voice.name.toLowerCase() === preferred);
+    if (exact) return exact;
+  }
+
+  const style = state.preferences.voiceStyle;
+  const preferredTerms =
+    style === 'calm'
+      ? ['samantha', 'serena', 'female', 'google uk english female']
+      : style === 'bright'
+        ? ['zira', 'susan', 'female', 'google us english']
+        : ['female', 'samantha', 'zira', 'serena', 'google'];
+
+  return (
+    voices.find((voice) => preferredTerms.some((term) => voice.name.toLowerCase().includes(term))) ??
+    voices.find((voice) => /^en[-_]/i.test(voice.lang)) ??
+    voices[0] ??
+    null
+  );
+}
+
+function styleSpeech(utterance: SpeechSynthesisUtterance) {
+  switch (state.preferences.voiceStyle) {
+    case 'bright':
+      utterance.rate = 1.08;
+      utterance.pitch = 1.18;
+      break;
+    case 'calm':
+      utterance.rate = 0.9;
+      utterance.pitch = 0.96;
+      break;
+    case 'coach':
+      utterance.rate = 1;
+      utterance.pitch = 1.02;
+      break;
+    case 'story':
+      utterance.rate = 0.98;
+      utterance.pitch = 1.12;
+      break;
+    default:
+      utterance.rate = 0.98;
+      utterance.pitch = 1.08;
+  }
+}
+
+function speak(text: string, options: { interrupt?: boolean; force?: boolean } = {}) {
+  if (!state.preferences.spokenReplies && !options.force) return;
+  if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+
+  const spokenText = text.replace(/https?:\/\/\S+/g, '').trim();
+  if (!spokenText) return;
+
+  if (options.interrupt !== false) window.speechSynthesis.cancel();
+
+  const utterance = new SpeechSynthesisUtterance(spokenText);
+  const voice = chooseVoice();
+  if (voice) utterance.voice = voice;
+  styleSpeech(utterance);
+
+  utterance.onstart = () => {
+    lastSpoken = normalize(spokenText);
+    state.speaking = true;
+    state.mode = state.translationActive ? 'translate' : 'speaking';
+    update();
+  };
+
+  utterance.onend = () => {
+    state.speaking = false;
+    state.mode = state.translationActive ? 'translate' : 'idle';
+    update();
+  };
+
+  utterance.onerror = () => {
+    state.speaking = false;
+    update();
+  };
+
+  window.speechSynthesis.speak(utterance);
 }
 
 function ensureRecognition() {
@@ -101,81 +363,377 @@ function ensureRecognition() {
 
   recognition = new RecognitionCtor();
   recognition.lang = 'en-US';
-  recognition.continuous = false;
+  recognition.continuous = true;
   recognition.interimResults = true;
   recognition.maxAlternatives = 1;
 
   recognition.onstart = () => {
+    recognitionStarting = false;
     state.listening = true;
     state.error = null;
-    state.transcript = '';
+    if (state.mode === 'idle') state.mode = 'listening';
     update();
   };
 
   recognition.onresult = (event: any) => {
-    let transcript = '';
+    let interim = '';
+    let finalText = '';
 
     for (let index = event.resultIndex; index < event.results.length; index += 1) {
-      transcript += event.results[index][0]?.transcript ?? '';
+      const phrase = event.results[index][0]?.transcript ?? '';
+      if (event.results[index].isFinal) finalText += ` ${phrase}`;
+      else interim += ` ${phrase}`;
     }
 
-    state.transcript = transcript.trim();
+    state.transcript = interim.trim();
     update();
+
+    const cleanFinal = finalText.trim();
+    if (cleanFinal) void handleFinalTranscript(cleanFinal);
   };
 
   recognition.onerror = (event: any) => {
+    recognitionStarting = false;
     state.listening = false;
     state.error =
       event?.error === 'not-allowed'
-        ? 'Microphone permission was blocked.'
-        : 'Voice capture failed. Please try again.';
+        ? 'Microphone permission was blocked. AGA needs microphone access to work hands-free.'
+        : `Voice capture issue: ${event?.error ?? 'unknown'}.`;
     update();
   };
 
   recognition.onend = () => {
-    const transcript = state.transcript.trim();
+    recognitionStarting = false;
     state.listening = false;
     update();
 
-    if (transcript && !state.loading) {
-      void sendVoiceMessage(transcript);
+    if (shouldKeepListening) {
+      window.setTimeout(() => startListening(), 450);
     }
   };
 
   return recognition;
 }
 
-function speakReply(text: string) {
-  if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
-
-  window.speechSynthesis.cancel();
-
-  const utterance = new SpeechSynthesisUtterance(text);
-  utterance.rate = 1;
-  utterance.pitch = 1.06;
-  utterance.onstart = () => {
-    state.speaking = true;
+function startListening() {
+  const activeRecognition = ensureRecognition();
+  if (!activeRecognition) {
+    state.speechSupported = false;
+    state.error = 'This WebView/browser does not expose Speech Recognition. Open AGA in Chrome or add native speech capture in Expo.';
     update();
-  };
-  utterance.onend = () => {
-    state.speaking = false;
-    update();
-  };
-  utterance.onerror = () => {
-    state.speaking = false;
-    update();
-  };
+    return;
+  }
 
-  window.speechSynthesis.speak(utterance);
+  if (state.listening || recognitionStarting) return;
+
+  try {
+    recognitionStarting = true;
+    activeRecognition.start();
+  } catch {
+    recognitionStarting = false;
+  }
 }
 
-async function sendVoiceMessage(text: string) {
+function stopListening() {
+  shouldKeepListening = false;
+  recognitionStarting = false;
+  try {
+    recognition?.stop?.();
+  } catch {
+    // ignored
+  }
+  state.listening = false;
+  update();
+}
+
+function toggleListening() {
+  if (state.listening || recognitionStarting) {
+    stopListening();
+    void patchPreferences({ autoListen: false });
+  } else {
+    shouldKeepListening = true;
+    void patchPreferences({ autoListen: true });
+    startListening();
+  }
+}
+
+function wakePattern() {
+  const wake = normalize(state.preferences.wakeWord || 'aga').replace(/\s+/g, '\\s*');
+  return new RegExp(`(?:^|\\b)(?:hey\\s+|okay\\s+|ok\\s+)?(?:${wake}|a\\s*ga|agar)(?:\\b|$)`, 'i');
+}
+
+function commandAfterWake(text: string) {
+  const normalizedText = normalize(text);
+  const pattern = wakePattern();
+  const match = normalizedText.match(pattern);
+  if (!match) return null;
+  const index = match.index ?? 0;
+  const after = normalizedText.slice(index + match[0].length);
+  return cleanCommand(after || normalizedText.replace(pattern, ''));
+}
+
+function isEcho(text: string) {
+  const normalizedText = normalize(text);
+  if (!normalizedText || normalizedText.length < 4) return true;
+  if (normalizedText === lastHandledTranscript) return true;
+  if (state.speaking && lastSpoken && normalizedText.includes(lastSpoken.slice(0, 80))) return true;
+  return false;
+}
+
+async function handleFinalTranscript(text: string) {
+  const normalizedText = normalize(text);
+  if (isEcho(text)) return;
+
+  lastHandledTranscript = normalizedText;
+  state.passiveHeard = text;
+  logVoiceEvent('voice.final', { text, mode: state.mode, translationActive: state.translationActive });
+
+  if (state.translationActive && !/\b(stop|end|cancel)\s+(translation|translate|interpreter)\b/i.test(normalizedText)) {
+    await translateSegment(text);
+    return;
+  }
+
+  const commandFromWake = commandAfterWake(text);
+  const stillAwake = Date.now() < state.awakeUntil;
+
+  if (commandFromWake === null && !stillAwake) {
+    update();
+    return;
+  }
+
+  const command = cleanCommand(commandFromWake ?? text);
+  state.awakeUntil = Date.now() + 30_000;
+
+  if (!command) {
+    speak('I’m listening.', { force: true });
+    update();
+    return;
+  }
+
+  await runCommand(command);
+}
+
+function commandIncludes(command: string, words: string[]) {
+  const normalizedCommand = normalize(command);
+  return words.some((word) => normalizedCommand.includes(word));
+}
+
+function extractAfter(command: string, markers: string[]) {
+  const normalizedCommand = normalize(command);
+  for (const marker of markers) {
+    const index = normalizedCommand.indexOf(marker);
+    if (index >= 0) return cleanCommand(command.slice(index + marker.length));
+  }
+  return cleanCommand(command);
+}
+
+function parseLanguage(command: string) {
+  const match = normalize(command).match(/(?:translate|translation|interpreter|interpret)(?:\s+everything)?\s+(?:to|into|in)\s+([a-z\s]{2,40})/);
+  return match?.[1]?.replace(/\bmode\b/g, '').trim();
+}
+
+async function runCommand(command: string) {
+  const normalizedCommand = normalize(command);
+  state.transcript = command;
+  state.error = null;
+  update();
+
+  if (/\b(stop|end|cancel)\s+(translation|translate|interpreter)\b/.test(normalizedCommand)) {
+    state.translationActive = false;
+    state.mode = 'idle';
+    state.messages.push(createMessage('assistant', 'Translation mode is off.'));
+    speak('Translation mode is off.');
+    update();
+    return;
+  }
+
+  const language = parseLanguage(command);
+  if (language) {
+    state.translationActive = true;
+    state.mode = 'translate';
+    await patchPreferences({ translationTarget: language });
+    const reply = `Live translation is on. I’ll translate incoming speech to ${language}. Say “AGA, stop translation” to end it.`;
+    state.messages.push(createMessage('assistant', reply));
+    speak(reply);
+    update();
+    return;
+  }
+
+  if (/\b(stop listening|sleep|go quiet)\b/.test(normalizedCommand)) {
+    stopListening();
+    await patchPreferences({ autoListen: false });
+    speak('I’ll stop listening now. Use the microphone button to wake me again.', { force: true });
+    return;
+  }
+
+  if (/\b(start listening|keep listening|wake up)\b/.test(normalizedCommand)) {
+    shouldKeepListening = true;
+    await patchPreferences({ autoListen: true });
+    startListening();
+    speak('I’m listening continuously again.', { force: true });
+    return;
+  }
+
+  if (/\b(pause|resume|continue|stop|next|previous|volume|mute|unmute)\b/.test(normalizedCommand)) {
+    const handled = controlMedia(normalizedCommand);
+    if (handled) return;
+  }
+
+  if (/\b(open|watch|youtube|video)\b/.test(normalizedCommand) && !/\bmusic\b/.test(normalizedCommand)) {
+    const query = extractAfter(command, ['open youtube', 'youtube', 'watch', 'play video', 'open video', 'video']);
+    await playYouTube(query || command);
+    return;
+  }
+
+  if (/\b(play|start|open)\b/.test(normalizedCommand) && /\b(music|song|track|playlist|audio)\b/.test(normalizedCommand)) {
+    const query = extractAfter(command, ['play music', 'play song', 'play track', 'music', 'song', 'track', 'playlist']);
+    await playMusic(query || 'relaxing music');
+    return;
+  }
+
+  if (/\b(change|set|switch)\b/.test(normalizedCommand) && /\b(style|voice)\b/.test(normalizedCommand)) {
+    await configureVoice(command);
+    return;
+  }
+
+  if (/\bwake word\b/.test(normalizedCommand)) {
+    const match = command.match(/wake word\s+(?:to|is|as)\s+(.+)$/i);
+    const wakeWord = cleanCommand(match?.[1] ?? 'aga').split(' ').slice(0, 3).join(' ');
+    await patchPreferences({ wakeWord: wakeWord || 'aga' });
+    const reply = `Done. My wake word is now ${wakeWord || 'AGA'}.`;
+    state.messages.push(createMessage('assistant', reply));
+    speak(reply);
+    return;
+  }
+
+  if (/\b(call yourself|your name|rename yourself)\b/.test(normalizedCommand)) {
+    const match = command.match(/(?:call yourself|your name is|rename yourself)\s+(.+)$/i);
+    const assistantName = cleanCommand(match?.[1] ?? 'AGA').split(' ')[0] || 'AGA';
+    await patchPreferences({ assistantName });
+    const reply = `Done. You can call me ${assistantName}.`;
+    state.messages.push(createMessage('assistant', reply));
+    speak(reply);
+    return;
+  }
+
+  if (/\b(help|what can you do|commands)\b/.test(normalizedCommand)) {
+    const reply =
+      'You can say: AGA, ask a question; AGA, play music; AGA, open YouTube; AGA, translate to Indonesian; AGA, pause; AGA, next; or AGA, change voice to calm.';
+    state.messages.push(createMessage('assistant', reply));
+    speak(reply);
+    update();
+    return;
+  }
+
+  if (/\b(clear|reset)\b/.test(normalizedCommand) && /\b(chat|conversation|screen)\b/.test(normalizedCommand)) {
+    state.messages = [createMessage('assistant', 'Fresh conversation started. Say “AGA” whenever you need me.')];
+    state.conversationId = null;
+    speak('Fresh conversation started.');
+    update();
+    return;
+  }
+
+  await sendChatMessage(command);
+}
+
+async function configureVoice(command: string) {
+  const normalizedCommand = normalize(command);
+  let voiceStyle: VoiceStyle | null = null;
+
+  if (normalizedCommand.includes('calm') || normalizedCommand.includes('soft')) voiceStyle = 'calm';
+  if (normalizedCommand.includes('bright') || normalizedCommand.includes('happy')) voiceStyle = 'bright';
+  if (normalizedCommand.includes('coach') || normalizedCommand.includes('direct')) voiceStyle = 'coach';
+  if (normalizedCommand.includes('story') || normalizedCommand.includes('expressive')) voiceStyle = 'story';
+  if (normalizedCommand.includes('warm') || normalizedCommand.includes('supportive')) voiceStyle = 'warm';
+
+  const voices = 'speechSynthesis' in window ? window.speechSynthesis.getVoices() : [];
+  const namedVoice = voices.find((voice) => normalizedCommand.includes(normalize(voice.name)));
+
+  await patchPreferences({
+    ...(voiceStyle ? { voiceStyle } : {}),
+    ...(namedVoice ? { voiceName: namedVoice.name } : {}),
+  });
+
+  const reply = `Voice updated. Style is ${voiceStyle ?? state.preferences.voiceStyle}${namedVoice ? ` with ${namedVoice.name}` : ''}.`;
+  state.mode = 'config';
+  state.messages.push(createMessage('assistant', reply));
+  speak(reply, { force: true });
+}
+
+function controlMedia(command: string) {
+  const audio = audioPlayer;
+
+  if (command.includes('pause')) {
+    youtubePlayer?.pauseVideo?.();
+    audio?.pause();
+    speak('Paused.');
+    return true;
+  }
+
+  if (command.includes('resume') || command.includes('continue')) {
+    if (state.video && youtubePlayer?.playVideo) youtubePlayer.playVideo();
+    else if (audio) void audio.play().catch(() => undefined);
+    speak('Resuming.');
+    return true;
+  }
+
+  if (command.includes('stop')) {
+    youtubePlayer?.stopVideo?.();
+    audio?.pause();
+    if (audio) audio.currentTime = 0;
+    speak('Stopped.');
+    return true;
+  }
+
+  if (command.includes('next')) {
+    playNextTrack();
+    return true;
+  }
+
+  if (command.includes('previous') || command.includes('back')) {
+    playPreviousTrack();
+    return true;
+  }
+
+  if (command.includes('volume up')) {
+    if (youtubePlayer?.setVolume && youtubePlayer?.getVolume) youtubePlayer.setVolume(Math.min(100, youtubePlayer.getVolume() + 15));
+    if (audio) audio.volume = Math.min(1, audio.volume + 0.15);
+    speak('Volume up.');
+    return true;
+  }
+
+  if (command.includes('volume down')) {
+    if (youtubePlayer?.setVolume && youtubePlayer?.getVolume) youtubePlayer.setVolume(Math.max(0, youtubePlayer.getVolume() - 15));
+    if (audio) audio.volume = Math.max(0, audio.volume - 0.15);
+    speak('Volume down.');
+    return true;
+  }
+
+  if (command.includes('mute')) {
+    youtubePlayer?.mute?.();
+    if (audio) audio.muted = true;
+    speak('Muted.');
+    return true;
+  }
+
+  if (command.includes('unmute')) {
+    youtubePlayer?.unMute?.();
+    if (audio) audio.muted = false;
+    speak('Unmuted.');
+    return true;
+  }
+
+  return false;
+}
+
+async function sendChatMessage(text: string) {
   const cleanText = text.trim();
   if (!cleanText || state.loading) return;
 
   state.messages.push(createMessage('user', cleanText));
   state.transcript = '';
   state.loading = true;
+  state.mode = 'thinking';
   state.error = null;
   update();
 
@@ -192,65 +750,259 @@ async function sendVoiceMessage(text: string) {
     const data = await response.json();
 
     if (!response.ok) {
-      throw new Error(data?.error ?? 'Geeksy could not reply.');
+      throw new Error(data?.error ?? 'AGA could not reply.');
     }
 
     state.conversationId = data.conversationId;
     state.messages.push(createMessage('assistant', data.reply));
-    speakReply(data.reply);
+    speak(data.reply);
   } catch (error) {
     state.error = error instanceof Error ? error.message : 'Something went wrong.';
-    state.messages.push(createMessage('assistant', `Sorry, I hit a glitch: ${state.error}`));
+    const fallback = `Sorry, I hit a glitch: ${state.error}`;
+    state.messages.push(createMessage('assistant', fallback));
+    speak(fallback);
+  } finally {
+    state.loading = false;
+    state.mode = state.translationActive ? 'translate' : 'idle';
+    update();
+  }
+}
+
+async function translateSegment(text: string) {
+  const cleanText = cleanCommand(text);
+  if (!cleanText || state.loading) return;
+
+  state.loading = true;
+  state.mode = 'translate';
+  update();
+
+  try {
+    const response = await fetch('/api/translate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: cleanText,
+        targetLanguage: state.preferences.translationTarget,
+        sourceLanguage: state.preferences.translationSource,
+        style: 'natural',
+      }),
+    });
+    const data = await response.json();
+
+    if (!response.ok) throw new Error(data?.error ?? 'Translation failed.');
+
+    state.translationLines.push(
+      createLine(cleanText, data.translated, data.targetLanguage, data.provider ?? 'unknown')
+    );
+    state.translationLines = state.translationLines.slice(-6);
+    speak(data.translated, { interrupt: false, force: true });
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : 'Translation failed.';
+    speak('Translation failed. I will keep listening.');
+  } finally {
+    state.loading = false;
+    state.mode = 'translate';
+    update();
+  }
+}
+
+async function playMusic(query: string) {
+  state.mode = 'music';
+  state.loading = true;
+  state.musicQuery = query;
+  state.error = null;
+  update();
+
+  try {
+    const response = await fetch('/api/music', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, limit: 8 }),
+    });
+    const data = await response.json();
+
+    if (!response.ok) throw new Error(data?.error ?? 'Music search failed.');
+
+    state.musicQueue = data.tracks ?? [];
+    state.musicIndex = state.musicQueue.length ? 0 : -1;
+
+    if (!state.musicQueue.length) {
+      const reply = `I could not find a playable preview for ${query}.`;
+      state.messages.push(createMessage('assistant', reply));
+      speak(reply);
+      return;
+    }
+
+    await playCurrentTrack();
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : 'Music failed.';
+    speak(`I could not play music: ${state.error}`);
   } finally {
     state.loading = false;
     update();
   }
 }
 
-function toggleVoiceInput() {
-  if (state.loading) return;
+async function playCurrentTrack() {
+  const track = state.musicQueue[state.musicIndex];
+  if (!track) return;
 
-  const activeRecognition = ensureRecognition();
-  if (!activeRecognition) {
-    state.error = 'This browser does not support voice input. Try Chrome or Safari.';
-    update();
-    return;
-  }
+  const audio = getAudioPlayer();
+  audio.src = track.previewUrl;
+  audio.currentTime = 0;
 
-  if (state.listening) {
-    activeRecognition.stop();
-    return;
-  }
-
-  state.error = null;
-  state.transcript = '';
+  const reply = `Playing ${track.title} by ${track.artist}.`;
+  state.messages.push(createMessage('assistant', reply));
   update();
-  activeRecognition.start();
+
+  if (state.preferences.musicAutoplay) {
+    try {
+      await audio.play();
+    } catch {
+      state.error = 'Autoplay was blocked. Say AGA, resume after the first user interaction.';
+    }
+  }
+
+  speak(reply);
 }
 
-function clearTranscript() {
-  state.transcript = '';
+function playNextTrack() {
+  if (!state.musicQueue.length) {
+    speak('There is no music queue yet.');
+    return;
+  }
+  state.musicIndex = (state.musicIndex + 1) % state.musicQueue.length;
+  void playCurrentTrack();
+}
+
+function playPreviousTrack() {
+  if (!state.musicQueue.length) {
+    speak('There is no music queue yet.');
+    return;
+  }
+  state.musicIndex = (state.musicIndex - 1 + state.musicQueue.length) % state.musicQueue.length;
+  void playCurrentTrack();
+}
+
+async function loadYouTubeApi() {
+  if (window.YT?.Player) return;
+
+  if (!youtubeApiPromise) {
+    youtubeApiPromise = new Promise<void>((resolve) => {
+      window.onYouTubeIframeAPIReady = () => resolve();
+      const tag = document.createElement('script');
+      tag.src = 'https://www.youtube.com/iframe_api';
+      tag.async = true;
+      document.head.appendChild(tag);
+    });
+  }
+
+  await youtubeApiPromise;
+}
+
+async function syncYouTubePlayer() {
+  const videoId = state.video?.id ?? pendingVideoId;
+  const host = document.getElementById('youtube-player');
+  if (!host || !videoId) return;
+
+  await loadYouTubeApi();
+
+  if (youtubePlayer?.loadVideoById) {
+    if (pendingVideoId) {
+      youtubePlayer.loadVideoById(videoId);
+      pendingVideoId = null;
+    }
+    return;
+  }
+
+  youtubePlayer = new window.YT.Player('youtube-player', {
+    videoId,
+    playerVars: {
+      autoplay: state.preferences.youtubeAutoplay ? 1 : 0,
+      controls: 1,
+      playsinline: 1,
+      rel: 0,
+      modestbranding: 1,
+    },
+    events: {
+      onReady: (event: any) => {
+        pendingVideoId = null;
+        if (state.preferences.youtubeAutoplay) event.target.playVideo();
+      },
+      onStateChange: () => update(),
+    },
+  });
+}
+
+async function playYouTube(query: string) {
+  state.mode = 'youtube';
+  state.loading = true;
+  state.youtubeQuery = query;
   state.error = null;
   update();
+
+  try {
+    const response = await fetch('/api/youtube', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, limit: 4 }),
+    });
+    const data = await response.json();
+
+    if (!response.ok) throw new Error(data?.error ?? 'YouTube search failed.');
+
+    state.youtubeConfigured = Boolean(data.configured);
+    const firstVideo = data.videos?.[0] as Video | undefined;
+
+    if (!firstVideo) {
+      const reply = data.error ?? 'YouTube search is not configured yet. Add YOUTUBE_API_KEY to let AGA choose and control videos by voice.';
+      state.messages.push(createMessage('assistant', reply));
+      speak(reply);
+      return;
+    }
+
+    state.video = firstVideo;
+    pendingVideoId = firstVideo.id;
+    state.messages.push(createMessage('assistant', `Opening ${firstVideo.title} from ${firstVideo.channel}.`));
+    update();
+    await syncYouTubePlayer();
+    speak(`Opening ${firstVideo.title}.`);
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : 'YouTube failed.';
+    speak(`I could not open YouTube: ${state.error}`);
+  } finally {
+    state.loading = false;
+    update();
+  }
+}
+
+function statusLabel() {
+  if (state.translationActive) return 'Translating';
+  if (state.loading) return 'Thinking';
+  if (state.speaking) return 'Speaking';
+  if (state.listening) return Date.now() < state.awakeUntil ? 'Awake' : 'Listening';
+  return 'Sleeping';
 }
 
 function scrollMessagesToBottom() {
-  requestAnimationFrame(() => {
-    const list = document.querySelector('.message-strip');
-    if (list) list.scrollTop = list.scrollHeight;
-  });
+  const list = document.querySelector('.message-strip');
+  if (list) list.scrollTop = list.scrollHeight;
 }
 
 function update() {
   if (!root) return;
   render(<AssistantOverlay />, root);
-  scrollMessagesToBottom();
+  requestAnimationFrame(() => {
+    scrollMessagesToBottom();
+    initThreeStage();
+    void syncYouTubePlayer();
+  });
 }
 
 function MiniAvatar({ role }: { role: Role }) {
   return (
     <div class={`mini-avatar ${role === 'assistant' ? 'assistant-avatar' : 'user-avatar'}`} aria-hidden="true">
-      <span>{role === 'assistant' ? 'G' : 'You'}</span>
+      <span>{role === 'assistant' ? state.preferences.assistantName.slice(0, 1).toUpperCase() : 'You'}</span>
     </div>
   );
 }
@@ -260,40 +1012,105 @@ function TypingBubble() {
     <div class="message-row assistant typing-row">
       <MiniAvatar role="assistant" />
       <div class="message-stack">
-        <div class="bubble typing-bubble" aria-label="Geeksy is thinking">
+        <div class="bubble typing-bubble" aria-label="AGA is thinking">
           <span class="typing-dot" />
           <span class="typing-dot" />
           <span class="typing-dot" />
         </div>
-        <span class="message-meta">Geeksy is thinking…</span>
+        <span class="message-meta">AGA is working…</span>
       </div>
     </div>
   );
 }
 
-function AssistantOverlay() {
-  const visibleMessages = state.messages.slice(-4);
-  const statusLabel = state.listening
-    ? 'Listening'
-    : state.loading
-      ? 'Thinking'
-      : state.speaking
-        ? 'Talking'
-        : 'Ready';
+function MediaPanel() {
+  const track = state.musicQueue[state.musicIndex];
 
-  return (
-    <section class="dock" aria-label="Geeksy voice chat dock">
-      <div class="dock-header">
-        <div>
-          <p class="dock-kicker">Voice-first assistant</p>
-          <h2>Speak to Geeksy</h2>
-          <p class="dock-copy">A glassmorphic interface with just a few recent messages and a live 3D avatar.</p>
+  if (state.translationActive || state.translationLines.length) {
+    const last = state.translationLines[state.translationLines.length - 1];
+    return (
+      <div class="media-panel translate-panel">
+        <div class="media-copy">
+          <span class="panel-label">Live translation</span>
+          <strong>Target: {state.preferences.translationTarget}</strong>
+          <p>{last ? last.translated : 'Listening for speech to translate while voice output continues.'}</p>
         </div>
-        <div class={`status-badge ${state.listening ? 'is-live' : ''}`}>
-          <span class="status-badge-dot" />
-          <span>{statusLabel}</span>
+        <div class="translation-log">
+          {state.translationLines.slice(-3).map((line) => (
+            <div class="translation-line" key={line.id}>
+              <span>{line.original}</span>
+              <strong>{line.translated}</strong>
+            </div>
+          ))}
         </div>
       </div>
+    );
+  }
+
+  if (state.mode === 'youtube' || state.video || !state.youtubeConfigured) {
+    return (
+      <div class="media-panel youtube-panel">
+        <div class="media-copy">
+          <span class="panel-label">YouTube</span>
+          <strong>{state.video?.title ?? 'Voice-controlled video player'}</strong>
+          <p>{state.video ? state.video.channel : 'Set YOUTUBE_API_KEY for reliable top-result playback and IFrame controls.'}</p>
+        </div>
+        <div class="youtube-frame-shell">
+          {state.video ? <div id="youtube-player" /> : <div class="empty-player">Waiting for a configured video search…</div>}
+        </div>
+      </div>
+    );
+  }
+
+  if (state.mode === 'music' || track) {
+    return (
+      <div class="media-panel music-panel">
+        <div class="album-art">
+          {track?.artworkUrl ? <img src={track.artworkUrl} alt="Album artwork" /> : <span>♪</span>}
+        </div>
+        <div class="media-copy">
+          <span class="panel-label">Music previews</span>
+          <strong>{track ? track.title : 'No track selected'}</strong>
+          <p>{track ? `${track.artist}${track.album ? ` · ${track.album}` : ''}` : 'Say “AGA, play music ...”'}</p>
+        </div>
+        <div class="media-commands">pause · resume · next · volume up</div>
+      </div>
+    );
+  }
+
+  return (
+    <div class="media-panel ready-panel">
+      <div class="media-copy">
+        <span class="panel-label">Voice-first reliability</span>
+        <strong>Say “{state.preferences.wakeWord.toUpperCase()}” before commands</strong>
+        <p>After the wake word, AGA stays awake briefly so follow-up questions feel natural.</p>
+      </div>
+      <div class="media-commands">ask · YouTube · music · translate · configure</div>
+    </div>
+  );
+}
+
+function AssistantOverlay() {
+  const visibleMessages = state.messages.slice(-5);
+  const awake = Date.now() < state.awakeUntil;
+
+  return (
+    <section class="dock" aria-label="AGA voice chat dock">
+      <div class="dock-header">
+        <div>
+          <p class="dock-kicker">Voice-only assistant</p>
+          <h2>{state.preferences.assistantName} is {statusLabel().toLowerCase()}</h2>
+          <p class="dock-copy">
+            Always-listening wake word, voice media controls, SQLite history, configurable personality, and translation mode.
+          </p>
+        </div>
+        <div class={`status-badge ${state.listening ? 'is-live' : ''} ${awake ? 'is-awake' : ''}`}>
+          <span class="status-badge-dot" />
+          <span>{statusLabel()}</span>
+        </div>
+      </div>
+
+      <MediaPanel />
 
       <div class="message-strip" aria-live="polite">
         {visibleMessages.map((message) => (
@@ -302,7 +1119,7 @@ function AssistantOverlay() {
             <div class="message-stack">
               <div class="bubble">{message.content}</div>
               <span class="message-meta">
-                {message.role === 'assistant' ? 'Geeksy' : 'You'} · {formatTime(message.createdAt)}
+                {message.role === 'assistant' ? state.preferences.assistantName : 'You'} · {formatTime(message.createdAt)}
               </span>
             </div>
           </div>
@@ -316,9 +1133,8 @@ function AssistantOverlay() {
         <button
           type="button"
           class={`mic-button ${state.listening ? 'listening' : ''}`}
-          aria-label={state.listening ? 'Stop listening' : 'Start voice input'}
-          onClick={toggleVoiceInput}
-          disabled={state.loading}
+          aria-label={state.listening ? 'Stop listening' : 'Start listening'}
+          onClick={toggleListening}
         >
           <span class="mic-ripple ripple-one" aria-hidden="true" />
           <span class="mic-ripple ripple-two" aria-hidden="true" />
@@ -327,30 +1143,33 @@ function AssistantOverlay() {
 
         <div class="transcript-card">
           <span class="transcript-label">
-            {state.listening
-              ? 'Listening now…'
-              : state.transcript
-                ? 'Voice captured'
+            {state.translationActive
+              ? `Translating to ${state.preferences.translationTarget}`
+              : state.listening
+                ? `Wake word: ${state.preferences.wakeWord.toUpperCase()}`
                 : state.speechSupported
-                  ? 'Voice input only'
-                  : 'Microphone unsupported'}
+                  ? 'Tap once or say commands after listening starts'
+                  : 'Speech recognition unavailable'}
           </span>
           <strong>
             {state.transcript ||
+              state.passiveHeard ||
               (state.speechSupported
-                ? 'Tap the mic and speak naturally.'
-                : 'Open Geeksy in a browser with Speech Recognition support.')}
+                ? 'Say “AGA, help” for commands.'
+                : 'Use Chrome/WebView speech support or wire native Expo speech recognition.')}
           </strong>
           <div class="hint-row" aria-hidden="true">
-            {spokenHints.map((hint) => (
+            {commandHints.map((hint) => (
               <span key={hint}>{hint}</span>
             ))}
           </div>
         </div>
 
-        <button type="button" class="ghost-button" onClick={clearTranscript} disabled={!state.transcript && !state.error}>
-          Clear
-        </button>
+        <div class="config-card">
+          <span>Style</span>
+          <strong>{state.preferences.voiceStyle}</strong>
+          <small>{state.preferences.spokenReplies ? 'spoken replies on' : 'spoken replies off'}</small>
+        </div>
       </div>
     </section>
   );
@@ -371,15 +1190,13 @@ function destroyStage() {
   stageScene = null;
   stageCamera = null;
   avatarGroup = null;
-  orbGroup = null;
   faceGroup = null;
+  orbitGroup = null;
   eyeLeft = null;
   eyeRight = null;
   mouthMesh = null;
-  antennaTipMesh = null;
-  blushLeft = null;
-  blushRight = null;
-  hoverRing = null;
+  heartMesh = null;
+  haloMesh = null;
   clock = null;
 }
 
@@ -399,50 +1216,42 @@ function animateStage() {
   if (!stageRenderer || !stageScene || !stageCamera || !avatarGroup || !clock) return;
 
   const t = clock.getElapsedTime();
-  const isActive = state.listening || state.loading || state.speaking;
-  const talkWave = state.speaking || state.loading ? Math.abs(Math.sin(t * 10.5)) : 0;
+  const active = state.listening || state.loading || state.speaking || state.translationActive;
+  const talkWave = state.speaking || state.loading ? Math.abs(Math.sin(t * 12)) : 0;
 
-  avatarGroup.rotation.y = Math.sin(t * 0.55) * 0.42;
-  avatarGroup.rotation.z = Math.sin(t * 0.75) * 0.035;
-  avatarGroup.position.y = Math.sin(t * 1.05) * 0.18;
-  avatarGroup.scale.setScalar(isActive ? 1 + Math.sin(t * 4.5) * 0.012 : 1);
+  avatarGroup.rotation.y = Math.sin(t * 0.5) * 0.36;
+  avatarGroup.rotation.z = Math.sin(t * 0.7) * 0.035;
+  avatarGroup.position.y = Math.sin(t * 1.05) * 0.16;
+  avatarGroup.scale.setScalar(active ? 1 + Math.sin(t * 4.8) * 0.014 : 1);
 
   if (faceGroup) {
     faceGroup.rotation.y = Math.sin(t * 0.9) * 0.055;
-    faceGroup.position.y = 0.26 + Math.sin(t * 1.4) * 0.025;
+    faceGroup.position.y = 0.25 + Math.sin(t * 1.4) * 0.025;
   }
 
-  if (orbGroup) {
-    orbGroup.rotation.y = -t * (state.listening ? 1.18 : 0.58);
-    orbGroup.rotation.x = Math.sin(t * 0.65) * 0.24;
-    orbGroup.scale.setScalar(state.listening ? 1.08 + Math.sin(t * 5) * 0.03 : 1);
-  }
-
-  const blink = Math.sin(t * 1.3) > 0.985 ? 0.12 : 1;
-  const eyeScale = state.listening ? 1.13 : state.speaking ? 1.05 : 1;
-  if (eyeLeft) eyeLeft.scale.set(eyeScale, blink * eyeScale, eyeScale);
-  if (eyeRight) eyeRight.scale.set(eyeScale, blink * eyeScale, eyeScale);
+  const blink = Math.sin(t * 1.2) > 0.982 ? 0.12 : 1;
+  if (eyeLeft) eyeLeft.scale.set(1, blink, 1);
+  if (eyeRight) eyeRight.scale.set(1, blink, 1);
 
   if (mouthMesh) {
-    mouthMesh.scale.x = state.speaking || state.loading ? 1 + talkWave * 0.9 : 1;
-    mouthMesh.scale.y = state.speaking || state.loading ? 0.55 + talkWave * 1.7 : state.listening ? 0.42 : 0.22;
+    mouthMesh.scale.x = state.speaking || state.loading ? 1 + talkWave * 1.25 : 1;
+    mouthMesh.scale.y = state.speaking || state.loading ? 0.45 + talkWave * 1.9 : state.listening ? 0.34 : 0.2;
   }
 
-  if (antennaTipMesh) {
-    const material = antennaTipMesh.material as THREE.MeshStandardMaterial;
-    material.emissiveIntensity = state.listening ? 2.1 + Math.sin(t * 9) * 0.4 : state.speaking ? 1.8 + talkWave * 0.8 : 1.15;
-    antennaTipMesh.scale.setScalar(state.listening ? 1.15 + Math.sin(t * 8) * 0.08 : 1);
+  if (heartMesh) {
+    const material = heartMesh.material as THREE.MeshStandardMaterial;
+    material.emissiveIntensity = state.translationActive ? 1.6 + Math.sin(t * 7) * 0.35 : state.listening ? 1.35 : 0.85;
+    heartMesh.scale.setScalar(1 + Math.sin(t * 3.2) * 0.055);
   }
 
-  if (blushLeft && blushRight) {
-    const opacity = state.speaking ? 0.45 + talkWave * 0.28 : state.listening ? 0.54 : 0.28;
-    (blushLeft.material as THREE.MeshBasicMaterial).opacity = opacity;
-    (blushRight.material as THREE.MeshBasicMaterial).opacity = opacity;
+  if (haloMesh) {
+    haloMesh.rotation.z = t * 0.24;
+    haloMesh.scale.setScalar(active ? 1.04 + Math.sin(t * 4.4) * 0.035 : 1 + Math.sin(t * 1.7) * 0.018);
   }
 
-  if (hoverRing) {
-    hoverRing.rotation.z = t * 0.35;
-    hoverRing.scale.setScalar(state.listening ? 1.08 + Math.sin(t * 6) * 0.04 : 1 + Math.sin(t * 1.8) * 0.015);
+  if (orbitGroup) {
+    orbitGroup.rotation.y = -t * (state.translationActive ? 1.1 : state.listening ? 0.85 : 0.46);
+    orbitGroup.rotation.x = Math.sin(t * 0.62) * 0.2;
   }
 
   stageRenderer.render(stageScene, stageCamera);
@@ -464,7 +1273,7 @@ function initThreeStage() {
 
   stageScene = new THREE.Scene();
   stageCamera = new THREE.PerspectiveCamera(34, 1, 0.1, 100);
-  stageCamera.position.set(0, 0.42, 7.4);
+  stageCamera.position.set(0, 0.38, 7.2);
 
   stageRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   stageRenderer.setClearAlpha(0);
@@ -473,217 +1282,181 @@ function initThreeStage() {
 
   clock = new THREE.Clock();
 
-  const ambientLight = new THREE.AmbientLight(0xffffff, 1.45);
-  const keyLight = new THREE.DirectionalLight(0xc7d2fe, 2.35);
+  const ambientLight = new THREE.AmbientLight(0xffffff, 1.35);
+  const keyLight = new THREE.DirectionalLight(0xe0f2fe, 2.55);
   keyLight.position.set(4, 5, 5);
-  const faceLight = new THREE.PointLight(0x67e8f9, 28, 18, 1.7);
-  faceLight.position.set(0, 0.4, 4.2);
-  const pinkRim = new THREE.PointLight(0xf9a8d4, 24, 18, 1.8);
-  pinkRim.position.set(-3.8, 0.8, 3.8);
-  const blueRim = new THREE.PointLight(0x60a5fa, 28, 20, 1.7);
-  blueRim.position.set(3.8, -0.8, 3.6);
-  stageScene.add(ambientLight, keyLight, faceLight, pinkRim, blueRim);
+  const faceLight = new THREE.PointLight(0xf9a8d4, 32, 18, 1.7);
+  faceLight.position.set(-2.8, 0.6, 4.2);
+  const blueRim = new THREE.PointLight(0x67e8f9, 30, 22, 1.65);
+  blueRim.position.set(3.8, -0.8, 3.8);
+  stageScene.add(ambientLight, keyLight, faceLight, blueRim);
 
   avatarGroup = new THREE.Group();
   stageScene.add(avatarGroup);
 
-  const glassMaterial = new THREE.MeshPhysicalMaterial({
-    color: 0xbff8ff,
-    transmission: 0.92,
-    transparent: true,
-    opacity: 0.42,
-    thickness: 0.9,
-    roughness: 0.04,
-    metalness: 0.02,
-    clearcoat: 1,
-    clearcoatRoughness: 0.08,
-  });
-
-  const shell = new THREE.Mesh(new THREE.SphereGeometry(2.08, 72, 72), glassMaterial);
-  shell.scale.set(0.96, 1.08, 0.96);
-  avatarGroup.add(shell);
-
-  const bodyMaterial = new THREE.MeshStandardMaterial({
-    color: 0x1e3a8a,
-    emissive: 0x2563eb,
-    emissiveIntensity: 0.52,
-    roughness: 0.28,
-    metalness: 0.18,
-  });
-
-  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.78, 0.86, 18, 36), bodyMaterial);
-  body.position.set(0, -0.78, 0.02);
-  body.scale.set(1.1, 1, 0.72);
-  avatarGroup.add(body);
-
-  const chestPanel = new THREE.Mesh(
-    new THREE.CircleGeometry(0.31, 42),
-    new THREE.MeshBasicMaterial({ color: 0x67e8f9, transparent: true, opacity: 0.62 })
-  );
-  chestPanel.position.set(0, -0.67, 0.66);
-  avatarGroup.add(chestPanel);
-
-  const head = new THREE.Mesh(
-    new THREE.SphereGeometry(1.18, 64, 64),
-    new THREE.MeshStandardMaterial({
-      color: 0x93c5fd,
-      emissive: 0x312e81,
-      emissiveIntensity: 0.24,
-      roughness: 0.18,
-      metalness: 0.08,
+  const shell = new THREE.Mesh(
+    new THREE.SphereGeometry(2.04, 72, 72),
+    new THREE.MeshPhysicalMaterial({
+      color: 0xffd6ec,
+      transmission: 0.85,
+      transparent: true,
+      opacity: 0.38,
+      thickness: 0.85,
+      roughness: 0.04,
+      metalness: 0.02,
+      clearcoat: 1,
+      clearcoatRoughness: 0.08,
     })
   );
-  head.position.set(0, 0.44, 0.02);
-  head.scale.set(1.12, 1.0, 0.86);
+  shell.scale.set(0.95, 1.08, 0.95);
+  avatarGroup.add(shell);
+
+  const body = new THREE.Mesh(
+    new THREE.CapsuleGeometry(0.76, 0.86, 18, 42),
+    new THREE.MeshStandardMaterial({
+      color: 0x7c3aed,
+      emissive: 0x312e81,
+      emissiveIntensity: 0.38,
+      roughness: 0.24,
+      metalness: 0.14,
+    })
+  );
+  body.position.set(0, -0.82, 0.02);
+  body.scale.set(1.06, 1, 0.7);
+  avatarGroup.add(body);
+
+  const head = new THREE.Mesh(
+    new THREE.SphereGeometry(1.16, 64, 64),
+    new THREE.MeshStandardMaterial({
+      color: 0xa5f3fc,
+      emissive: 0x2563eb,
+      emissiveIntensity: 0.18,
+      roughness: 0.16,
+      metalness: 0.05,
+    })
+  );
+  head.position.set(0, 0.42, 0.02);
+  head.scale.set(1.08, 1.0, 0.86);
   avatarGroup.add(head);
 
-  const visorMaterial = new THREE.MeshPhysicalMaterial({
-    color: 0xe0f2fe,
-    transmission: 0.72,
-    transparent: true,
-    opacity: 0.84,
-    thickness: 0.18,
-    roughness: 0.04,
-    metalness: 0,
-  });
-
   faceGroup = new THREE.Group();
-  faceGroup.position.set(0, 0.26, 0.92);
+  faceGroup.position.set(0, 0.25, 0.94);
   avatarGroup.add(faceGroup);
 
-  const visor = new THREE.Mesh(new THREE.SphereGeometry(0.9, 48, 48), visorMaterial);
-  visor.scale.set(1.08, 0.66, 0.24);
+  const visor = new THREE.Mesh(
+    new THREE.SphereGeometry(0.88, 48, 48),
+    new THREE.MeshPhysicalMaterial({
+      color: 0xfdf2f8,
+      transmission: 0.64,
+      transparent: true,
+      opacity: 0.82,
+      thickness: 0.16,
+      roughness: 0.035,
+    })
+  );
+  visor.scale.set(1.08, 0.62, 0.24);
   faceGroup.add(visor);
 
   const glassesMaterial = new THREE.MeshStandardMaterial({
     color: 0xffffff,
-    emissive: 0x60a5fa,
-    emissiveIntensity: 0.34,
-    metalness: 0.45,
-    roughness: 0.18,
+    emissive: 0xf9a8d4,
+    emissiveIntensity: 0.3,
+    metalness: 0.35,
+    roughness: 0.2,
   });
-
   const leftFrame = new THREE.Mesh(new THREE.TorusGeometry(0.25, 0.032, 18, 54), glassesMaterial);
-  leftFrame.position.set(-0.34, 0.1, 0.17);
-  leftFrame.scale.set(1.04, 0.86, 1);
-  const rightFrame = new THREE.Mesh(new THREE.TorusGeometry(0.25, 0.032, 18, 54), glassesMaterial);
-  rightFrame.position.set(0.34, 0.1, 0.17);
-  rightFrame.scale.set(1.04, 0.86, 1);
-  const bridge = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.035, 0.045), glassesMaterial);
-  bridge.position.set(0, 0.1, 0.19);
+  leftFrame.position.set(-0.33, 0.1, 0.18);
+  leftFrame.scale.set(1.05, 0.84, 1);
+  const rightFrame = new THREE.Mesh(new THREE.TorusGeometry(0.25, 0.032, 18, 54), glassesMaterial.clone());
+  rightFrame.position.set(0.33, 0.1, 0.18);
+  rightFrame.scale.set(1.05, 0.84, 1);
+  const bridge = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.035, 0.045), glassesMaterial.clone());
+  bridge.position.set(0, 0.1, 0.2);
   faceGroup.add(leftFrame, rightFrame, bridge);
 
-  const eyeMaterial = new THREE.MeshBasicMaterial({ color: 0x0f172a });
-  const eyeGlowMaterial = new THREE.MeshBasicMaterial({ color: 0x67e8f9, transparent: true, opacity: 0.52 });
-
-  const leftEyeGlow = new THREE.Mesh(new THREE.CircleGeometry(0.105, 32), eyeGlowMaterial);
-  leftEyeGlow.position.set(-0.34, 0.1, 0.215);
-  const rightEyeGlow = new THREE.Mesh(new THREE.CircleGeometry(0.105, 32), eyeGlowMaterial.clone());
-  rightEyeGlow.position.set(0.34, 0.1, 0.215);
-  faceGroup.add(leftEyeGlow, rightEyeGlow);
-
-  eyeLeft = new THREE.Mesh(new THREE.SphereGeometry(0.065, 20, 20), eyeMaterial);
-  eyeLeft.position.set(-0.34, 0.1, 0.235);
-  eyeRight = new THREE.Mesh(new THREE.SphereGeometry(0.065, 20, 20), eyeMaterial.clone());
-  eyeRight.position.set(0.34, 0.1, 0.235);
+  eyeLeft = new THREE.Mesh(new THREE.SphereGeometry(0.066, 20, 20), new THREE.MeshBasicMaterial({ color: 0x07111f }));
+  eyeLeft.position.set(-0.33, 0.1, 0.24);
+  eyeRight = new THREE.Mesh(new THREE.SphereGeometry(0.066, 20, 20), new THREE.MeshBasicMaterial({ color: 0x07111f }));
+  eyeRight.position.set(0.33, 0.1, 0.24);
   faceGroup.add(eyeLeft, eyeRight);
 
-  const mouthMaterial = new THREE.MeshBasicMaterial({ color: 0x1d4ed8 });
-  mouthMesh = new THREE.Mesh(new THREE.CapsuleGeometry(0.035, 0.23, 10, 18), mouthMaterial);
+  mouthMesh = new THREE.Mesh(new THREE.CapsuleGeometry(0.035, 0.22, 10, 18), new THREE.MeshBasicMaterial({ color: 0x7c3aed }));
   mouthMesh.rotation.z = Math.PI / 2;
-  mouthMesh.position.set(0, -0.2, 0.24);
-  mouthMesh.scale.set(1, 0.22, 1);
+  mouthMesh.position.set(0, -0.2, 0.245);
+  mouthMesh.scale.set(1, 0.2, 1);
   faceGroup.add(mouthMesh);
 
-  const blushMaterial = new THREE.MeshBasicMaterial({ color: 0xf9a8d4, transparent: true, opacity: 0.28 });
-  blushLeft = new THREE.Mesh(new THREE.CircleGeometry(0.12, 24), blushMaterial);
-  blushLeft.position.set(-0.62, -0.11, 0.2);
-  blushRight = new THREE.Mesh(new THREE.CircleGeometry(0.12, 24), blushMaterial.clone());
-  blushRight.position.set(0.62, -0.11, 0.2);
+  const blushMaterial = new THREE.MeshBasicMaterial({ color: 0xf9a8d4, transparent: true, opacity: 0.38 });
+  const blushLeft = new THREE.Mesh(new THREE.CircleGeometry(0.12, 24), blushMaterial);
+  blushLeft.position.set(-0.6, -0.1, 0.21);
+  const blushRight = new THREE.Mesh(new THREE.CircleGeometry(0.12, 24), blushMaterial.clone());
+  blushRight.position.set(0.6, -0.1, 0.21);
   faceGroup.add(blushLeft, blushRight);
 
   const earMaterial = new THREE.MeshStandardMaterial({
-    color: 0x67e8f9,
-    emissive: 0x38bdf8,
-    emissiveIntensity: 0.35,
-    roughness: 0.2,
-    metalness: 0.12,
+    color: 0xf9a8d4,
+    emissive: 0xec4899,
+    emissiveIntensity: 0.32,
+    roughness: 0.18,
+    metalness: 0.08,
   });
-
-  const leftEar = new THREE.Mesh(new THREE.SphereGeometry(0.24, 32, 32), earMaterial);
-  leftEar.position.set(-1.18, 0.5, 0.02);
-  leftEar.scale.set(0.62, 1, 0.5);
-  const rightEar = new THREE.Mesh(new THREE.SphereGeometry(0.24, 32, 32), earMaterial.clone());
-  rightEar.position.set(1.18, 0.5, 0.02);
-  rightEar.scale.set(0.62, 1, 0.5);
+  const leftEar = new THREE.Mesh(new THREE.SphereGeometry(0.23, 32, 32), earMaterial);
+  leftEar.position.set(-1.17, 0.5, 0.02);
+  leftEar.scale.set(0.6, 1, 0.5);
+  const rightEar = new THREE.Mesh(new THREE.SphereGeometry(0.23, 32, 32), earMaterial.clone());
+  rightEar.position.set(1.17, 0.5, 0.02);
+  rightEar.scale.set(0.6, 1, 0.5);
   avatarGroup.add(leftEar, rightEar);
 
   const antenna = new THREE.Mesh(
-    new THREE.CapsuleGeometry(0.045, 0.58, 8, 18),
-    new THREE.MeshStandardMaterial({ color: 0xdbeafe, emissive: 0x60a5fa, emissiveIntensity: 0.35 })
+    new THREE.CapsuleGeometry(0.043, 0.56, 8, 18),
+    new THREE.MeshStandardMaterial({ color: 0xfdf2f8, emissive: 0xf9a8d4, emissiveIntensity: 0.32 })
   );
-  antenna.position.set(0, 1.62, 0.02);
+  antenna.position.set(0, 1.6, 0.02);
   avatarGroup.add(antenna);
 
-  antennaTipMesh = new THREE.Mesh(
-    new THREE.SphereGeometry(0.16, 28, 28),
-    new THREE.MeshStandardMaterial({ color: 0xfef08a, emissive: 0xfef08a, emissiveIntensity: 1.15 })
+  heartMesh = new THREE.Mesh(
+    new THREE.SphereGeometry(0.155, 28, 28),
+    new THREE.MeshStandardMaterial({ color: 0xfef08a, emissive: 0xfacc15, emissiveIntensity: 0.95 })
   );
-  antennaTipMesh.position.set(0, 2.04, 0.02);
-  avatarGroup.add(antennaTipMesh);
+  heartMesh.position.set(0, 2.0, 0.02);
+  heartMesh.scale.set(1.08, 0.9, 1);
+  avatarGroup.add(heartMesh);
 
-  const armMaterial = new THREE.MeshStandardMaterial({
-    color: 0xa5f3fc,
-    emissive: 0x60a5fa,
-    emissiveIntensity: 0.25,
-    roughness: 0.22,
-    metalness: 0.1,
-  });
-
-  const leftArm = new THREE.Mesh(new THREE.CapsuleGeometry(0.095, 0.74, 12, 24), armMaterial);
-  leftArm.position.set(-1.05, -0.72, 0.08);
-  leftArm.rotation.z = 0.58;
-  const rightArm = new THREE.Mesh(new THREE.CapsuleGeometry(0.095, 0.74, 12, 24), armMaterial.clone());
-  rightArm.position.set(1.05, -0.72, 0.08);
-  rightArm.rotation.z = -0.58;
-  avatarGroup.add(leftArm, rightArm);
-
-  hoverRing = new THREE.Mesh(
-    new THREE.TorusGeometry(1.45, 0.045, 20, 96),
+  haloMesh = new THREE.Mesh(
+    new THREE.TorusGeometry(1.42, 0.042, 20, 96),
     new THREE.MeshStandardMaterial({
       color: 0xffffff,
       emissive: 0x67e8f9,
-      emissiveIntensity: 0.95,
+      emissiveIntensity: 0.9,
       transparent: true,
-      opacity: 0.72,
+      opacity: 0.7,
     })
   );
-  hoverRing.rotation.x = Math.PI / 2;
-  hoverRing.position.y = -1.76;
-  avatarGroup.add(hoverRing);
+  haloMesh.rotation.x = Math.PI / 2;
+  haloMesh.position.y = -1.78;
+  avatarGroup.add(haloMesh);
 
-  orbGroup = new THREE.Group();
-  avatarGroup.add(orbGroup);
-
-  const orbMaterials = [
-    new THREE.MeshStandardMaterial({ color: 0x67e8f9, emissive: 0x67e8f9, emissiveIntensity: 1.2 }),
-    new THREE.MeshStandardMaterial({ color: 0xf9a8d4, emissive: 0xf9a8d4, emissiveIntensity: 1.15 }),
-    new THREE.MeshStandardMaterial({ color: 0xa78bfa, emissive: 0xa78bfa, emissiveIntensity: 1.1 }),
-  ];
-
-  for (let index = 0; index < 8; index += 1) {
-    const orb = new THREE.Mesh(new THREE.SphereGeometry(index % 2 ? 0.055 : 0.075, 16, 16), orbMaterials[index % orbMaterials.length]);
-    const angle = (Math.PI * 2 * index) / 8;
-    orb.position.set(Math.cos(angle) * 2.62, Math.sin(angle * 1.45) * 0.88, Math.sin(angle) * 1.18);
-    orbGroup.add(orb);
+  orbitGroup = new THREE.Group();
+  avatarGroup.add(orbitGroup);
+  const orbitColors = [0x67e8f9, 0xf9a8d4, 0xa78bfa, 0xfef08a];
+  for (let index = 0; index < 10; index += 1) {
+    const color = orbitColors[index % orbitColors.length];
+    const orb = new THREE.Mesh(
+      new THREE.SphereGeometry(index % 2 ? 0.052 : 0.072, 16, 16),
+      new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 1.08 })
+    );
+    const angle = (Math.PI * 2 * index) / 10;
+    orb.position.set(Math.cos(angle) * 2.55, Math.sin(angle * 1.4) * 0.86, Math.sin(angle) * 1.16);
+    orbitGroup.add(orb);
   }
 
   const floorGlow = new THREE.Mesh(
-    new THREE.CircleGeometry(3.4, 72),
-    new THREE.MeshBasicMaterial({ color: 0x67e8f9, transparent: true, opacity: 0.12 })
+    new THREE.CircleGeometry(3.5, 72),
+    new THREE.MeshBasicMaterial({ color: 0xf9a8d4, transparent: true, opacity: 0.12 })
   );
   floorGlow.rotation.x = -Math.PI / 2;
-  floorGlow.position.set(0, -2.16, 0);
+  floorGlow.position.set(0, -2.18, 0);
   stageScene.add(floorGlow);
 
   fitStage();
@@ -695,6 +1468,19 @@ function initThreeStage() {
 export default function mount() {
   root = document.getElementById('assistant-root');
   state.speechSupported = typeof window !== 'undefined' && !!getRecognitionCtor();
+
+  if ('speechSynthesis' in window) {
+    window.speechSynthesis.onvoiceschanged = () => {
+      updateVoiceList();
+      update();
+    };
+    updateVoiceList();
+  }
+
+  void loadPreferences().then(() => {
+    if (state.preferences.autoListen) startListening();
+  });
+
   initThreeStage();
   update();
 }
