@@ -24,6 +24,8 @@ import {
   scheduleAgaReminderNotification,
 } from '../notifications/localNotifications';
 import { searchYouTube } from '../media/youtube';
+import { buildGuidedSessionInstructions, findGuidedSession, guidedSessionOpening } from '../sessions/guidedSessions';
+import { getUserProfile, profilePromptBlock, updateUserProfileFromSignal } from '../memory/userProfile';
 import {
   executeRemoteTool,
   getRemoteConfigRevision,
@@ -233,6 +235,76 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
       ctx.updateRealtimeSession();
       await logEvent('settings.listening', listeningModeLabel(nextMode, nextBargeIn));
       return `Listening mode set to ${listeningModeLabel(nextMode, nextBargeIn)}.`;
+    },
+
+    start_guided_session: async ({ kind, goal, durationMinutes }) => {
+      const preset = findGuidedSession(kind) ?? findGuidedSession(goal) ?? findGuidedSession('breathing');
+      if (!preset) return 'I could not find that guided session.';
+      const instructions = [
+        buildGuidedSessionInstructions(preset),
+        goal ? `User goal/theme for this run: ${String(goal)}.` : '',
+        durationMinutes ? `Target duration: about ${Number(durationMinutes)} minutes.` : '',
+        profilePromptBlock(await getUserProfile()),
+      ].filter(Boolean).join('\n\n');
+      const activeSession = {
+        kind: 'remote' as SessionKind,
+        label: preset.label,
+        skillId: preset.id,
+        instructions,
+        targetLanguage: null,
+        theme: goal ? String(goal) : preset.theme ?? null,
+        iconUrl: null,
+        imageUrl: null,
+        toolNames: ['guided_session_control', 'reflect_session', 'update_user_profile', 'get_user_profile'],
+        startedAt: new Date().toISOString(),
+      };
+      await setPrefs({ activeSession } as Partial<Preferences>);
+      ctx.publish({ sessionLabel: activeSession.label });
+      ctx.updateRealtimeSession();
+      await logEvent('guided_session.start', `${preset.id}${goal ? ` goal=${goal}` : ''}`);
+      return guidedSessionOpening(preset);
+    },
+    guided_session_control: async ({ command }) => {
+      const cmd = String(command ?? '').toLowerCase();
+      if (cmd === 'end') {
+        await setPrefs({ activeSession: null } as Partial<Preferences>);
+        ctx.publish({ sessionLabel: null });
+        ctx.updateRealtimeSession();
+        await logEvent('guided_session.end');
+        return 'Session ended. I will remember what helped if you want to tell me.';
+      }
+      await logEvent('guided_session.control', cmd);
+      if (cmd === 'pause') return 'Paused. Say AGA resume when you are ready.';
+      if (cmd === 'resume') return 'Resuming gently.';
+      if (cmd === 'deeper') return 'Going a little deeper, only as much as feels safe.';
+      if (cmd === 'skip') return 'Skipping to the next part.';
+      if (cmd === 'repeat') return 'Repeating the last cue more slowly.';
+      return 'Okay.';
+    },
+    get_user_profile: async () => profilePromptBlock(await getUserProfile()),
+    update_user_profile: async ({ note, goal, technique, emotionalPattern, ritual, communicationStyle }) => {
+      const profile = await updateUserProfileFromSignal({
+        note: note ? String(note) : undefined,
+        goal: goal ? String(goal) : undefined,
+        technique: technique ? String(technique) : undefined,
+        emotionalPattern: emotionalPattern ? String(emotionalPattern) : undefined,
+        ritual: ritual ? String(ritual) : undefined,
+        communicationStyle: communicationStyle ? String(communicationStyle) : undefined,
+      });
+      await ctx.refresh();
+      return `Profile updated. ${profile.goals.length} goals, ${profile.effectiveTechniques.length} helpful techniques, ${profile.emotionalPatterns.length} patterns.`;
+    },
+    reflect_session: async ({ summary, technique, goal, emotionalPattern, nextRitual }) => {
+      const profile = await updateUserProfileFromSignal({
+        note: summary ? String(summary) : undefined,
+        goal: goal ? String(goal) : undefined,
+        technique: technique ? String(technique) : undefined,
+        emotionalPattern: emotionalPattern ? String(emotionalPattern) : undefined,
+        ritual: nextRitual ? String(nextRitual) : undefined,
+      });
+      await logEvent('profile.reflect_session', String(summary ?? ''));
+      await ctx.refresh();
+      return `Reflection saved. I will use this to guide you better next time.`;
     },
     refresh_remote_config: async () => {
       await ctx.applyRemoteConfig('tool');

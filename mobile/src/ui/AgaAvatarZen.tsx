@@ -46,6 +46,7 @@ export function AgaAvatarZen({ mode, audioLevel = 0, compact, size = compact ? 2
   const pulse = useRef(new Animated.Value(0)).current;
   const blink = useRef(new Animated.Value(1)).current;
   const shimmer = useRef(new Animated.Value(0)).current;
+  const particles = useRef(new Animated.Value(0)).current;
   const level = useRef(new Animated.Value(0)).current;
 
   const accent = useMemo(() => accentFor(mode), [mode]);
@@ -138,6 +139,20 @@ export function AgaAvatarZen({ mode, audioLevel = 0, compact, size = compact ? 2
     return () => loop.stop();
   }, [shimmer]);
 
+  useEffect(() => {
+    particles.setValue(0);
+    const loop = Animated.loop(
+      Animated.timing(particles, {
+        toValue: 1,
+        duration: speaking ? 5200 : live ? 7200 : 11000,
+        easing: Easing.linear,
+        useNativeDriver: true,
+      }),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [particles, live, speaking]);
+
   const floatY = float.interpolate({ inputRange: [0, 1], outputRange: [6, -10] });
   const haloSpin = halo.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
   const auraScale = Animated.add(
@@ -148,6 +163,8 @@ export function AgaAvatarZen({ mode, audioLevel = 0, compact, size = compact ? 2
   const leftWingRotate = wing.interpolate({ inputRange: [0, 1], outputRange: [speaking ? '-11deg' : '-7deg', speaking ? '9deg' : '5deg'] });
   const rightWingRotate = wing.interpolate({ inputRange: [0, 1], outputRange: [speaking ? '11deg' : '7deg', speaking ? '-9deg' : '-5deg'] });
   const shimmerX = shimmer.interpolate({ inputRange: [0, 1], outputRange: [-2.4, 2.4] });
+  const particleSpin = particles.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
+  const glassSweep = shimmer.interpolate({ inputRange: [0, 1], outputRange: [-26, 26] });
   const coreScale = Animated.add(1, level.interpolate({ inputRange: [0, 1], outputRange: [0, 0.05] }));
   const blinkScale = blink;
 
@@ -172,6 +189,16 @@ export function AgaAvatarZen({ mode, audioLevel = 0, compact, size = compact ? 2
           </Defs>
           <Circle cx={stage / 2} cy={stage * 0.46} r={stage * 0.4} fill="url(#aura)" />
         </Svg>
+      </Animated.View>
+
+      <Animated.View style={[styles.glassPane, { width: size * 0.92, height: size * 1.08, borderRadius: size * 0.48, borderColor: accent }]}>
+        <Animated.View style={[styles.glassSweep, { backgroundColor: accent, transform: [{ translateX: glassSweep }, { rotate: '-18deg' }] }]} />
+      </Animated.View>
+
+      <Animated.View style={[styles.particleOrbit, { width: size * 1.08, height: size * 1.08, borderRadius: size * 0.54, transform: [{ rotate: particleSpin }] }]}>
+        <View style={[styles.particle, { top: 8, left: size * 0.52, backgroundColor: accent }]} />
+        <View style={[styles.particle, styles.particleSmall, { bottom: 30, left: 24, backgroundColor: colors.gold }]} />
+        <View style={[styles.particle, styles.particleSmall, { right: 18, top: size * 0.56, backgroundColor: colors.cyan }]} />
       </Animated.View>
 
       <Animated.View style={[styles.center, { transform: [{ translateY: floatY }] }]}> 
@@ -271,6 +298,11 @@ const styles = StyleSheet.create({
   wingLayer: { position: 'absolute', zIndex: 2 },
   bodyLayer: { zIndex: 4 },
   eyeLayer: { position: 'absolute', zIndex: 6 },
+  glassPane: { position: 'absolute', overflow: 'hidden', borderWidth: 1, opacity: 0.28, backgroundColor: 'rgba(255,255,255,0.018)' },
+  glassSweep: { position: 'absolute', top: 0, bottom: 0, width: 28, opacity: 0.18 },
+  particleOrbit: { position: 'absolute', opacity: 0.55 },
+  particle: { position: 'absolute', width: 7, height: 7, borderRadius: 7, shadowOpacity: 0.8, shadowRadius: 12, shadowOffset: { width: 0, height: 0 } },
+  particleSmall: { width: 4, height: 4, borderRadius: 4, opacity: 0.8 },
 });
 
 export default AgaAvatarZen;

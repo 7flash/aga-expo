@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "revision": "tradjs-example-v1",
+  "revision": "server-example-v2-guided",
   "deviceLabel": "Kitchen AGA",
   "pollMs": 60000,
   "labels": {
@@ -34,10 +34,27 @@
       "id": "server_language_game",
       "label": "Server language game",
       "description": "Editable language-learning game from TradJS.",
-      "aliases": ["language game", "practice language"],
+      "aliases": [
+        "language game",
+        "practice language"
+      ],
       "kind": "language",
       "targetLanguage": "English",
       "instructions": "Run a playful language practice game. Give one challenge, wait for the answer, then correct gently."
+    },
+    {
+      "id": "server_evening_hypnosis",
+      "label": "Evening self-hypnosis",
+      "description": "Server-editable positive bedtime hypnosis skill.",
+      "aliases": [
+        "evening hypnosis",
+        "bedtime hypnosis",
+        "hypnosis"
+      ],
+      "kind": "bedtime",
+      "theme": "evening wind-down",
+      "priority": 5,
+      "instructions": "Start a safe self-hypnosis guided session. Ask for the user goal, use permissive language only, keep the user in control, and save a reflection when the session ends."
     }
   ],
   "tools": [
@@ -48,10 +65,16 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "text": { "type": "string" },
-          "kind": { "type": "string" }
+          "text": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          }
         },
-        "required": ["text"]
+        "required": [
+          "text"
+        ]
       }
     }
   ],

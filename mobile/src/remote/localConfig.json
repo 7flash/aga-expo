@@ -1,38 +1,47 @@
 {
   "schemaVersion": 1,
-  "revision": "local-default-v1",
+  "revision": "local-default-v2-guided",
   "deviceLabel": "AGA local runtime",
   "pollMs": 60000,
   "labels": {
     "brand": "AGA",
     "wakeHint": "Say AGA",
-    "serverOffline": "Local config active"
+    "serverOffline": "Local config active",
+    "deepWork": "Guided inner work"
   },
   "images": {
     "guardianAura": "local://guardian-aura",
     "skillLanguage": "local://skill-language",
-    "skillImagination": "local://skill-imagination"
+    "skillImagination": "local://skill-imagination",
+    "skillHypnosis": "local://skill-hypnosis"
   },
   "settings": {
     "realtimeVoice": "marin",
     "realtimeListenMode": "strict",
     "allowBargeIn": false,
     "mediaDuckingEnabled": true,
-    "temperatureUnit": "celsius"
+    "temperatureUnit": "celsius",
+    "personalityPrompt": "AGA is a gentle holographic guardian. For deep work, guide slowly, safely, and with consent. Offer choices and wait for voice replies."
   },
   "realtime": {
     "model": "gpt-realtime-2",
     "voice": "marin",
     "listenMode": "strict",
     "allowBargeIn": false,
-    "instructions": "You are AGA running from the bundled local configuration. Work fully even when the server is offline. Prefer local skills and local tools unless a server tool is available."
+    "instructions": "You are AGA running from bundled local configuration. Work fully when the server is offline. For meditation, breathing, body scan, hypnosis, conflict navigation, or emotional processing, use start_guided_session and guided_session_control instead of improvising a single-turn answer. After meaningful sessions, call reflect_session or update_user_profile so AGA evolves."
   },
   "skills": [
     {
       "id": "local_language_learning",
       "label": "Language learning",
       "description": "Gentle speaking practice with corrections and choices.",
-      "aliases": ["language", "learn", "practice English", "practice bahasa", "practice Russian"],
+      "aliases": [
+        "language",
+        "learn",
+        "practice English",
+        "practice bahasa",
+        "practice Russian"
+      ],
       "kind": "language",
       "targetLanguage": "English",
       "theme": "conversation practice",
@@ -43,27 +52,106 @@
       "id": "local_imagination_game",
       "label": "Imagination game",
       "description": "A cozy interactive story with spoken choices.",
-      "aliases": ["imagination", "game", "story", "adventure"],
+      "aliases": [
+        "imagination",
+        "game",
+        "story",
+        "adventure"
+      ],
       "kind": "imagination",
       "theme": "crystal forest",
       "priority": 20,
       "instructions": "Run a gentle imagination game. Narrate one vivid scene, then offer exactly three numbered spoken choices. Wait for the user to choose by number, letter, or phrase."
     },
     {
+      "id": "local_nervous_system_reset",
+      "label": "Nervous system reset",
+      "description": "Physiological sigh and box breathing with precise pacing.",
+      "aliases": [
+        "breathing",
+        "breathe",
+        "calm down",
+        "reset",
+        "anxiety",
+        "meditation"
+      ],
+      "kind": "breathing",
+      "theme": "nervous system reset",
+      "priority": 25,
+      "instructions": "Start the guided breathing session using start_guided_session with kind breathing. Keep cues slow and short. Lead two cycles, then ask how the user feels. The user can say pause, deeper, skip, repeat, or end session."
+    },
+    {
       "id": "local_breathing_guide",
       "label": "Breathing guide",
       "description": "Slow calming breath pacing.",
-      "aliases": ["breathing", "breathe", "calm down", "meditation"],
+      "aliases": [
+        "breathing",
+        "breathe",
+        "calm down",
+        "meditation"
+      ],
       "kind": "breathing",
       "theme": "nervous system reset",
       "priority": 30,
       "instructions": "Guide a short calming breathing session. Speak very slowly. Use brief inhale, hold, exhale cues. Ask before continuing past two cycles."
     },
     {
+      "id": "local_body_scan",
+      "label": "Body scan",
+      "description": "Progressive relaxation from face to feet.",
+      "aliases": [
+        "body scan",
+        "progressive relaxation",
+        "relax my body",
+        "tension"
+      ],
+      "kind": "bedtime",
+      "theme": "body scan relaxation",
+      "priority": 31,
+      "instructions": "Start the guided body scan using start_guided_session with kind body_scan. Move slowly through face, jaw, chest, belly, hands, legs, and feet. Invite awareness rather than forcing relaxation."
+    },
+    {
+      "id": "local_safe_self_hypnosis",
+      "label": "Safe self-hypnosis",
+      "description": "Positive, consent-based subconscious rehearsal.",
+      "aliases": [
+        "hypnosis",
+        "self hypnosis",
+        "affirmations",
+        "subconscious",
+        "reprogramming"
+      ],
+      "kind": "bedtime",
+      "theme": "safe self hypnosis",
+      "priority": 32,
+      "instructions": "Start a safe self-hypnosis session using start_guided_session with kind self_hypnosis. Ask for the user goal if not known. Use permissive language only: you may, you can, if it feels right. Never claim control or guarantee outcomes."
+    },
+    {
+      "id": "local_conflict_navigation",
+      "label": "Conflict navigation",
+      "description": "Untangle an emotional conflict with active listening and choices.",
+      "aliases": [
+        "conflict",
+        "argument",
+        "relationship",
+        "emotional processing",
+        "resolve conflict"
+      ],
+      "kind": "advice",
+      "theme": "conflict resolution",
+      "priority": 33,
+      "instructions": "Start conflict navigation using start_guided_session with kind conflict_navigation. Ask one question at a time: what happened, what feeling is strongest, what need is underneath, then offer three options."
+    },
+    {
       "id": "local_music_companion",
       "label": "Music companion",
       "description": "Quiet conversation over background music.",
-      "aliases": ["music companion", "music", "ambient", "lofi"],
+      "aliases": [
+        "music companion",
+        "music",
+        "ambient",
+        "lofi"
+      ],
       "kind": "music",
       "theme": "ambient music",
       "priority": 40,

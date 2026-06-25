@@ -142,6 +142,54 @@ export const BUILTIN_CAPABILITY_TOOLS: readonly RealtimeToolDefinition[] = [
       theme: { type: 'string' },
     }, ['kind']),
   },
+
+  {
+    type: 'function',
+    name: 'start_guided_session',
+    description: 'Start a structured guided session such as breathing, body scan, self-hypnosis, conflict navigation, meditation, bedtime, or imagination work.',
+    parameters: schema({
+      kind: { type: 'string', enum: ['breathing', 'body_scan', 'self_hypnosis', 'conflict_navigation', 'imagination', 'music', 'language', 'focus', 'bedtime', 'general'] },
+      goal: { type: 'string', description: 'Optional user goal, theme, or issue for the guided session.' },
+      durationMinutes: { type: 'number' },
+    }, ['kind']),
+  },
+  {
+    type: 'function',
+    name: 'guided_session_control',
+    description: 'Control the active guided session: pause, resume, deeper, skip, repeat, or end.',
+    parameters: schema({ command: { type: 'string', enum: ['pause', 'resume', 'deeper', 'skip', 'repeat', 'end'] } }, ['command']),
+  },
+  {
+    type: 'function',
+    name: 'get_user_profile',
+    description: 'Read the durable user profile summary: goals, preferred guidance style, useful techniques, and patterns.',
+    parameters: schema({}),
+  },
+  {
+    type: 'function',
+    name: 'update_user_profile',
+    description: 'Persist a concise observation about what helps this user, their goals, rituals, or recurring emotional patterns.',
+    parameters: schema({
+      note: { type: 'string' },
+      goal: { type: 'string' },
+      technique: { type: 'string' },
+      emotionalPattern: { type: 'string' },
+      ritual: { type: 'string' },
+      communicationStyle: { type: 'string' },
+    }),
+  },
+  {
+    type: 'function',
+    name: 'reflect_session',
+    description: 'After a meaningful guided or emotional session, save a short reflection about what worked and what should be remembered for future guidance.',
+    parameters: schema({
+      summary: { type: 'string' },
+      technique: { type: 'string' },
+      goal: { type: 'string' },
+      emotionalPattern: { type: 'string' },
+      nextRitual: { type: 'string' },
+    }, ['summary']),
+  },
   {
     type: 'function',
     name: 'refresh_remote_config',
@@ -167,6 +215,7 @@ export function buildTurnContextBlock(prefs: Preferences | null) {
     `Device time now: ${now.toISOString()} (${timeZone}).`,
     'Use get_time for time/date questions instead of guessing.',
     'Use get_weather for weather questions instead of guessing.',
+    'Use get_user_profile before deep coaching, hypnosis, conflict navigation, or habit advice. Use update_user_profile/reflect_session after meaningful guidance.',
   ];
   const lat = (prefs as any)?.homeLatitude;
   const lon = (prefs as any)?.homeLongitude;
