@@ -11,11 +11,13 @@
     "check": "tsc --noEmit"
   },
   "dependencies": {
+    "@react-native-voice/voice": "^3.2.4",
     "expo": "latest",
     "expo-clipboard": "~56.0.4",
     "expo-file-system": "~56.0.8",
     "expo-notifications": "~56.0.18",
     "expo-router": "latest",
+    "expo-secure-store": "~56.0.4",
     "expo-sharing": "~56.0.18",
     "expo-speech": "~56.0.3",
     "expo-sqlite": "~56.0.5",

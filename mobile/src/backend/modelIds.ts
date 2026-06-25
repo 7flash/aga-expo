@@ -8,3 +8,13 @@ export const PROVIDER_ENDPOINTS = {
   openaiResponses: 'https://api.openai.com/v1/responses',
   geminiGenerateContentBase: 'https://generativelanguage.googleapis.com/v1beta/models',
 } as const;
+
+export function normalizeOpenAIModel(model?: string | null) {
+  const clean = model?.trim();
+  return clean || MODEL_IDS.openaiChat;
+}
+
+export function normalizeGeminiTextModel(model?: string | null) {
+  const clean = model?.trim();
+  return clean || MODEL_IDS.geminiText;
+}

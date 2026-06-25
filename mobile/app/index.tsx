@@ -1,5 +1,5 @@
-import { AgaScreen } from '../src/ui/AgaScreen';
+import { AgaZenScreen } from '../src/ui/AgaZenScreen';
 
 export default function Index() {
-  return <AgaScreen />;
+  return <AgaZenScreen />;
 }
