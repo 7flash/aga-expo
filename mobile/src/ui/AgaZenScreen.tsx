@@ -8,7 +8,7 @@ import { YouTubePlayer } from './YouTubePlayer';
 import { colors, radius, spacing } from './theme';
 
 export function AgaZenScreen() {
-  const { mode, messages, interim, activeMedia, mediaCommand, speechStatus, error, replay, closeMedia, onMediaEvent } = useAgaBrain();
+  const { mode, messages, interim, activeMedia, mediaCommand, speechStatus, error, replay, closeMedia, onMediaEvent, rearmMic } = useAgaBrain();
   const avatarShift = useRef(new Animated.Value(0)).current;
   const hasConversation = messages.length > 0 || !!activeMedia;
 
@@ -30,6 +30,13 @@ export function AgaZenScreen() {
       <View style={styles.backgroundOrbTwo} />
 
       <View style={styles.header}>
+        <View style={styles.brandPill}>
+          <View style={styles.brandDot}><Text style={styles.brandLetter}>A</Text></View>
+          <View>
+            <Text style={styles.brand}>AGA</Text>
+            <Text style={styles.brandSub}>guardian voice</Text>
+          </View>
+        </View>
         <View style={styles.statusPill}>
           <View style={[styles.statusDot, (mode === 'listening' || mode === 'speaking' || mode === 'media') && styles.statusDotLive]} />
           <Text style={styles.statusText}>{status}</Text>
@@ -53,7 +60,9 @@ export function AgaZenScreen() {
           },
         ]}
       >
-        <AgaAvatarZen mode={mode} audioLevel={audioLevel} compact={!!activeMedia} size={activeMedia ? 156 : 282} />
+        <Pressable onPress={rearmMic} accessibilityRole="button" accessibilityLabel="Restart AGA microphone">
+          <AgaAvatarZen mode={mode} audioLevel={audioLevel} compact={!!activeMedia} size={activeMedia ? 156 : 282} />
+        </Pressable>
       </Animated.View>
 
       {!!interim && (

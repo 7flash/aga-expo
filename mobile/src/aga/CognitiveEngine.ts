@@ -1,6 +1,7 @@
 import { hasWakeWord, parseVoiceCommand } from './actions';
 import type { AgaAction, AgaMode } from './turn';
 import { shouldAcceptFinalSpeech } from './turnGate';
+import { FinalSpeechDeduper, SerialTurnQueue } from './turnQueue';
 import { askBrain, translatePhrase } from '../backend/brain';
 import {
   addMemory,
@@ -57,6 +58,10 @@ const initialPrefs: Preferences = {
 export class CognitiveEngine {
   private listeners = new Set<Listener>();
   private loop: NativeSpeechLoop | null = null;
+  private started = false;
+  private stopped = false;
+  private finalDeduper = new FinalSpeechDeduper();
+  private turnQueue = new SerialTurnQueue();
   private prefs: Preferences = initialPrefs;
   private processing = false;
   private proactiveBusy = false;
@@ -92,20 +97,44 @@ export class CognitiveEngine {
   }
 
   async start() {
-    configureNotificationHandler();
-    await initializeLocalStore();
-    this.prefs = await loadPreferences();
-    await this.refresh();
-    this.publish({ ready: true });
-    await this.startSpeechLoop();
-    this.startDreamLoop();
+    if (this.started) return;
+    this.started = true;
+    this.stopped = false;
+    this.finalDeduper = new FinalSpeechDeduper();
+    this.turnQueue = new SerialTurnQueue();
+    try {
+      configureNotificationHandler();
+      await initializeLocalStore();
+      this.prefs = await loadPreferences();
+      await this.refresh();
+      this.publish({ ready: true, speechStatus: 'ready' });
+      await this.startSpeechLoop();
+      this.startDreamLoop();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'AGA failed to start.';
+      this.publish({ ready: true, mode: 'recovering', speechStatus: 'recovering', error: message });
+      await logEvent('engine.start.error', message).catch(() => undefined);
+    }
   }
 
   async stop() {
+    this.stopped = true;
+    this.started = false;
+    this.turnQueue.stop();
     if (this.proactiveTimer) clearInterval(this.proactiveTimer);
     this.proactiveTimer = null;
+    await stopSpeaking().catch(() => undefined);
     await this.loop?.destroy?.();
     this.loop = null;
+  }
+
+  async rearmMic() {
+    this.finalDeduper.reset();
+    await this.loop?.stop?.('manual_rearm').catch(() => undefined);
+    await this.startSpeechLoop().catch((error) => {
+      const message = error instanceof Error ? error.message : 'Could not restart microphone.';
+      this.publish({ error: message, speechStatus: 'mic restart failed' });
+    });
   }
 
   async replay(text: string) {
@@ -137,7 +166,9 @@ export class CognitiveEngine {
     await this.loop?.destroy?.();
     const loop = new NativeSpeechLoop({
       onPartial: (text) => this.publish({ interim: text, error: null }),
-      onFinal: (text) => { void this.handleRecognizedText(text); },
+      onFinal: (text) => {
+        this.turnQueue.enqueue(() => this.handleRecognizedText(text));
+      },
       onError: (message) => {
         this.publish({ speechStatus: `mic error: ${message}`, error: message });
         void logEvent('voice.error', message);
@@ -152,7 +183,7 @@ export class CognitiveEngine {
   private startDreamLoop() {
     if (this.proactiveTimer) clearInterval(this.proactiveTimer);
     this.proactiveTimer = setInterval(() => {
-      if (!this.prefs.proactiveReminders || this.proactiveBusy || this.processing) return;
+      if (this.stopped || !this.prefs.proactiveReminders || this.proactiveBusy || this.processing || this.mode === 'speaking') return;
       this.proactiveBusy = true;
       void (async () => {
         try {
@@ -172,7 +203,7 @@ export class CognitiveEngine {
 
   private async say(text: string) {
     const clean = text.trim();
-    if (!clean) return;
+    if (!clean || this.stopped) return;
     this.setMode('speaking');
     await addMessage('assistant', clean);
     await this.refresh();
@@ -311,7 +342,11 @@ export class CognitiveEngine {
 
   private async handleRecognizedText(recognized: string) {
     const text = recognized.trim();
-    if (!text) return;
+    if (!text || this.stopped) return;
+    if (this.finalDeduper.shouldDrop(text)) {
+      await logEvent('voice.duplicate_final', text.slice(0, 180)).catch(() => undefined);
+      return;
+    }
 
     const gate = shouldAcceptFinalSpeech(this.mode, text, this.processing);
     if (gate.isBargeIn) {
@@ -370,7 +405,7 @@ export class CognitiveEngine {
       const message = error instanceof Error ? error.message : 'I hit a local error.';
       this.publish({ error: message });
       await logEvent('turn.error', message);
-      await this.say(`I hit a small glitch, but I am still here. ${message}`);
+      await this.say('I hit a small glitch, but I am still here.');
     } finally {
       this.processing = false;
       await this.refresh();

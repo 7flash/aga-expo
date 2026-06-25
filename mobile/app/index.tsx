@@ -1,5 +1,10 @@
 import { AgaZenScreen } from '../src/ui/AgaZenScreen';
+import { AgaErrorBoundary } from '../src/ui/AgaErrorBoundary';
 
 export default function Index() {
-  return <AgaZenScreen />;
+  return (
+    <AgaErrorBoundary>
+      <AgaZenScreen />
+    </AgaErrorBoundary>
+  );
 }

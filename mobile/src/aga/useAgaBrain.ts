@@ -34,5 +34,6 @@ export function useAgaBrain() {
     replay: (text: string) => engineRef.current?.replay(text),
     closeMedia: () => engineRef.current?.closeMedia(),
     onMediaEvent: (event: string) => engineRef.current?.onMediaEvent(event),
+    rearmMic: () => engineRef.current?.rearmMic(),
   }), [snapshot]);
 }
