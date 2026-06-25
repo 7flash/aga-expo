@@ -21,10 +21,16 @@ export type Preferences = {
   realtimeVoice?: string | null;
   personalityPrompt?: string | null;
   activeSession?: {
-    kind: 'language' | 'imagination' | 'advice' | 'focus' | 'bedtime' | 'breathing' | 'music' | 'general';
+    kind: 'language' | 'imagination' | 'advice' | 'focus' | 'bedtime' | 'breathing' | 'music' | 'general'
+    | 'remote';
     label: string;
     targetLanguage?: string | null;
     theme?: string | null;
+    skillId?: string | null;
+    instructions?: string | null;
+    iconUrl?: string | null;
+    imageUrl?: string | null;
+    toolNames?: string[];
     startedAt: string;
   } | null;
   /**
@@ -37,6 +43,12 @@ export type Preferences = {
   allowBargeIn?: boolean;
   /** Whether background media ducks while AGA speaks. */
   mediaDuckingEnabled?: boolean;
+  remoteConfigRevision?: string | null;
+  remoteConfigUrl?: string | null;
+  remoteConfigPollMs?: number | null;
+  deviceLabel?: string | null;
+  serverLabels?: Record<string, string>;
+  serverImages?: Record<string, string>;
 };
 
 export type Reminder = {
@@ -72,6 +84,12 @@ const DEFAULT_PREFS: Preferences = {
   realtimeListenMode: 'strict',
   allowBargeIn: false,
   mediaDuckingEnabled: true,
+  remoteConfigRevision: null,
+  remoteConfigUrl: process.env.EXPO_PUBLIC_AGA_CONFIG_URL || process.env.EXPO_PUBLIC_TRADJS_CONFIG_URL || null,
+  remoteConfigPollMs: Number(process.env.EXPO_PUBLIC_AGA_CONFIG_POLL_MS || 60_000),
+  deviceLabel: process.env.EXPO_PUBLIC_AGA_DEVICE_LABEL || null,
+  serverLabels: {},
+  serverImages: {},
 };
 
 const STORAGE_KEY = 'aga.mobile.localStore.v20';

@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "revision": "2026-06-25.1",
+  "deviceLabel": "kitchen-angel-01",
+  "pollMs": 60000,
+  "settings": {
+    "realtimeVoice": "marin",
+    "realtimeListenMode": "strict",
+    "allowBargeIn": false,
+    "personalityPrompt": "AGA is gentle, concise, playful, and protective."
+  },
+  "realtime": {
+    "instructions": "Prefer short spoken answers. Offer numbered choices when changing modes."
+  },
+  "labels": {
+    "brand.subtitle": "guardian voice · managed by TradJS",
+    "wake.hint": "Say AGA"
+  },
+  "images": {
+    "avatar.backdrop": "https://example.com/aga/backdrop.png"
+  },
+  "skills": [
+    {
+      "id": "language_russian_travel",
+      "label": "Russian travel tutor",
+      "description": "Practice cafe, airport, and directions in Russian.",
+      "aliases": ["russian travel", "travel tutor"],
+      "instructions": "Run a Russian travel language lesson. Ask one short prompt at a time. Let the user try first, then correct gently. Keep explanations under two sentences.",
+      "kind": "language",
+      "targetLanguage": "Russian",
+      "theme": "travel",
+      "iconUrl": "https://example.com/skills/russian.png"
+    },
+    {
+      "id": "dragon_castle_game",
+      "label": "Dragon castle game",
+      "description": "A cozy imagination game with choices.",
+      "aliases": ["dragon", "castle game"],
+      "instructions": "Run a gentle imagination game in a dragon castle. Narrate one scene, then offer exactly three spoken options. Wait for the user's choice.",
+      "kind": "imagination",
+      "theme": "dragon castle"
+    }
+  ],
+  "tools": [
+    {
+      "name": "server_weather_brief",
+      "description": "Ask the TradJS server for a short local weather brief.",
+      "endpoint": "https://example.com/aga/tools",
+      "parameters": {
+        "type": "object",
+        "properties": { "location": { "type": "string" } },
+        "required": ["location"]
+      }
+    }
+  ],
+  "observability": {
+    "endpoint": "https://example.com/aga/observability"
+  },
+  "updates": {
+    "ota": "fetch",
+    "message": "A JavaScript update is available and will apply on next restart."
+  }
+}

@@ -24,6 +24,19 @@ import {
 import { searchYouTube, type YouTubeResult } from '../media/youtube';
 import { measureAsync, measureMark } from '../observability/measure';
 import { buildChoiceMenu, findChoice, normalizeChoiceKey, type ChoiceMenu, type ChoiceOption, type ChoiceAction, type SessionKind } from '../aga/choiceMenus';
+import {
+  executeRemoteTool,
+  fetchAndApplyRemoteConfig,
+  getRemoteConfig,
+  getRemoteConfigRevision,
+  getRemoteToolDefinitions,
+  getRemoteTools,
+  remoteConfigPromptBlock,
+  startRemoteConfigPoller,
+  type RemoteConfig,
+} from '../remote/config';
+import { emitObservation, setObservabilityConfigGetter } from '../remote/observability';
+import { maybeApplyOtaUpdate, nativeUpdateMessage } from '../updates/updateManager';
 
 const REALTIME_MODEL =
   process.env.EXPO_PUBLIC_AGA_REALTIME_MODEL ||
@@ -54,6 +67,9 @@ export type RealtimeSnapshot = {
   activeChoiceMenu?: ChoiceMenu | null;
   sessionLabel?: string | null;
   listeningMode?: string | null;
+  remoteConfigRevision?: string | null;
+  deviceLabel?: string | null;
+  nativeUpdateMessage?: string | null;
 };
 
 type Listener = (snapshot: RealtimeSnapshot) => void;
@@ -154,6 +170,9 @@ function realtimeTurnDetectionForUpdate(prefs: Preferences | null) {
 function sessionInstructions(prefs: Preferences | null) {
   const session = prefs?.activeSession;
   if (!session) return '';
+  if ((session as any).kind === 'remote') {
+    return `Current server skill: ${session.label}. ${(session as any).instructions || ''}`;
+  }
   if (session.kind === 'language') {
     return `Current session: ${session.label}. Help the user practice ${session.targetLanguage || 'the target language'}. Keep it voice-first. Correct gently after they try. Ask one short question at a time.`;
   }
@@ -189,6 +208,7 @@ function realtimeSessionConfig(prefs: Preferences | null, forUpdate = false) {
     'Resolve relative reminder times to absolute ISO-8601 timestamps before calling set_reminder.',
     translate ? `Live translation is ON. Translate non-command user phrases into ${translate}.` : '',
     prefs?.personalityPrompt ? `Custom personality overlay: ${prefs.personalityPrompt}` : '',
+    remoteConfigPromptBlock(),
     sessionInstructions(prefs),
     'When the user asks for settings, a different voice, a new personality, skills, language learning, an imagination game, or a new session, call show_settings_menu with the best category.',
     'When choices are visible and the user answers with a number or letter, call choose_option with that spoken choice. Never ask the user to tap or click.',
@@ -212,7 +232,7 @@ function realtimeSessionConfig(prefs: Preferences | null, forUpdate = false) {
   const config: Record<string, unknown> = {
     audio,
     instructions,
-    tools: TOOLS,
+    tools: [...TOOLS, ...getRemoteToolDefinitions()],
     tool_choice: 'auto',
   };
 
@@ -344,6 +364,12 @@ const TOOLS = [
   },
   {
     type: 'function',
+    name: 'refresh_remote_config',
+    description: 'Pull the latest server-controlled settings, skills, labels, images, and tools now.',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    type: 'function',
     name: 'end_session',
     description: 'End the current special session and return to normal guardian mode.',
     parameters: { type: 'object', properties: {} },
@@ -372,6 +398,7 @@ export class RealtimeSession {
   private waitingForResponseUntil = 0;
   private pendingReconnectReason: string | null = null;
   private lastGoodVoice = DEFAULT_REALTIME_VOICE;
+  private stopRemotePoller: (() => void) | null = null;
 
   private snapshot: RealtimeSnapshot = {
     ready: false,
@@ -387,6 +414,9 @@ export class RealtimeSession {
     activeChoiceMenu: null,
     sessionLabel: null,
     listeningMode: null,
+    remoteConfigRevision: null,
+    deviceLabel: null,
+    nativeUpdateMessage: null,
   };
 
   subscribe(listener: Listener) {
@@ -407,11 +437,17 @@ export class RealtimeSession {
   async start() {
     return measureAsync('realtime.start', async () => {
       configureNotificationHandler();
+      setObservabilityConfigGetter(getRemoteConfig);
       await initializeLocalStore();
+      await this.applyRemoteConfig('start');
+      this.stopRemotePoller = startRemoteConfigPoller((config) => this.onRemoteConfig(config));
       this.prefs = await loadPreferences();
       this.publish({
         sessionLabel: this.prefs.activeSession?.label ?? null,
         listeningMode: listeningModeLabel(realtimeListenMode(this.prefs), allowBargeIn(this.prefs)),
+        remoteConfigRevision: (this.prefs as any).remoteConfigRevision ?? getRemoteConfigRevision(),
+        deviceLabel: (this.prefs as any).deviceLabel ?? getRemoteConfig().deviceLabel ?? null,
+        nativeUpdateMessage: nativeUpdateMessage(getRemoteConfig()),
       });
       await this.refresh();
       if (!isWebRtcAvailable()) {
@@ -426,6 +462,35 @@ export class RealtimeSession {
         await logEvent('realtime.connect.error', message);
       }
     });
+  }
+
+
+  private async applyRemoteConfig(reason: string) {
+    const config = await fetchAndApplyRemoteConfig(reason);
+    if (!config) return;
+    this.prefs = await loadPreferences();
+    this.publish({
+      remoteConfigRevision: this.prefs.remoteConfigRevision ?? config.revision ?? null,
+      deviceLabel: this.prefs.deviceLabel ?? config.deviceLabel ?? null,
+      nativeUpdateMessage: nativeUpdateMessage(config),
+      listeningMode: listeningModeLabel(realtimeListenMode(this.prefs), allowBargeIn(this.prefs)),
+    });
+    await maybeApplyOtaUpdate(config);
+  }
+
+  private async onRemoteConfig(config: RemoteConfig) {
+    this.prefs = await loadPreferences();
+    this.publish({
+      remoteConfigRevision: this.prefs.remoteConfigRevision ?? config.revision ?? null,
+      deviceLabel: this.prefs.deviceLabel ?? config.deviceLabel ?? null,
+      nativeUpdateMessage: nativeUpdateMessage(config),
+      listeningMode: listeningModeLabel(realtimeListenMode(this.prefs), allowBargeIn(this.prefs)),
+    });
+    emitObservation('remote_config', 'session_apply', { revision: config.revision, skills: config.skills?.length ?? 0, tools: config.tools?.length ?? 0 });
+    if (this.isConnected()) {
+      this.send({ type: 'session.update', session: realtimeSessionConfig(this.prefs, true) });
+    }
+    await maybeApplyOtaUpdate(config);
   }
 
   private async getEphemeralToken() {
@@ -660,7 +725,7 @@ export class RealtimeSession {
   }
 
   private toolHandlers(): Record<string, ToolHandler> {
-    return {
+    const handlers: Record<string, ToolHandler> = {
       remember: async ({ text }) => {
         await addMemory(String(text ?? ''));
         await logEvent('memory.add', String(text ?? ''));
@@ -728,6 +793,10 @@ export class RealtimeSession {
         await logEvent('settings.listening', listeningModeLabel(nextMode, nextBargeIn));
         return `Listening mode set to ${listeningModeLabel(nextMode, nextBargeIn)}.`;
       },
+      refresh_remote_config: async () => {
+        await this.applyRemoteConfig('tool');
+        return `Pulled server configuration revision ${getRemoteConfigRevision()}.`;
+      },
       set_persona: async ({ persona }) => {
         this.prefs = await savePreferences({ persona: String(persona ?? 'warm') });
         this.send({ type: 'session.update', session: realtimeSessionConfig(this.prefs, true) });
@@ -773,6 +842,14 @@ export class RealtimeSession {
         action: { type: 'end_session' },
       }),
     };
+    for (const tool of getRemoteTools()) {
+      handlers[tool.name] = async (args) => executeRemoteTool(tool.name, args, {
+        deviceLabel: (this.prefs as any)?.deviceLabel,
+        revision: getRemoteConfigRevision(),
+        activeSession: this.prefs?.activeSession ?? null,
+      });
+    }
+    return handlers;
   }
 
   private menuSpokenSummary(menu: ChoiceMenu) {
@@ -843,6 +920,26 @@ export class RealtimeSession {
       this.send({ type: 'session.update', session: realtimeSessionConfig(this.prefs, true) });
       await logEvent('settings.personality.regenerate', action.style);
       return 'I regenerated my personality blend for this device.';
+    }
+
+    if (action.type === 'start_remote_skill') {
+      const activeSession = {
+        kind: 'remote' as SessionKind,
+        label: action.label,
+        skillId: action.skillId,
+        instructions: action.instructions,
+        targetLanguage: action.targetLanguage ?? null,
+        theme: action.theme ?? null,
+        iconUrl: action.iconUrl ?? null,
+        imageUrl: action.imageUrl ?? null,
+        toolNames: action.toolNames ?? [],
+        startedAt: new Date().toISOString(),
+      };
+      this.prefs = await savePreferences({ activeSession } as Partial<Preferences>);
+      this.publish({ sessionLabel: activeSession.label });
+      this.send({ type: 'session.update', session: realtimeSessionConfig(this.prefs, true) });
+      await logEvent('settings.remote_skill.start', `${action.skillId}: ${action.label}`);
+      return `Starting ${activeSession.label}.`;
     }
 
     if (action.type === 'start_session') {
@@ -1025,6 +1122,8 @@ export class RealtimeSession {
 
   async stop() {
     return measureAsync('realtime.stop', async () => {
+      if (this.stopRemotePoller) this.stopRemotePoller();
+      this.stopRemotePoller = null;
       await this.teardownPeer(true);
     });
   }
