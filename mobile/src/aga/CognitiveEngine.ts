@@ -39,6 +39,7 @@ import {
   measureAsync,
   measureMark,
 } from "../observability/measure";
+import type { ChoiceMenu } from './choiceMenus';
 
 type ActiveMedia =
   | (YouTubeResult & {
@@ -61,6 +62,8 @@ export type AgaBrainSnapshot = {
   ttsStatus?: string;
   voiceSummary?: string;
   voiceCapability?: VoiceCapability;
+  activeChoiceMenu?: ChoiceMenu | null;
+  sessionLabel?: string | null;
 };
 
 type Listener = (snapshot: AgaBrainSnapshot) => void;
@@ -109,6 +112,8 @@ export class CognitiveEngine {
     ttsStatus: undefined,
     voiceSummary: undefined,
     voiceCapability: undefined,
+    activeChoiceMenu: null,
+    sessionLabel: null,
   };
 
   subscribe(listener: Listener) {

@@ -27,6 +27,8 @@ export function AgaZenScreen() {
     lastMeasure,
     ttsStatus,
     voiceSummary,
+    activeChoiceMenu,
+    sessionLabel,
     replay,
     closeMedia,
     onMediaEvent,
@@ -77,7 +79,7 @@ export function AgaZenScreen() {
           </View>
           <View>
             <Text style={styles.brand}>AGA</Text>
-            <Text style={styles.brandSub}>guardian voice · v{AGA_APP_VERSION}</Text>
+            <Text style={styles.brandSub}>{sessionLabel ? sessionLabel : 'guardian voice'} · v{AGA_APP_VERSION}</Text>
           </View>
         </View>
         <View style={styles.statusPill}>
@@ -134,11 +136,28 @@ export function AgaZenScreen() {
       )}
 
       <View style={styles.feedShell}>
+        {!!activeChoiceMenu && (
+          <View style={styles.choiceCard}>
+            <Text style={styles.choiceTitle}>{activeChoiceMenu.title}</Text>
+            {!!activeChoiceMenu.subtitle && <Text style={styles.choiceSubtitle}>{activeChoiceMenu.subtitle}</Text>}
+            <View style={styles.choiceGrid}>
+              {activeChoiceMenu.options.map((option: any) => (
+                <View key={option.key} style={styles.choiceOption}>
+                  <Text style={styles.choiceKey}>{option.key}</Text>
+                  <View style={styles.choiceCopy}>
+                    <Text style={styles.choiceLabel}>{option.label}</Text>
+                    {!!option.description && <Text style={styles.choiceDescription}>{option.description}</Text>}
+                  </View>
+                </View>
+              ))}
+            </View>
+          </View>
+        )}
         <FlatList
           inverted
           data={messages.slice(-10).reverse()}
           keyExtractor={(item, index) => `${item.createdAt ?? index}-${index}`}
-          contentContainerStyle={styles.feedContent}
+          contentContainerStyle={[styles.feedContent, activeChoiceMenu ? styles.feedWithChoices : null]}
           renderItem={({ item }) => (
             <MessageBubble
               message={item}
@@ -355,4 +374,37 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: "800",
   },
+
+  choiceCard: {
+    position: "absolute",
+    top: spacing.md,
+    left: spacing.md,
+    right: spacing.md,
+    zIndex: 20,
+    padding: spacing.md,
+    borderRadius: radius.xl,
+    backgroundColor: "rgba(103,232,249,0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(103,232,249,0.3)",
+  },
+  choiceTitle: { color: colors.text, fontSize: 17, fontWeight: "900", textAlign: "center" },
+  choiceSubtitle: { color: colors.muted, fontSize: 12, fontWeight: "700", textAlign: "center", marginTop: 4, marginBottom: spacing.sm },
+  choiceGrid: { gap: spacing.xs },
+  choiceOption: { flexDirection: "row", alignItems: "center", gap: spacing.sm, paddingVertical: 4 },
+  choiceKey: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    textAlign: "center",
+    textAlignVertical: "center" as any,
+    overflow: "hidden",
+    color: "#0b1024",
+    backgroundColor: colors.cyan,
+    fontWeight: "900",
+    lineHeight: 30,
+  },
+  choiceCopy: { flex: 1, minWidth: 0 },
+  choiceLabel: { color: colors.text, fontSize: 13, fontWeight: "900" },
+  choiceDescription: { color: colors.muted, fontSize: 11, fontWeight: "700", marginTop: 1 },
+  feedWithChoices: { paddingTop: 230 },
 });

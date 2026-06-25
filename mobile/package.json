@@ -26,6 +26,7 @@
     "react-native": "latest",
     "react-native-safe-area-context": "latest",
     "react-native-screens": "latest",
+    "react-native-svg": "^15.15.5",
     "react-native-web": "latest",
     "react-native-webview": "13.16.1"
   },

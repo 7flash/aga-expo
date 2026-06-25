@@ -16,6 +16,8 @@ const INITIAL_SNAPSHOT: AgaBrainSnapshot = {
   ttsStatus: undefined,
   voiceSummary: undefined,
   voiceCapability: undefined,
+  activeChoiceMenu: null,
+  sessionLabel: null,
 };
 
 type BrainLike = {
@@ -36,6 +38,8 @@ function normalizeRealtimeSnapshot(snapshot: RealtimeSnapshot): AgaBrainSnapshot
     ttsStatus: undefined,
     voiceSummary: 'realtime WebRTC',
     voiceCapability: undefined,
+    activeChoiceMenu: snapshot.activeChoiceMenu ?? null,
+    sessionLabel: snapshot.sessionLabel ?? null,
   } as AgaBrainSnapshot;
 }
 

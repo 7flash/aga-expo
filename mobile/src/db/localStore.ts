@@ -14,6 +14,15 @@ export type Preferences = {
   translateTarget: string | null;
   showDiagnostics: boolean;
   proactiveReminders: boolean;
+  realtimeVoice?: string | null;
+  personalityPrompt?: string | null;
+  activeSession?: {
+    kind: 'language' | 'imagination' | 'advice' | 'general';
+    label: string;
+    targetLanguage?: string | null;
+    theme?: string | null;
+    startedAt: string;
+  } | null;
 };
 
 export type Reminder = {
@@ -43,6 +52,9 @@ const DEFAULT_PREFS: Preferences = {
   translateTarget: null,
   showDiagnostics: false,
   proactiveReminders: true,
+  realtimeVoice: process.env.EXPO_PUBLIC_AGA_REALTIME_VOICE || process.env.EXPO_PUBLIC_OPENAI_REALTIME_VOICE || 'marin',
+  personalityPrompt: null,
+  activeSession: null,
 };
 
 const STORAGE_KEY = 'aga.mobile.localStore.v11';

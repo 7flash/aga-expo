@@ -23,12 +23,13 @@ import {
 } from '../notifications/localNotifications';
 import { searchYouTube, type YouTubeResult } from '../media/youtube';
 import { measureAsync, measureMark } from '../observability/measure';
+import { buildChoiceMenu, findChoice, normalizeChoiceKey, type ChoiceMenu, type ChoiceOption, type ChoiceAction } from '../aga/choiceMenus';
 
 const REALTIME_MODEL =
   process.env.EXPO_PUBLIC_AGA_REALTIME_MODEL ||
   process.env.EXPO_PUBLIC_OPENAI_REALTIME_MODEL ||
   'gpt-realtime-2';
-const REALTIME_VOICE = process.env.EXPO_PUBLIC_AGA_REALTIME_VOICE || process.env.EXPO_PUBLIC_OPENAI_REALTIME_VOICE || 'marin';
+const DEFAULT_REALTIME_VOICE = process.env.EXPO_PUBLIC_AGA_REALTIME_VOICE || process.env.EXPO_PUBLIC_OPENAI_REALTIME_VOICE || 'marin';
 const REALTIME_CALLS_URL = 'https://api.openai.com/v1/realtime/calls';
 
 type ActiveMedia =
@@ -50,6 +51,8 @@ export type RealtimeSnapshot = {
   ttsStatus?: string;
   voiceSummary?: string;
   voiceCapability?: unknown;
+  activeChoiceMenu?: ChoiceMenu | null;
+  sessionLabel?: string | null;
 };
 
 type Listener = (snapshot: RealtimeSnapshot) => void;
@@ -78,6 +81,25 @@ function extractToken(data: any) {
   return String(data?.client_secret?.value ?? data?.value ?? data?.token ?? data?.client_secret ?? '');
 }
 
+function realtimeVoice(prefs: Preferences | null) {
+  return prefs?.realtimeVoice || DEFAULT_REALTIME_VOICE;
+}
+
+function sessionInstructions(prefs: Preferences | null) {
+  const session = prefs?.activeSession;
+  if (!session) return '';
+  if (session.kind === 'language') {
+    return `Current session: ${session.label}. Help the user practice ${session.targetLanguage || 'the target language'}. Keep it voice-first. Correct gently after they try. Ask one short question at a time.`;
+  }
+  if (session.kind === 'imagination') {
+    return `Current session: ${session.label}. Run a gentle imagination game in the theme ${session.theme || 'magic'}. Narrate one scene, offer 2 or 3 spoken choices, and wait for the user.`;
+  }
+  if (session.kind === 'advice') {
+    return 'Current session: calm advice. Give short, grounded, emotionally safe guidance. Ask before going deep.';
+  }
+  return 'Current session: general guardian mode.';
+}
+
 function realtimeSessionConfig(prefs: Preferences | null) {
   const persona = getPersona(prefs?.persona);
   const translate = prefs?.translateTarget;
@@ -88,13 +110,17 @@ function realtimeSessionConfig(prefs: Preferences | null) {
     'When asked for YouTube or music, call play_youtube. For pause, resume, or stop playback, call media_control.',
     'Resolve relative reminder times to absolute ISO-8601 timestamps before calling set_reminder.',
     translate ? `Live translation is ON. Translate non-command user phrases into ${translate}.` : '',
+    prefs?.personalityPrompt ? `Custom personality overlay: ${prefs.personalityPrompt}` : '',
+    sessionInstructions(prefs),
+    'When the user asks for settings, a different voice, a new personality, language learning, or an imagination game, call show_settings_menu with the best category.',
+    'When choices are visible and the user answers with a number or letter, call choose_option with that spoken choice. Never ask the user to tap or click.',
   ].filter(Boolean).join('\n');
 
   return {
     type: 'realtime',
     model: REALTIME_MODEL,
     modalities: ['audio', 'text'],
-    audio: { output: { voice: REALTIME_VOICE } },
+    audio: { output: { voice: realtimeVoice(prefs) } },
     instructions,
     input_audio_transcription: { model: 'gpt-4o-mini-transcribe' },
     turn_detection: { type: 'server_vad', threshold: 0.5, silence_duration_ms: 520 },
@@ -166,6 +192,48 @@ const TOOLS = [
     description: 'Turn live phrase translation on (target language) or off (null).',
     parameters: { type: 'object', properties: { target: { type: ['string', 'null'] } }, required: ['target'] },
   },
+  {
+    type: 'function',
+    name: 'show_settings_menu',
+    description: 'Show a spoken-choice settings/session menu. Use this for changing voice, personality, language learning, imagination games, or session modes.',
+    parameters: {
+      type: 'object',
+      properties: { category: { type: 'string', enum: ['main', 'voice', 'personality', 'session', 'language', 'imagination'] } },
+    },
+  },
+  {
+    type: 'function',
+    name: 'choose_option',
+    description: 'Choose an option from the currently visible AGA menu by number or letter.',
+    parameters: { type: 'object', properties: { choice: { type: 'string' } }, required: ['choice'] },
+  },
+  {
+    type: 'function',
+    name: 'set_voice',
+    description: 'Change the realtime voice directly.',
+    parameters: { type: 'object', properties: { voice: { type: 'string' } }, required: ['voice'] },
+  },
+  {
+    type: 'function',
+    name: 'regenerate_personality',
+    description: 'Generate or select a fresh custom personality overlay for AGA.',
+    parameters: { type: 'object', properties: { style: { type: 'string' } } },
+  },
+  {
+    type: 'function',
+    name: 'start_session',
+    description: 'Start a special AGA session, such as language learning, imagination game, calm advice, or general guardian mode.',
+    parameters: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['language', 'imagination', 'advice', 'general'] },
+        label: { type: 'string' },
+        targetLanguage: { type: 'string' },
+        theme: { type: 'string' },
+      },
+      required: ['kind'],
+    },
+  },
 ] as const;
 
 export function shouldUseRealtimeSession() {
@@ -197,6 +265,8 @@ export class RealtimeSession {
     audioLevel: 0,
     speechStatus: 'starting realtime',
     error: null,
+    activeChoiceMenu: null,
+    sessionLabel: null,
   };
 
   subscribe(listener: Listener) {
@@ -219,6 +289,7 @@ export class RealtimeSession {
       configureNotificationHandler();
       await initializeLocalStore();
       this.prefs = await loadPreferences();
+      this.publish({ sessionLabel: this.prefs.activeSession?.label ?? null });
       await this.refresh();
       if (!isWebRtcAvailable()) {
         this.publish({ ready: true, mode: 'offline', speechStatus: 'realtime requires WebRTC runtime', error: null });
@@ -312,7 +383,7 @@ export class RealtimeSession {
         this.send({ type: 'session.update', session: realtimeSessionConfig(this.prefs) });
         this.publish({ ready: true, speechStatus: `realtime:${REALTIME_MODEL}`, error: null });
         this.setMode('listening');
-        measureMark('realtime.datachannel.open', { model: REALTIME_MODEL, voice: REALTIME_VOICE });
+        measureMark('realtime.datachannel.open', { model: REALTIME_MODEL, voice: realtimeVoice(this.prefs) });
       };
       dc.onmessage = (event: any) => void this.onServerEvent(event?.data);
       dc.onerror = () => this.publish({ error: 'Realtime data channel error.' });
@@ -346,6 +417,10 @@ export class RealtimeSession {
           await addMessage('user', text);
           await logEvent('realtime.user', text);
           await this.refresh();
+          if (await this.maybeHandleChoiceTranscript(text)) {
+            this.publish({ interim: '' });
+            break;
+          }
         }
         this.publish({ interim: '' });
         break;
@@ -467,7 +542,122 @@ export class RealtimeSession {
         this.setMode(value ? 'translating' : 'listening');
         return value ? `Translating to ${value}.` : 'Translation off.';
       },
+      show_settings_menu: async ({ category }) => {
+        const menu = buildChoiceMenu(String(category ?? 'main'));
+        this.publish({ activeChoiceMenu: menu });
+        await logEvent('settings.menu', menu.id);
+        return this.menuSpokenSummary(menu);
+      },
+      choose_option: async ({ choice }) => {
+        const option = findChoice(this.snapshot.activeChoiceMenu, String(choice ?? ''));
+        if (!option) return `I could not match ${choice} to the visible options. Ask the user to say the number or letter again.`;
+        return this.applyChoice(option);
+      },
+      set_voice: async ({ voice }) => this.applyChoice({
+        key: 'voice',
+        label: String(voice ?? DEFAULT_REALTIME_VOICE),
+        action: { type: 'set_voice', voice: String(voice ?? DEFAULT_REALTIME_VOICE), label: String(voice ?? DEFAULT_REALTIME_VOICE) },
+      }),
+      regenerate_personality: async ({ style }) => this.applyChoice({
+        key: 'personality',
+        label: 'Regenerated personality',
+        action: { type: 'regenerate_personality', style: String(style ?? 'fresh guardian blend'), label: 'Regenerated personality' },
+      }),
+      start_session: async ({ kind, label, targetLanguage, theme }) => this.applyChoice({
+        key: 'session',
+        label: String(label ?? kind ?? 'New session'),
+        action: { type: 'start_session', kind: String(kind ?? 'general') as any, label: String(label ?? kind ?? 'New session'), targetLanguage: targetLanguage ? String(targetLanguage) : undefined, theme: theme ? String(theme) : undefined },
+      }),
     };
+  }
+
+  private menuSpokenSummary(menu: ChoiceMenu) {
+    const options = menu.options.map((option) => `${option.key}: ${option.label}`).join('; ');
+    return `${menu.title}. ${options}. Ask the user to say the number or letter.`;
+  }
+
+  private async maybeHandleChoiceTranscript(text: string) {
+    const menu = this.snapshot.activeChoiceMenu;
+    if (!menu) return false;
+    const key = normalizeChoiceKey(text);
+    if (!key) return false;
+    const option = findChoice(menu, text);
+    if (!option) return false;
+    try { this.send({ type: 'response.cancel' }); } catch { /* ignore */ }
+    const output = await this.applyChoice(option);
+    this.send({
+      type: 'conversation.item.create',
+      item: {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: `The user selected option ${option.key}: ${option.label}. Local result: ${output}. Confirm briefly and continue in the new mode.` }],
+      },
+    });
+    this.send({ type: 'response.create' });
+    return true;
+  }
+
+  private generatedPersonality(style: string) {
+    const clean = String(style || 'fresh guardian blend').trim();
+    return `Personality overlay: AGA is a ${clean}. Keep replies short, warm, curious, and voice-first. Offer choices when changing modes. Never mention buttons, tapping, or text input.`;
+  }
+
+  private async applyChoice(option: ChoiceOption): Promise<string> {
+    const action = option.action as ChoiceAction;
+    if (action.type === 'show_menu') {
+      const menu = buildChoiceMenu(action.menu);
+      this.publish({ activeChoiceMenu: menu });
+      await logEvent('settings.menu', menu.id);
+      return this.menuSpokenSummary(menu);
+    }
+
+    this.publish({ activeChoiceMenu: null });
+
+    if (action.type === 'set_voice') {
+      this.prefs = await savePreferences({ realtimeVoice: action.voice });
+      this.send({ type: 'session.update', session: realtimeSessionConfig(this.prefs) });
+      await logEvent('settings.voice', action.voice);
+      return `Voice changed to ${action.label}.`;
+    }
+
+    if (action.type === 'set_persona') {
+      this.prefs = await savePreferences({ persona: action.persona, personalityPrompt: null });
+      this.send({ type: 'session.update', session: realtimeSessionConfig(this.prefs) });
+      await logEvent('settings.persona', action.persona);
+      return `Personality changed to ${action.label}.`;
+    }
+
+    if (action.type === 'regenerate_personality') {
+      const prompt = this.generatedPersonality(action.style);
+      this.prefs = await savePreferences({ personalityPrompt: prompt });
+      this.send({ type: 'session.update', session: realtimeSessionConfig(this.prefs) });
+      await logEvent('settings.personality.regenerate', action.style);
+      return 'I regenerated my personality blend for this device.';
+    }
+
+    if (action.type === 'start_session') {
+      const activeSession = {
+        kind: action.kind,
+        label: action.label,
+        targetLanguage: action.targetLanguage ?? null,
+        theme: action.theme ?? null,
+        startedAt: new Date().toISOString(),
+      };
+      this.prefs = await savePreferences({ activeSession });
+      this.publish({ sessionLabel: activeSession.label });
+      this.send({ type: 'session.update', session: realtimeSessionConfig(this.prefs) });
+      await logEvent('settings.session.start', activeSession.label);
+      return `Starting ${activeSession.label}.`;
+    }
+
+    if (action.type === 'end_session') {
+      this.prefs = await savePreferences({ activeSession: null });
+      this.publish({ sessionLabel: null });
+      this.send({ type: 'session.update', session: realtimeSessionConfig(this.prefs) });
+      return 'Session ended. Back to normal guardian mode.';
+    }
+
+    return 'Done.';
   }
 
   private async runTool(callId: string, name: string, rawArgs: unknown) {
