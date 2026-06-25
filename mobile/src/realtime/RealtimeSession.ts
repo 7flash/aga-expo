@@ -1,37 +1,27 @@
 import { getPersona } from '../aga/personas';
 import type { AgaMode } from '../aga/turn';
 import {
-  addMemory,
   addMessage,
-  addReminder,
-  clearReminders,
   initializeLocalStore,
   listMessages,
   listPendingReminders,
   loadPreferences,
   logEvent,
   savePreferences,
-  searchMemories,
   type Preferences,
   type Reminder,
 } from '../db/localStore';
-import {
-  cancelAllNotifications,
-  configureNotificationHandler,
-  ensureNotificationPermission,
-  scheduleAgaReminderNotification,
-} from '../notifications/localNotifications';
-import { searchYouTube, type YouTubeResult } from '../media/youtube';
+import { configureNotificationHandler } from '../notifications/localNotifications';
+import type { YouTubeResult } from '../media/youtube';
 import { measureAsync, measureMark } from '../observability/measure';
-import { buildChoiceMenu, findChoice, normalizeChoiceKey, type ChoiceMenu, type ChoiceOption, type ChoiceAction, type SessionKind } from '../aga/choiceMenus';
-import { BUILTIN_CAPABILITY_TOOLS, buildTurnContextBlock, runGetTimeCapability, runGetWeatherCapability } from '../aga/capabilityRegistry';
+import { findChoice, normalizeChoiceKey, type ChoiceMenu } from '../aga/choiceMenus';
+import { BUILTIN_CAPABILITY_TOOLS, buildTurnContextBlock } from '../aga/capabilityRegistry';
+import { createCapabilityRunner } from '../aga/capabilityRunner';
 import {
-  executeRemoteTool,
   fetchAndApplyRemoteConfig,
   getRemoteConfig,
   getRemoteConfigRevision,
   getRemoteToolDefinitions,
-  getRemoteTools,
   remoteConfigPromptBlock,
   startRemoteConfigPoller,
   type RemoteConfig,
@@ -74,7 +64,6 @@ export type RealtimeSnapshot = {
 };
 
 type Listener = (snapshot: RealtimeSnapshot) => void;
-type ToolHandler = (args: Record<string, unknown>) => Promise<string>;
 
 function env(name: string) {
   return process.env?.[name] ?? '';
@@ -596,139 +585,27 @@ export class RealtimeSession {
     }
   }
 
-  private toolHandlers(): Record<string, ToolHandler> {
-    const handlers: Record<string, ToolHandler> = {
-      get_time: async (args) => runGetTimeCapability(args),
-      get_weather: async (args) => runGetWeatherCapability(args, this.prefs),
-      remember: async ({ text }) => {
-        await addMemory(String(text ?? ''));
-        await logEvent('memory.add', String(text ?? ''));
-        await this.refresh();
-        return `Saved: ${text}`;
-      },
-      recall: async ({ query }) => {
-        const found = await searchMemories(query ? String(query) : undefined, 6);
-        return found.length ? found.map((memory) => memory.text).join('; ') : 'No memories yet.';
-      },
-      set_reminder: async ({ text, when_iso }) => {
-        const dueAt = String(when_iso ?? new Date(Date.now() + 60_000).toISOString());
-        const notificationId = await scheduleAgaReminderNotification({
-          body: String(text ?? ''),
-          dueAt,
-          data: { kind: 'aga.reminder' },
-        }).catch(() => null);
-        const reminder = await addReminder(String(text ?? ''), dueAt, notificationId);
-        await ensureNotificationPermission();
-        await logEvent('reminder.add', `${reminder.text} @ ${dueAt}${notificationId ? ` n=${notificationId}` : ''}`);
-        await this.refresh();
-        return `Reminder set for ${new Date(dueAt).toLocaleString()}.`;
-      },
-      list_reminders: async () => {
-        const pending = await listPendingReminders(8);
-        return pending.length ? pending.map((reminder) => `${reminder.text} (${reminder.dueAt})`).join('; ') : 'No pending reminders.';
-      },
-      clear_reminders: async () => {
-        await clearReminders();
-        await cancelAllNotifications();
-        await this.refresh();
-        return 'All reminders cleared.';
-      },
-      play_youtube: async ({ query }) => {
-        const q = String(query ?? 'music').trim() || 'music';
-        this.publish({ activeMedia: { type: 'youtube', videoId: '', title: q, url: '', thumbnailUrl: null, query: q, state: 'loading' } as ActiveMedia });
-        this.setMode('media');
-        const result = await searchYouTube(q);
-        this.publish({ activeMedia: { ...result, type: 'youtube', state: 'playing' }, mediaCommand: null });
-        await logEvent('youtube.play', `${result.title} ${result.url}`);
-        await this.refresh();
-        return `Playing ${result.title}. I can still speak over the music; say pause, resume, or close video any time.`;
-      },
-      media_control: async ({ command }) => {
-        const cmd = String(command ?? '') as 'pause' | 'resume' | 'stop';
-        if (cmd === 'stop') {
-          this.publish({ activeMedia: null, mediaCommand: 'stop' });
-          this.setMode('listening');
-          return 'Stopped playback.';
+  private capabilityRunner() {
+    return createCapabilityRunner({
+      getPrefs: () => this.prefs,
+      setPrefs: (prefs) => { this.prefs = prefs; },
+      publish: (patch) => {
+        const mediaState = patch.mediaState as ('playing' | 'paused' | 'stopped' | undefined);
+        const normalized = { ...patch } as any;
+        delete normalized.mediaState;
+        if (mediaState && this.snapshot.activeMedia) {
+          normalized.activeMedia = { ...this.snapshot.activeMedia, state: mediaState };
         }
-        const state = cmd === 'pause' ? 'paused' : 'playing';
-        this.publish({
-          mediaCommand: cmd,
-          activeMedia: this.snapshot.activeMedia ? { ...this.snapshot.activeMedia, state } : null,
-        });
-        return cmd === 'pause' ? 'Paused.' : 'Resuming.';
+        this.publish(normalized);
       },
-      set_listening_mode: async ({ mode, allow_barge_in }) => {
-        const raw = String(mode ?? 'strict').toLowerCase();
-        const nextMode: RealtimeListenMode = raw === 'handsfree' ? 'handsfree' : raw === 'answer_window' ? 'answer_window' : 'strict';
-        const nextBargeIn = typeof allow_barge_in === 'boolean' ? allow_barge_in : allowBargeIn(this.prefs);
-        this.prefs = await savePreferences({ realtimeListenMode: nextMode, allowBargeIn: nextBargeIn } as Partial<Preferences>);
-        this.publish({ listeningMode: listeningModeLabel(nextMode, nextBargeIn) });
-        this.send({ type: 'session.update', session: realtimeSessionConfig(this.prefs, true) });
-        await logEvent('settings.listening', listeningModeLabel(nextMode, nextBargeIn));
-        return `Listening mode set to ${listeningModeLabel(nextMode, nextBargeIn)}.`;
-      },
-      refresh_remote_config: async () => {
-        await this.applyRemoteConfig('tool');
-        return `Pulled server configuration revision ${getRemoteConfigRevision()}.`;
-      },
-      set_persona: async ({ persona }) => {
-        this.prefs = await savePreferences({ persona: String(persona ?? 'warm') });
-        this.send({ type: 'session.update', session: realtimeSessionConfig(this.prefs, true) });
-        await logEvent('prefs.persona', String(persona ?? ''));
-        return `Persona set to ${persona}.`;
-      },
-      set_translate: async ({ target }) => {
-        const value = target == null ? null : String(target);
-        this.prefs = await savePreferences({ translateTarget: value });
-        this.send({ type: 'session.update', session: realtimeSessionConfig(this.prefs, true) });
-        this.setMode(value ? 'translating' : 'listening');
-        return value ? `Translating to ${value}.` : 'Translation off.';
-      },
-      show_settings_menu: async ({ category }) => {
-        const menu = buildChoiceMenu(String(category ?? 'main'));
-        this.publish({ activeChoiceMenu: menu });
-        await logEvent('settings.menu', menu.id);
-        return this.menuSpokenSummary(menu);
-      },
-      choose_option: async ({ choice }) => {
-        const option = findChoice(this.snapshot.activeChoiceMenu, String(choice ?? ''));
-        if (!option) return `I could not match ${choice} to the visible options. Say the number, letter, or option name again.`;
-        return this.applyChoice(option);
-      },
-      set_voice: async ({ voice }) => this.applyChoice({
-        key: 'voice',
-        label: String(voice ?? DEFAULT_REALTIME_VOICE),
-        action: { type: 'set_voice', voice: String(voice ?? DEFAULT_REALTIME_VOICE), label: String(voice ?? DEFAULT_REALTIME_VOICE) },
-      }),
-      regenerate_personality: async ({ style }) => this.applyChoice({
-        key: 'personality',
-        label: 'Regenerated personality',
-        action: { type: 'regenerate_personality', style: String(style ?? 'fresh guardian blend'), label: 'Regenerated personality' },
-      }),
-      start_session: async ({ kind, label, targetLanguage, theme }) => this.applyChoice({
-        key: 'session',
-        label: String(label ?? kind ?? 'New session'),
-        action: { type: 'start_session', kind: String(kind ?? 'general') as SessionKind, label: String(label ?? kind ?? 'New session'), targetLanguage: targetLanguage ? String(targetLanguage) : undefined, theme: theme ? String(theme) : undefined },
-      }),
-      end_session: async () => this.applyChoice({
-        key: 'end',
-        label: 'End current session',
-        action: { type: 'end_session' },
-      }),
-    };
-    for (const tool of getRemoteTools()) {
-      handlers[tool.name] = async (args) => executeRemoteTool(tool.name, args, {
-        deviceLabel: (this.prefs as any)?.deviceLabel,
-        revision: getRemoteConfigRevision(),
-        activeSession: this.prefs?.activeSession ?? null,
-      });
-    }
-    return handlers;
-  }
-
-  private menuSpokenSummary(menu: ChoiceMenu) {
-    const options = menu.options.map((option) => `${option.key}: ${option.label}`).join('; ');
-    return `${menu.title}. ${options}. Say the number, letter, or option name.`;
+      setMode: (mode) => this.setMode(mode),
+      refresh: () => this.refresh(),
+      updateRealtimeSession: () => this.send({ type: 'session.update', session: realtimeSessionConfig(this.prefs, true) }),
+      applyRemoteConfig: (reason) => this.applyRemoteConfig(reason),
+      requestReconnect: (reason) => { this.pendingReconnectReason = reason; },
+      getActiveChoiceMenu: () => this.snapshot.activeChoiceMenu,
+      defaultVoice: DEFAULT_REALTIME_VOICE,
+    });
   }
 
   private async maybeHandleChoiceTranscript(text: string) {
@@ -736,128 +613,27 @@ export class RealtimeSession {
     if (!menu) return false;
     const key = normalizeChoiceKey(text);
     if (!key) return false;
-    const option = findChoice(menu, text);
-    if (!option) return false;
+    const output = await this.capabilityRunner().chooseFromText(text);
+    if (!output) return false;
     try { this.send({ type: 'response.cancel' }); } catch { /* ignore */ }
-    const output = await this.applyChoice(option);
     this.send({
       type: 'conversation.item.create',
       item: {
         type: 'message',
         role: 'user',
-        content: [{ type: 'input_text', text: `The user selected option ${option.key}: ${option.label}. Local result: ${output}. Confirm briefly and continue in the new mode.` }],
+        content: [{ type: 'input_text', text: `The user selected from the visible menu. Local result: ${output}. Confirm briefly and continue in the new mode.` }],
       },
     });
     this.send({ type: 'response.create' });
     return true;
   }
 
-  private generatedPersonality(style: string) {
-    const clean = String(style || 'fresh guardian blend').trim();
-    return `Personality overlay: AGA is a ${clean}. Keep replies short, warm, curious, and voice-first. Offer choices when changing modes. Never mention buttons, tapping, or text input.`;
-  }
-
-  private async applyChoice(option: ChoiceOption): Promise<string> {
-    const action = option.action as ChoiceAction;
-    if (action.type === 'show_menu') {
-      const menu = buildChoiceMenu(action.menu);
-      this.publish({ activeChoiceMenu: menu });
-      await logEvent('settings.menu', menu.id);
-      return this.menuSpokenSummary(menu);
-    }
-
-    this.publish({ activeChoiceMenu: null });
-
-    if (action.type === 'set_voice') {
-      this.prefs = await savePreferences({ realtimeVoice: action.voice });
-      // Some Realtime voices are effectively fixed at session start in WebRTC.
-      // Persist immediately, update the live session best-effort, then restart
-      // after the confirmation finishes so the next response is definitely the
-      // selected voice.
-      this.send({ type: 'session.update', session: realtimeSessionConfig(this.prefs, true) });
-      this.pendingReconnectReason = `voice:${action.voice}`;
-      this.publish({ speechStatus: `voice set: ${action.label}` });
-      await logEvent('settings.voice', action.voice);
-      return `Voice changed to ${action.label}. I will use it from my next reply.`;
-    }
-
-    if (action.type === 'set_persona') {
-      this.prefs = await savePreferences({ persona: action.persona, personalityPrompt: null });
-      this.send({ type: 'session.update', session: realtimeSessionConfig(this.prefs, true) });
-      await logEvent('settings.persona', action.persona);
-      return `Personality changed to ${action.label}.`;
-    }
-
-    if (action.type === 'regenerate_personality') {
-      const prompt = this.generatedPersonality(action.style);
-      this.prefs = await savePreferences({ personalityPrompt: prompt });
-      this.send({ type: 'session.update', session: realtimeSessionConfig(this.prefs, true) });
-      await logEvent('settings.personality.regenerate', action.style);
-      return 'I regenerated my personality blend for this device.';
-    }
-
-    if (action.type === 'start_remote_skill') {
-      const activeSession = {
-        kind: 'remote' as SessionKind,
-        label: action.label,
-        skillId: action.skillId,
-        instructions: action.instructions,
-        targetLanguage: action.targetLanguage ?? null,
-        theme: action.theme ?? null,
-        iconUrl: action.iconUrl ?? null,
-        imageUrl: action.imageUrl ?? null,
-        toolNames: action.toolNames ?? [],
-        startedAt: new Date().toISOString(),
-      };
-      this.prefs = await savePreferences({ activeSession } as Partial<Preferences>);
-      this.publish({ sessionLabel: activeSession.label });
-      this.send({ type: 'session.update', session: realtimeSessionConfig(this.prefs, true) });
-      await logEvent('settings.remote_skill.start', `${action.skillId}: ${action.label}`);
-      return `Starting ${activeSession.label}.`;
-    }
-
-    if (action.type === 'start_session') {
-      const activeSession = {
-        kind: action.kind,
-        label: action.label,
-        targetLanguage: action.targetLanguage ?? null,
-        theme: action.theme ?? null,
-        startedAt: new Date().toISOString(),
-      };
-      this.prefs = await savePreferences({ activeSession });
-      this.publish({ sessionLabel: activeSession.label });
-      this.send({ type: 'session.update', session: realtimeSessionConfig(this.prefs, true) });
-      await logEvent('settings.session.start', activeSession.label);
-      return `Starting ${activeSession.label}.`;
-    }
-
-    if (action.type === 'end_session') {
-      this.prefs = await savePreferences({ activeSession: null });
-      this.publish({ sessionLabel: null });
-      this.send({ type: 'session.update', session: realtimeSessionConfig(this.prefs, true) });
-      return 'Session ended. Back to normal guardian mode.';
-    }
-
-    if (action.type === 'set_listening_mode') {
-      this.prefs = await savePreferences({ realtimeListenMode: action.mode, allowBargeIn: !!action.allowBargeIn } as Partial<Preferences>);
-      this.publish({ listeningMode: listeningModeLabel(action.mode, !!action.allowBargeIn) });
-      this.send({ type: 'session.update', session: realtimeSessionConfig(this.prefs, true) });
-      await logEvent('settings.listening', listeningModeLabel(action.mode, !!action.allowBargeIn));
-      return `Listening mode set to ${listeningModeLabel(action.mode, !!action.allowBargeIn)}.`;
-    }
-
-    return 'Done.';
-  }
-
   private async runTool(callId: string, name: string, rawArgs: unknown) {
     return measureAsync('realtime.tool', async () => {
       const args = parseJsonArgs(rawArgs);
-      const handler = this.toolHandlers()[name];
       let output = `Unknown tool: ${name}`;
-      if (handler) {
-        try { output = await handler(args); }
-        catch (error) { output = error instanceof Error ? error.message : 'Tool failed.'; }
-      }
+      try { output = await this.capabilityRunner().run(name, args); }
+      catch (error) { output = error instanceof Error ? error.message : 'Tool failed.'; }
       this.send({
         type: 'conversation.item.create',
         item: { type: 'function_call_output', call_id: callId, output },
