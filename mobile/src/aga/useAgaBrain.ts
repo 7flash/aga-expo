@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CognitiveEngine, type AgaBrainSnapshot } from './CognitiveEngine';
-import { RealtimeSession, shouldUseRealtimeSession, type RealtimeSnapshot } from '../realtime/RealtimeSession';
+import { RealtimeSession, type RealtimeSnapshot } from '../realtime/RealtimeSession';
 import { WakeRealtimeController } from './WakeRealtimeController';
 
 const INITIAL_SNAPSHOT: AgaBrainSnapshot = {
@@ -26,9 +26,16 @@ function env(name: string) {
   return process.env?.[name] ?? '';
 }
 
-function wantsRealtimeWakeRuntime() {
-  if (env('EXPO_PUBLIC_AGA_REALTIME_ENABLED') === '0') return false;
-  return !!(env('EXPO_PUBLIC_OPENAI_API_KEY') || env('EXPO_PUBLIC_AGA_REALTIME_TOKEN_URL') || env('EXPO_PUBLIC_AGA_REALTIME_SDP_URL'));
+function wantsWakeRuntime() {
+  const runtime = env('EXPO_PUBLIC_AGA_RUNTIME').trim().toLowerCase();
+  if (runtime === 'offline' || runtime === 'local' || runtime === 'cognitive') return false;
+  if (env('EXPO_PUBLIC_AGA_WAKE_SCOUT_ENABLED') === '0') return false;
+
+  // Wake scouting must not depend on OpenAI/WebRTC being configured.
+  // The local wake scout is the product shell; Realtime is only the engine
+  // that starts after wake. If a config/key is missing, the UI should still
+  // show mic activity and a useful error after wake instead of appearing dead.
+  return true;
 }
 
 type BrainLike = {
@@ -47,8 +54,8 @@ function normalizeRealtimeSnapshot(snapshot: RealtimeSnapshot): AgaBrainSnapshot
     ...snapshot,
     lastMeasure: snapshot.lastMeasure,
     ttsStatus: undefined,
-    voiceSummary: 'realtime WebRTC',
-    voiceCapability: undefined,
+    voiceSummary: snapshot.voiceSummary ?? 'wake/realtime voice',
+    voiceCapability: snapshot.voiceCapability,
     activeChoiceMenu: snapshot.activeChoiceMenu ?? null,
     sessionLabel: snapshot.sessionLabel ?? null,
   } as AgaBrainSnapshot;
@@ -63,14 +70,14 @@ export function useAgaBrain() {
     // WebRTC feature detection is late or missing at module-load time.
     // RealtimeSession itself will report a transport error if duplex cannot
     // start, but the mic should not silently fall back to a mismatched local brain.
-    const useRealtime = shouldUseRealtimeSession() || wantsRealtimeWakeRuntime();
+    const useWakeRuntime = wantsWakeRuntime();
     const directRealtime = process.env.EXPO_PUBLIC_AGA_REALTIME_DIRECT === '1';
-    const engine: BrainLike = useRealtime
+    const engine: BrainLike = useWakeRuntime
       ? (directRealtime ? new RealtimeSession() : new WakeRealtimeController())
       : new CognitiveEngine();
     engineRef.current = engine;
     const unsubscribe = engine.subscribe((next: any) => {
-      setSnapshot(useRealtime ? normalizeRealtimeSnapshot(next) : next);
+      setSnapshot(useWakeRuntime ? normalizeRealtimeSnapshot(next) : next);
     });
     void engine.start();
     return () => {

@@ -1,4 +1,4 @@
-import { Platform } from 'react-native';
+import { PermissionsAndroid, Platform } from 'react-native';
 
 declare function require(name: string): any;
 import { measureAsync, measureMark } from '../observability/measure';
@@ -29,6 +29,9 @@ type Diagnostics = {
   watchdogTicks: number;
   teardownErrors: number;
   lifecycleNoise: number;
+  permission: 'unknown' | 'granted' | 'denied' | 'unavailable';
+  volumeEvents: number;
+  lastVolumeAt: string | null;
 };
 
 type StartOptions = { watchdogEnabled?: boolean };
@@ -73,6 +76,37 @@ function isWebLifecycleNoise(reason: string) {
   return WEB_LIFECYCLE_NOISE_RE.test(reason.trim());
 }
 
+
+async function requestAndroidRecordAudioPermission(callbacks: SpeechCallbacks): Promise<'granted' | 'denied' | 'unavailable'> {
+  if (Platform.OS !== 'android') return 'granted';
+  try {
+    const permission = PermissionsAndroid?.PERMISSIONS?.RECORD_AUDIO;
+    if (!permission || typeof PermissionsAndroid.request !== 'function') return 'unavailable';
+    const alreadyGranted = typeof PermissionsAndroid.check === 'function'
+      ? await PermissionsAndroid.check(permission)
+      : false;
+    if (alreadyGranted) return 'granted';
+    callbacks.onStatus?.('requesting microphone permission');
+    const result = await PermissionsAndroid.request(permission, {
+      title: 'AGA microphone access',
+      message: 'AGA needs the microphone to locally listen for the wake phrase.',
+      buttonPositive: 'Allow',
+      buttonNegative: 'Deny',
+    });
+    return result === PermissionsAndroid.RESULTS.GRANTED ? 'granted' : 'denied';
+  } catch (error) {
+    callbacks.onError?.(`microphone permission check failed: ${error instanceof Error ? error.message : String(error)}`);
+    return 'unavailable';
+  }
+}
+
+function firstTranscript(value: unknown) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item ?? '').trim()).find(Boolean) ?? '';
+  }
+  return String(value ?? '').trim();
+}
+
 export class NativeSpeechLoop {
   private callbacks: SpeechCallbacks;
   private locale: string;
@@ -99,6 +133,9 @@ export class NativeSpeechLoop {
     watchdogTicks: 0,
     teardownErrors: 0,
     lifecycleNoise: 0,
+    permission: Platform.OS === 'android' ? 'unknown' : 'granted',
+    volumeEvents: 0,
+    lastVolumeAt: null,
   };
 
   constructor(callbacks: SpeechCallbacks, locale = 'en-US') {
@@ -124,6 +161,18 @@ export class NativeSpeechLoop {
 
       if (Platform.OS === 'web') {
         await this.startWebSpeech();
+        return;
+      }
+
+      const permission = await requestAndroidRecordAudioPermission(this.callbacks);
+      this.diagnostics.permission = permission;
+      measureMark('voice.permission', { platform: Platform.OS, permission });
+      if (permission === 'denied') {
+        const message = 'Microphone permission denied. Enable microphone permission for AGA in Android app settings.';
+        this.diagnostics.provider = 'none';
+        this.diagnostics.available = false;
+        this.diagnostics.lastError = message;
+        this.callbacks.onError?.(message);
         return;
       }
 
@@ -154,6 +203,10 @@ export class NativeSpeechLoop {
   private installNativeHandlers() {
     if (!this.voice) return;
 
+    this.voice.onSpeechRecognized = () => {
+      this.callbacks.onStatus?.('recognized:native');
+      measureMark('voice.native.onSpeechRecognized');
+    };
     this.voice.onSpeechStart = () => {
       this.diagnostics.listening = true;
       this.callbacks.onStatus?.('listening:native');
@@ -165,14 +218,24 @@ export class NativeSpeechLoop {
       measureMark('voice.native.onSpeechEnd');
       this.scheduleRestart('speech_end');
     };
+    this.voice.onSpeechVolumeChanged = (event: any) => {
+      this.diagnostics.volumeEvents += 1;
+      const now = Date.now();
+      const last = this.diagnostics.lastVolumeAt ? new Date(this.diagnostics.lastVolumeAt).getTime() : 0;
+      this.diagnostics.lastVolumeAt = new Date(now).toISOString();
+      if (now - last > 1500) {
+        const value = String(event?.value ?? event?.volume ?? '').slice(0, 12);
+        this.callbacks.onStatus?.(value ? `listening:native volume ${value}` : 'listening:native audio');
+      }
+    };
     this.voice.onSpeechPartialResults = (event: any) => {
-      const text = event?.value?.[0] ?? '';
+      const text = firstTranscript(event?.value);
       this.diagnostics.lastPartialAt = new Date().toISOString();
       this.diagnostics.lastError = null;
       if (text) this.callbacks.onPartial?.(text);
     };
     this.voice.onSpeechResults = (event: any) => {
-      const text = String(event?.value?.[0] ?? '').trim();
+      const text = firstTranscript(event?.value);
       if (!text) return;
       const fingerprint = `${text.toLowerCase()}::${Math.floor(Date.now() / 1200)}`;
       if (fingerprint === this.lastFinalFingerprint) return;
@@ -339,7 +402,14 @@ export class NativeSpeechLoop {
         this.diagnostics.lastRestartReason = isRestart ? reason : null;
 
         if (this.webRecognition) this.webRecognition.start();
-        else await this.voice.start(this.locale);
+        else {
+          const startOptions = Platform.OS === 'android' ? {
+            EXTRA_LANGUAGE_MODEL: 'LANGUAGE_MODEL_FREE_FORM',
+            EXTRA_PARTIAL_RESULTS: true,
+            REQUEST_PERMISSIONS_AUTO: true,
+          } : undefined;
+          await this.voice.start(this.locale, startOptions);
+        }
 
         this.diagnostics.listening = true;
         this.diagnostics.lastError = null;

@@ -68,6 +68,8 @@ export function AgaZenScreen() {
         : mode;
   const media: any = activeMedia;
   const menu = activeChoiceMenu as any;
+  const voiceLine = error || interim || speechStatus || voiceSummary || lastMeasure || '';
+  const showVoiceTrace = !!voiceLine;
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -94,6 +96,19 @@ export function AgaZenScreen() {
           <Text style={styles.statusText}>{status}</Text>
         </View>
       </View>
+
+      {showVoiceTrace && (
+        <View style={styles.voiceTrace} pointerEvents="none">
+          <Text style={styles.voiceTraceLabel}>MIC / WAKE</Text>
+          <Text numberOfLines={2} style={styles.voiceTraceText}>{voiceLine}</Text>
+          {!!voiceSummary && voiceSummary !== voiceLine && (
+            <Text numberOfLines={1} style={styles.voiceTraceSub}>{voiceSummary}</Text>
+          )}
+          {!!lastMeasure && lastMeasure !== voiceLine && (
+            <Text numberOfLines={1} style={styles.voiceTraceSub}>{lastMeasure}</Text>
+          )}
+        </View>
+      )}
 
       <Animated.View
         pointerEvents="box-none"
@@ -258,6 +273,22 @@ const styles = StyleSheet.create({
   statusDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.faint },
   statusDotLive: { backgroundColor: colors.cyan, shadowColor: colors.cyan, shadowOpacity: 0.85, shadowRadius: 10 },
   statusText: { color: colors.text, fontSize: 12, fontWeight: '900', textTransform: 'capitalize' },
+  voiceTrace: {
+    position: 'absolute',
+    top: spacing.lg + 54,
+    left: spacing.lg,
+    right: spacing.lg,
+    zIndex: 42,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.lg,
+    backgroundColor: 'rgba(8,11,31,0.72)',
+    borderWidth: 1,
+    borderColor: 'rgba(103,232,249,0.20)',
+  },
+  voiceTraceLabel: { color: colors.cyan, fontSize: 9, fontWeight: '900', letterSpacing: 1.5, textAlign: 'center', marginBottom: 2 },
+  voiceTraceText: { color: colors.text, fontSize: 11, fontWeight: '800', textAlign: 'center', lineHeight: 15 },
+  voiceTraceSub: { color: 'rgba(103,232,249,0.60)', fontSize: 9, fontWeight: '700', textAlign: 'center', marginTop: 2 },
   avatarWrap: { position: 'absolute', top: '23%', left: 0, right: 0, zIndex: 5, alignItems: 'center' },
   interimPill: {
     position: 'absolute',

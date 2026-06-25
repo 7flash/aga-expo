@@ -44,6 +44,10 @@ export class WakeRealtimeController {
   private wakeActivationInFlight = false;
   private lastWakeFingerprint = '';
   private wakeRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private wakeHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private wakeStatusLogAt = 0;
+  private wakeEvents = { partials: 0, finals: 0, errors: 0, statuses: 0, starts: 0 };
+  private lastWakeDiagnostics: any = null;
 
   private snapshot: RealtimeSnapshot = {
     ready: false,
@@ -87,6 +91,50 @@ export class WakeRealtimeController {
     this.publish({ messages, reminders, sessionLabel: this.prefs?.activeSession?.label ?? null });
   }
 
+
+  private clearWakeHeartbeat() {
+    if (this.wakeHeartbeatTimer) clearInterval(this.wakeHeartbeatTimer);
+    this.wakeHeartbeatTimer = null;
+  }
+
+  private describeWakeLoop(loop: NativeSpeechLoop | null) {
+    if (!loop || typeof (loop as any).getDiagnostics !== 'function') return 'wake scout: starting';
+    const diagnostics = (loop as any).getDiagnostics?.() ?? {};
+    this.lastWakeDiagnostics = diagnostics;
+    const provider = diagnostics.provider || 'unknown';
+    const listening = diagnostics.listening ? 'listening' : diagnostics.restartPending ? 'rearming' : 'idle';
+    const permission = diagnostics.permission ? ` permission:${diagnostics.permission}` : '';
+    const lastError = diagnostics.lastError ? ` error:${String(diagnostics.lastError).slice(0, 80)}` : '';
+    const lastFinal = diagnostics.lastFinal ? ` heard:${String(diagnostics.lastFinal).slice(0, 60)}` : '';
+    return `wake scout ${provider}:${listening}${permission} p${this.wakeEvents.partials}/f${this.wakeEvents.finals}/r${diagnostics.restarts ?? 0}${lastFinal}${lastError}`;
+  }
+
+  private startWakeHeartbeat(loop: NativeSpeechLoop, reason: string) {
+    this.clearWakeHeartbeat();
+    this.wakeHeartbeatTimer = setInterval(() => {
+      if (!this.started || this.realtime || this.wakeLoop !== loop) return;
+      const summary = this.describeWakeLoop(loop);
+      this.publish({ speechStatus: summary, voiceSummary: summary, voiceCapability: this.lastWakeDiagnostics });
+      const now = Date.now();
+      if (now - this.wakeStatusLogAt > 12_000) {
+        this.wakeStatusLogAt = now;
+        void logEvent('wake.heartbeat', summary).catch(() => undefined);
+      }
+    }, numberEnv('EXPO_PUBLIC_AGA_WAKE_HEARTBEAT_MS', 2500));
+    measureMark('wakeScout.heartbeat.start', { reason });
+  }
+
+  private noteWakeStatus(status: string) {
+    this.wakeEvents.statuses += 1;
+    const summary = `wake scout: ${status}`;
+    this.publish({ speechStatus: summary });
+    const now = Date.now();
+    if (/unavailable|denied|missing|permission|error|started|listening/i.test(status) && now - this.wakeStatusLogAt > 1500) {
+      this.wakeStatusLogAt = now;
+      void logEvent('wake.status', status).catch(() => undefined);
+    }
+  }
+
   private async startWakeScout(reason: string) {
     if (this.wakeLoop || this.realtime || !this.started) return;
     this.prefs = await loadPreferences().catch(() => this.prefs);
@@ -97,7 +145,7 @@ export class WakeRealtimeController {
       interim: '',
       audioLevel: 0,
       activeChoiceMenu: null,
-      speechStatus: 'wake scout: listening for AGA / hey AGA',
+      speechStatus: 'wake scout: starting microphone',
       error: null,
     });
     const loop = new NativeSpeechLoop(
@@ -105,8 +153,9 @@ export class WakeRealtimeController {
         onPartial: (text) => {
           // Local scout hears background speech, but does not execute anything until wake.
           const clean = normalizeSpeech(text);
-          this.publish({ interim: clean.slice(0, 120), speechStatus: 'wake scout: hearing' });
-          measureMark('wakeScout.partial', { chars: text.length });
+          this.wakeEvents.partials += 1;
+          this.publish({ interim: clean.slice(0, 120), speechStatus: `wake scout: hearing “${clean.slice(0, 64)}”` });
+          measureMark('wakeScout.partial', { chars: text.length, partials: this.wakeEvents.partials });
 
           // Some Android/Web speech engines are slow to emit final results while
           // the room stays noisy. Wake on a partial phrase so “hey AGA” actually
@@ -116,16 +165,23 @@ export class WakeRealtimeController {
             if (wake.woke) void this.handleWakeFinal(clean, 'partial');
           }
         },
-        onFinal: (text) => void this.handleWakeFinal(text, 'final'),
+        onFinal: (text) => {
+          this.wakeEvents.finals += 1;
+          this.publish({ interim: normalizeSpeech(text).slice(0, 120), speechStatus: `wake scout: final “${normalizeSpeech(text).slice(0, 64)}”` });
+          void this.handleWakeFinal(text, 'final');
+        },
         onError: async (message) => {
+          this.wakeEvents.errors += 1;
           this.publish({ speechStatus: `wake scout error: ${message}`, error: message });
           await logEvent('wake.error', message);
         },
-        onStatus: (status) => this.publish({ speechStatus: `wake scout: ${status}` }),
+        onStatus: (status) => this.noteWakeStatus(status),
       },
       locale,
     );
     this.wakeLoop = loop;
+    this.wakeEvents.starts += 1;
+    await logEvent('wake.starting', `reason=${reason} locale=${locale}`).catch(() => undefined);
     await loop.start({ watchdogEnabled: true }).catch(async (error: unknown) => {
       const message = error instanceof Error ? error.message : String(error || 'wake scout failed');
       this.wakeLoop = null;
@@ -134,17 +190,24 @@ export class WakeRealtimeController {
       this.scheduleWakeRetry('start_error');
     });
     const diagnostics = typeof (loop as any).getDiagnostics === 'function' ? (loop as any).getDiagnostics() : null;
+    this.lastWakeDiagnostics = diagnostics;
+    this.publish({ voiceSummary: this.describeWakeLoop(loop), voiceCapability: diagnostics });
     if (diagnostics?.available === false || diagnostics?.provider === 'none') {
       this.wakeLoop = null;
       const message = diagnostics?.lastError || 'Speech recognition is not available in this runtime.';
-      this.publish({ speechStatus: `wake scout unavailable: ${message}`, error: null });
+      this.publish({ speechStatus: `wake scout unavailable: ${message}`, error: message, voiceCapability: diagnostics });
       await logEvent('wake.unavailable', message).catch(() => undefined);
+      this.scheduleWakeRetry('unavailable');
       return;
     }
+    this.startWakeHeartbeat(loop, reason);
+    this.publish({ speechStatus: this.describeWakeLoop(loop), voiceSummary: this.describeWakeLoop(loop), voiceCapability: diagnostics });
+    await logEvent('wake.started', this.describeWakeLoop(loop)).catch(() => undefined);
     measureMark('wakeScout.started', { reason, locale });
   }
 
   private async stopWakeScout(reason: string) {
+    this.clearWakeHeartbeat();
     const loop = this.wakeLoop;
     this.wakeLoop = null;
     if (!loop) return;
@@ -298,6 +361,7 @@ export class WakeRealtimeController {
     this.idleTimer = null;
     if (this.wakeRetryTimer) clearTimeout(this.wakeRetryTimer);
     this.wakeRetryTimer = null;
+    this.clearWakeHeartbeat();
     await this.stopWakeScout('stop');
     await this.sleepRealtime('stop').catch(() => undefined);
   }
