@@ -39,6 +39,9 @@ export type AgaAction =
   | { type: 'list_reminders' }
   | { type: 'clear_reminders' }
   | { type: 'request_notifications' }
+  // Current/local parser name. This matches the richer screen version you shared.
+  | { type: 'play_youtube'; query: string }
+  // Backward-compatible alias for earlier Zen patch / structured LLM output.
   | { type: 'youtube_play'; query: string }
   | { type: 'media_pause' }
   | { type: 'media_resume' }

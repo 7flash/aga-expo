@@ -1,8 +1,15 @@
 import React, { useEffect, useRef } from 'react';
 import { Animated, Pressable, StyleSheet, Text, View } from 'react-native';
-import { WebView } from 'react-native-webview';
 import { youtubeEmbedHtml } from '../media/youtube';
 import { colors, radius, spacing } from './theme';
+
+let WebView: any = null;
+try {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  WebView = require('react-native-webview').WebView;
+} catch {
+  WebView = null;
+}
 
 export type MediaCommand = 'pause' | 'resume' | 'stop' | null;
 
@@ -51,16 +58,22 @@ export function YouTubePlayer({
         </Pressable>
       </View>
       <View style={styles.webviewWrap}>
-        <WebView
-          ref={(ref) => { webviewRef.current = ref; }}
-          style={styles.webview}
-          source={{ html: youtubeEmbedHtml(videoId) }}
-          allowsInlineMediaPlayback
-          mediaPlaybackRequiresUserAction={false}
-          javaScriptEnabled
-          domStorageEnabled
-          onMessage={(event) => onEvent?.(event.nativeEvent.data)}
-        />
+        {WebView ? (
+          <WebView
+            ref={(ref: any) => { webviewRef.current = ref; }}
+            style={styles.webview}
+            source={{ html: youtubeEmbedHtml(videoId) }}
+            allowsInlineMediaPlayback
+            mediaPlaybackRequiresUserAction={false}
+            javaScriptEnabled
+            domStorageEnabled
+            onMessage={(event: any) => onEvent?.(event.nativeEvent.data)}
+          />
+        ) : (
+          <View style={styles.fallback}>
+            <Text style={styles.fallbackText}>WebView is not installed in this build.</Text>
+          </View>
+        )}
       </View>
       <Text style={styles.hint}>Say “AGA pause”, “AGA resume”, or “AGA close video”.</Text>
     </Animated.View>
@@ -91,5 +104,7 @@ const styles = StyleSheet.create({
   closeText: { color: colors.text, fontSize: 25, lineHeight: 27, fontWeight: '700' },
   webviewWrap: { height: 224, overflow: 'hidden', borderRadius: radius.lg, backgroundColor: '#050817' },
   webview: { flex: 1, backgroundColor: '#050817' },
+  fallback: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
+  fallbackText: { color: colors.muted, textAlign: 'center', fontWeight: '700' },
   hint: { marginTop: spacing.sm, color: colors.faint, fontSize: 12, textAlign: 'center', fontWeight: '700' },
 });

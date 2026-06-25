@@ -30,13 +30,6 @@ export function AgaZenScreen() {
       <View style={styles.backgroundOrbTwo} />
 
       <View style={styles.header}>
-        <View style={styles.brandPill}>
-          <View style={styles.brandDot}><Text style={styles.brandLetter}>A</Text></View>
-          <View>
-            <Text style={styles.brand}>AGA</Text>
-            <Text style={styles.brandSub}>guardian voice</Text>
-          </View>
-        </View>
         <View style={styles.statusPill}>
           <View style={[styles.statusDot, (mode === 'listening' || mode === 'speaking' || mode === 'media') && styles.statusDotLive]} />
           <Text style={styles.statusText}>{status}</Text>
@@ -60,7 +53,7 @@ export function AgaZenScreen() {
           },
         ]}
       >
-        <AgaAvatarZen mode={mode} audioLevel={audioLevel} size={282} />
+        <AgaAvatarZen mode={mode} audioLevel={audioLevel} compact={!!activeMedia} size={activeMedia ? 156 : 282} />
       </Animated.View>
 
       {!!interim && (

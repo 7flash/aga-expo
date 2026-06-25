@@ -1,6 +1,6 @@
-import type { AgaMode } from './actions';
+import type { AgaMode } from './turn';
 
-const BARGE_IN_RE = /\b(aga\s+)?(stop|quiet|cancel|shush|be quiet|wait|listen)\b/i;
+const BARGE_IN_RE = /\b(?:aga\s+)?(?:stop|quiet|cancel|shush|be\s+quiet|wait|listen|pause)\b/i;
 
 export type SpeechGateDecision = {
   accept: boolean;
@@ -23,7 +23,9 @@ export function shouldAcceptFinalSpeech(mode: AgaMode, text: string, processing:
   switch (mode) {
     case 'sleeping':
     case 'listening':
+    case 'awake':
     case 'translating':
+    case 'media':
       return { accept: true, reason: 'mode_accepts_speech', isBargeIn };
     case 'thinking':
     case 'speaking':

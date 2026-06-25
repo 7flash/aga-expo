@@ -12,17 +12,17 @@ export function hasWakeWord(text: string, wakePhrase: string) {
 
 function languageFromText(text: string) {
   const lower = normalizeSpeech(text).toLowerCase();
-  if (/\b(indonesian|bahasa|indo)\b/.test(lower)) return 'Indonesian';
-  if (/\b(russian|русский)\b/.test(lower)) return 'Russian';
-  if (/\b(spanish|español)\b/.test(lower)) return 'Spanish';
-  if (/\b(english)\b/.test(lower)) return 'English';
-  if (/\b(japanese)\b/.test(lower)) return 'Japanese';
-  if (/\b(chinese|mandarin)\b/.test(lower)) return 'Chinese';
+  if (/(?:indonesian|bahasa|indo)/.test(lower)) return 'Indonesian';
+  if (/(?:russian|русск)/.test(lower)) return 'Russian';
+  if (/(?:spanish|español|espanol)/.test(lower)) return 'Spanish';
+  if (/(?:english)/.test(lower)) return 'English';
+  if (/(?:japanese|nihongo)/.test(lower)) return 'Japanese';
+  if (/(?:chinese|mandarin)/.test(lower)) return 'Chinese';
   return 'Indonesian';
 }
 
 function parseClockTime(raw: string) {
-  const match = normalizeSpeech(raw).match(/\b(?:at\s*)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/i);
+  const match = normalizeSpeech(raw).match(/(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
   if (!match) return null;
   let hour = Number(match[1]);
   const minute = Number(match[2] ?? 0);
@@ -35,7 +35,7 @@ function parseClockTime(raw: string) {
 
 function parseReminder(raw: string): { text: string; dueAt: string } | null {
   const source = normalizeSpeech(raw);
-  const cleaned = source.replace(/^remind me\s+(to\s+)?/i, '').trim();
+  const cleaned = source.replace(/^remind\s+me\s+(?:to\s+)?/i, '').trim();
   if (!cleaned) return null;
 
   const inMatch = cleaned.match(/^(.*?)\s+in\s+(\d+)\s*(second|seconds|minute|minutes|hour|hours|day|days)\b/i);
@@ -82,12 +82,18 @@ function friendlyDue(dueAt: string) {
   }).format(new Date(dueAt));
 }
 
-function parseYouTube(text: string) {
-  const match = text.match(/(?:play|pull up|show|open|watch)\s+(.+?)(?:\s+(?:on\s+)?youtube)?$/i);
-  if (!match?.[1]) return null;
-  if (!/\b(youtube|video|watch|play|music|song|lofi|lo-fi|podcast|lecture|tutorial)\b/i.test(text)) return null;
-  const query = match[1].replace(/\b(on\s+)?youtube\b/i, '').trim();
-  return query || null;
+/** Extract a clean media search query from “play X on YouTube” and natural media commands. */
+function parseYouTube(text: string): string | null {
+  const lower = text.toLowerCase();
+  const explicit =
+    lower.match(/(?:play|put\s+on|pull\s+up|show|watch|find|search)\s+(.+?)\s+(?:on\s+|in\s+)?youtube\b/i) ||
+    lower.match(/(?:youtube|the\s+video|a\s+video|video\s+of|play\s+video)\s+(?:for\s+|of\s+|about\s+)?(.+)/i);
+  if (explicit?.[1]) return explicit[1].trim();
+
+  // Generic "play <something>" with no other handler becomes media.
+  const generic = lower.match(/^(?:play|put\s+on|pull\s+up)\s+(.+)/i);
+  if (generic?.[1]) return generic[1].replace(/\s+(?:please|for\s+me)$/i, '').trim();
+  return null;
 }
 
 export function parseVoiceCommand(rawText: string, wakePhrase = 'hey aga'): ParsedCommand {
@@ -96,46 +102,42 @@ export function parseVoiceCommand(rawText: string, wakePhrase = 'hey aga'): Pars
   const lower = text.toLowerCase();
 
   if (!text) {
-    return {
-      speech: 'I am listening. What would you like me to do?',
-      intent: 'system',
-      actions: [{ type: 'speak', text: 'I am listening. What would you like me to do?' }],
-      handledLocally: true,
-    };
+    const speech = 'I am listening. What would you like me to do?';
+    return { speech, intent: 'system', actions: [{ type: 'speak', text: speech }], handledLocally: true };
   }
 
-  if (/\b(stop|quiet|cancel|shush|be quiet)\b/.test(lower)) {
-    return { speech: 'Stopping.', intent: 'system', actions: [{ type: 'stop_speaking' }, { type: 'media_stop' }], handledLocally: true };
+  // Media transport first so “stop the video” does not get swallowed as generic stop.
+  if (/(?:stop|close|end)\s+(?:the\s+)?(?:video|music|song|youtube)/.test(lower)) {
+    return { speech: 'Stopping playback.', intent: 'media_control', actions: [{ type: 'media_stop' }], handledLocally: true };
   }
-
-  if (/\b(pause|hold video|pause video|pause music)\b/.test(lower)) {
+  if (/^(?:pause|hold\s+(?:on|that))\b/.test(lower)) {
     return { speech: 'Paused.', intent: 'media_control', actions: [{ type: 'media_pause' }], handledLocally: true };
   }
-
-  if (/\b(resume|continue|play again|resume video|resume music)\b/.test(lower)) {
+  if (/(?:resume|continue|keep\s+playing|play\s+again|unpause)/.test(lower)) {
     return { speech: 'Resuming.', intent: 'media_control', actions: [{ type: 'media_resume' }], handledLocally: true };
   }
 
-  const youtubeQuery = parseYouTube(text);
-  if (youtubeQuery) {
+  const ytQuery = parseYouTube(text);
+  if (ytQuery) {
     return {
-      speech: `Opening ${youtubeQuery} on YouTube.`,
+      speech: `Pulling up ${ytQuery}.`,
       intent: 'youtube',
-      actions: [{ type: 'youtube_play', query: youtubeQuery }],
+      actions: [{ type: 'play_youtube', query: ytQuery }],
       handledLocally: true,
     };
   }
 
-  if (/\b(test voice|voice test|test speech)\b/.test(lower)) {
+  if (/(?:^|\s)(?:stop|quiet|cancel|shush|be\s+quiet|hush)(?:\s|$)/.test(lower)) {
+    return { speech: 'Stopping.', intent: 'system', actions: [{ type: 'stop_speaking' }], handledLocally: true };
+  }
+  if (/(?:test\s+voice|voice\s+test|test\s+speech|say\s+something)/.test(lower)) {
     return { speech: 'My voice is working.', intent: 'system', actions: [{ type: 'test_voice' }], handledLocally: true };
   }
-
-  if (/\b(status|setup status|are you working|diagnostic summary)\b/.test(lower)) {
+  if (/(?:status|setup\s+status|are\s+you\s+(?:there|working)|diagnostic\s+summary)/.test(lower)) {
     return { speech: 'Checking status.', intent: 'system', actions: [{ type: 'status' }], handledLocally: true };
   }
-
-  if (/\b(help|what can i say|commands)\b/.test(lower)) {
-    const speech = 'You can talk naturally, ask for advice, set reminders, ask what I remember, translate phrases, or ask me to play a YouTube video.';
+  if (/(?:help|what\s+can\s+i\s+(?:say|ask)|commands|what\s+can\s+you\s+do)/.test(lower)) {
+    const speech = 'I can give advice, play YouTube videos, set reminders, remember things, switch how I sound, translate phrases, and more. Just talk to me — no buttons needed.';
     return { speech, intent: 'system', actions: [{ type: 'speak', text: speech }], handledLocally: true };
   }
 
@@ -148,37 +150,34 @@ export function parseVoiceCommand(rawText: string, wakePhrase = 'hey aga'): Pars
       handledLocally: true,
     };
   }
-
-  if (/\b(what are my reminders|list reminders|show reminders|pending reminders)\b/.test(lower)) {
+  if (/(?:what\s+are\s+my\s+reminders|list\s+reminders|show\s+reminders|pending\s+reminders)/.test(lower)) {
     return { speech: 'Checking reminders.', intent: 'reminder', actions: [{ type: 'list_reminders' }], handledLocally: true };
   }
-
-  if (/\b(clear reminders|delete reminders|remove reminders)\b/.test(lower)) {
+  if (/(?:clear|delete|remove)\s+(?:all\s+)?reminders/.test(lower)) {
     return { speech: 'Clearing reminders.', intent: 'reminder', actions: [{ type: 'clear_reminders' }], handledLocally: true };
   }
-
-  if (/\b(enable notifications|turn on notifications|notification permission)\b/.test(lower)) {
+  if (/(?:enable notifications|turn on notifications|notification permission)/.test(lower)) {
     return { speech: 'Checking notification permission.', intent: 'notifications', actions: [{ type: 'request_notifications' }], handledLocally: true };
   }
 
-  const remember = text.match(/(?:remember that|remember this|save memory)\s+(.+)/i);
+  const remember = text.match(/(?:remember\s+that|remember\s+this|save\s+(?:a\s+)?memory)\s+(.+)/i);
   if (remember?.[1]) {
     const memory = remember[1].trim();
     return {
-      speech: `I will remember that ${memory}`,
+      speech: `I will remember that ${memory}.`,
       intent: 'memory',
-      actions: [{ type: 'remember', text: memory }, { type: 'speak', text: `I will remember that ${memory}` }],
+      actions: [{ type: 'remember', text: memory }, { type: 'speak', text: `I will remember that ${memory}.` }],
       handledLocally: true,
     };
   }
 
-  const recall = text.match(/(?:what do you remember|search memory(?: about)?|remember anything about)\s*(.*)/i);
+  const recall = text.match(/(?:what\s+do\s+you\s+remember|search\s+memory(?:\s+about)?|remember\s+anything\s+about)\s*(.*)/i);
   if (recall) {
     return { speech: 'Let me check my memory.', intent: 'memory', actions: [{ type: 'recall', query: recall[1]?.trim() || undefined }], handledLocally: true };
   }
 
   const persona = matchPersona(text);
-  if (/\b(change|switch|be|use)\b/.test(lower) && persona) {
+  if (/(?:change|switch|be|use|sound)/.test(lower) && persona) {
     return {
       speech: `Switching to ${persona} mode.`,
       intent: 'persona',
@@ -187,7 +186,7 @@ export function parseVoiceCommand(rawText: string, wakePhrase = 'hey aga'): Pars
     };
   }
 
-  const wakePhraseMatch = text.match(/set wake phrase to\s+(.+)/i);
+  const wakePhraseMatch = text.match(/set\s+wake\s+phrase\s+to\s+(.+)/i);
   if (wakePhraseMatch?.[1]) {
     const phrase = wakePhraseMatch[1].trim();
     return {
@@ -198,23 +197,20 @@ export function parseVoiceCommand(rawText: string, wakePhrase = 'hey aga'): Pars
     };
   }
 
-  if (/\b(open settings|show settings|settings)\b/.test(lower)) {
+  if (/(?:open\s+settings|show\s+settings)/.test(lower)) {
     return { speech: 'Opening settings.', intent: 'settings', actions: [{ type: 'open_settings' }], handledLocally: true };
   }
-
-  if (/\b(show diagnostics|hide diagnostics|debug)\b/.test(lower)) {
+  if (/(?:show|hide|toggle)\s+diagnostics|debug\s+mode/.test(lower)) {
     return { speech: 'Toggling diagnostics.', intent: 'system', actions: [{ type: 'show_diagnostics' }], handledLocally: true };
   }
-
-  if (/\b(reset conversation|clear conversation)\b/.test(lower)) {
+  if (/(?:reset|clear)\s+(?:the\s+)?conversation/.test(lower)) {
     return { speech: 'Conversation cleared.', intent: 'system', actions: [{ type: 'reset_conversation' }, { type: 'speak', text: 'Conversation cleared.' }], handledLocally: true };
   }
 
-  if (/\b(stop translating|turn off translation|stop translate)\b/.test(lower)) {
+  if (/(?:stop\s+translating|turn\s+off\s+translation|stop\s+translate)/.test(lower)) {
     return { speech: 'Phrase translation is off.', intent: 'translation', actions: [{ type: 'translate_stop' }, { type: 'speak', text: 'Phrase translation is off.' }], handledLocally: true };
   }
-
-  const translate = text.match(/(?:translate|translation).*?(?:to|into)\s+([a-zа-яё\s]+)/i);
+  const translate = lower.match(/(?:translate|translation).*?(?:to|into)\s+([a-zа-яё\s]+)/i);
   if (translate) {
     const target = languageFromText(translate[1]);
     return {

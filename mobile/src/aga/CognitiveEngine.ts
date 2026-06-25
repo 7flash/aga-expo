@@ -22,7 +22,7 @@ import {
   type Reminder,
 } from '../db/localStore';
 import { searchYouTube, type YouTubeResult } from '../media/youtube';
-import { scheduleAgaReminderNotification, ensureNotificationPermission } from '../notifications/localNotifications';
+import { cancelAllNotifications, configureNotificationHandler, ensureNotificationPermission, scheduleAgaReminderNotification } from '../notifications/localNotifications';
 import { NativeSpeechLoop } from '../voice/nativeSpeech';
 import { speak, stopSpeaking } from '../voice/tts';
 
@@ -92,6 +92,7 @@ export class CognitiveEngine {
   }
 
   async start() {
+    configureNotificationHandler();
     await initializeLocalStore();
     this.prefs = await loadPreferences();
     await this.refresh();
@@ -187,7 +188,10 @@ export class CognitiveEngine {
         return;
       case 'stop_speaking':
         await stopSpeaking();
-        this.setMode('listening');
+        if (this.snapshot.activeMedia?.state === 'playing') {
+          this.publish({ mediaCommand: 'pause', activeMedia: { ...this.snapshot.activeMedia, state: 'paused' } });
+        }
+        this.setMode(this.snapshot.activeMedia ? 'media' : 'listening');
         await logEvent('voice.stop', 'Stopped TTS by command');
         return;
       case 'remember':
@@ -240,8 +244,8 @@ export class CognitiveEngine {
         return;
       }
       case 'request_notifications': {
-        const granted = await ensureNotificationPermission();
-        await this.say(granted ? 'Notifications are ready.' : 'Notifications are not enabled yet.');
+        const permission = await ensureNotificationPermission();
+        await this.say(permission === 'granted' ? 'Notifications are ready.' : 'Notifications are not enabled yet.');
         return;
       }
       case 'list_reminders': {
@@ -252,10 +256,12 @@ export class CognitiveEngine {
       }
       case 'clear_reminders':
         await clearReminders();
+        await cancelAllNotifications();
         await logEvent('reminder.clear');
         await this.refresh();
         await this.say('I cleared your reminders.');
         return;
+      case 'play_youtube':
       case 'youtube_play': {
         this.setMode('media');
         this.publish({ activeMedia: { type: 'youtube', videoId: '', title: action.query, url: '', thumbnailUrl: null, state: 'loading' } });
@@ -310,8 +316,11 @@ export class CognitiveEngine {
     const gate = shouldAcceptFinalSpeech(this.mode, text, this.processing);
     if (gate.isBargeIn) {
       await stopSpeaking();
+      if (this.snapshot.activeMedia?.state === 'playing') {
+        this.publish({ mediaCommand: 'pause', activeMedia: { ...this.snapshot.activeMedia, state: 'paused' } });
+      }
       this.processing = false;
-      this.setMode('listening');
+      this.setMode(this.snapshot.activeMedia ? 'media' : 'listening');
       await logEvent('voice.barge_in', text);
       await this.refresh();
       return;

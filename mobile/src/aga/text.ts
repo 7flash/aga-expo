@@ -3,7 +3,7 @@ export function escapeRegExp(value: string) {
 }
 
 export function normalizeSpeech(text: string) {
-  return text
+  return String(text || '')
     .replace(/[“”]/g, '"')
     .replace(/[‘’]/g, "'")
     .replace(/\s+/g, ' ')
@@ -15,7 +15,7 @@ export function hasWord(text: string, alternatives: string) {
 }
 
 export function wakeRegex(wakePhrase: string) {
-  const aliases = Array.from(new Set([wakePhrase, 'hey aga', 'okay aga', 'ok aga', 'aga', 'angel']))
+  const aliases = Array.from(new Set([wakePhrase, 'hey aga', 'okay aga', 'ok aga', 'hey angel', 'aga', 'angel']))
     .map((value) => value.trim())
     .filter(Boolean)
     .map((value) => escapeRegExp(value).replace(/\s+/g, '\\s+'));
@@ -24,5 +24,8 @@ export function wakeRegex(wakePhrase: string) {
 }
 
 export function removeWakePhrase(text: string, wakePhrase: string) {
-  return normalizeSpeech(text).replace(/^.*?\b(?:hey\s+|okay\s+|ok\s+)?/i, '').replace(wakeRegex(wakePhrase), '').trim();
+  const normalized = normalizeSpeech(text);
+  const match = normalized.match(wakeRegex(wakePhrase));
+  if (!match || match.index == null) return normalized;
+  return normalized.slice(match.index + match[0].length).trim();
 }
