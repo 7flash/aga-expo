@@ -201,8 +201,38 @@ async function searchYouTubeDataApi(query: string): Promise<YouTubeResult | null
   return normalizeRemoteResult(data, query, 'youtube_api');
 }
 
-function genericPreset(query: string): YouTubeResult | null {
+
+function presetId(kind: 'music' | 'lofi' | 'ambient' | 'sleep') {
+  const specific = {
+    music: env('EXPO_PUBLIC_AGA_DEFAULT_MUSIC_VIDEO_ID'),
+    lofi: env('EXPO_PUBLIC_AGA_LOFI_VIDEO_ID'),
+    ambient: env('EXPO_PUBLIC_AGA_AMBIENT_VIDEO_ID'),
+    sleep: env('EXPO_PUBLIC_AGA_SLEEP_MUSIC_VIDEO_ID'),
+  }[kind];
+  const fallback = env('EXPO_PUBLIC_AGA_DEFAULT_MUSIC_VIDEO_ID') || 'jfKfPfyJRdk';
+  const id = specific || fallback;
+  return /^[a-zA-Z0-9_-]{11}$/.test(id) ? id : 'jfKfPfyJRdk';
+}
+
+function classifyMusicPreset(query: string): { kind: 'music' | 'lofi' | 'ambient' | 'sleep'; title: string } | null {
   const lower = query.toLowerCase().trim();
+  // Realtime often expands “play music” into user-language searches such as
+  // “спокойная космическая музыка ambient”. Search-list embeds are unreliable
+  // and often show “This video is unavailable”, so broad music intent should be
+  // resolved to known embeddable presets unless a YouTube API/backend is set.
+  const hasMusicWord = /\b(music|song|songs|lofi|lo-fi|chill|beats|ambient|soundscape|meditation|relax|relaxing|sleep|study|focus|calm|cosmic|space)\b/i.test(lower)
+    || /(музык|песн|спокойн|космическ|эмбиент|амбиент|фон|фонов|релакс|успокаива|сон|медитац)/i.test(lower)
+    || /(musique|música|musik|音楽|音乐)/i.test(lower);
+  if (!hasMusicWord) return null;
+  if (/\b(lofi|lo-fi|study|focus|beats)\b/i.test(lower)) return { kind: 'lofi', title: 'lofi focus music' };
+  if (/\b(ambient|cosmic|space|soundscape|meditation|calm|relax|relaxing)\b/i.test(lower) || /(спокойн|космическ|эмбиент|амбиент|медитац|релакс|успокаива)/i.test(lower)) {
+    return { kind: 'ambient', title: 'calm ambient music' };
+  }
+  if (/\b(sleep|bedtime|night)\b/i.test(lower) || /(сон|ноч)/i.test(lower)) return { kind: 'sleep', title: 'soft sleep music' };
+  return { kind: 'music', title: 'calm music' };
+}
+
+function genericPreset(query: string): YouTubeResult | null {
   const explicitId = extractYouTubeVideoId(query);
   if (explicitId) {
     return {
@@ -216,22 +246,16 @@ function genericPreset(query: string): YouTubeResult | null {
     };
   }
 
-  const configured = env('EXPO_PUBLIC_AGA_DEFAULT_MUSIC_VIDEO_ID');
-  const defaultMusicId = configured && /^[a-zA-Z0-9_-]{11}$/.test(configured) ? configured : 'jfKfPfyJRdk';
-  const looksGenericMusic = /^(some\s+)?(music|songs?|lofi|lo-fi|chill|focus music|relaxing music|study music)( please| for me)?$/.test(lower)
-    || /\b(lofi|lo-fi|chill beats|focus music|study music)\b/.test(lower);
-  if (!looksGenericMusic) return null;
-
-  const title = lower.includes('lofi') || lower.includes('study') || lower.includes('focus')
-    ? 'lofi focus music'
-    : 'calm music';
+  const preset = classifyMusicPreset(query);
+  if (!preset) return null;
+  const id = presetId(preset.kind);
   return {
-    videoId: safeYouTubeVideoId(defaultMusicId),
-    title,
-    thumbnailUrl: `https://i.ytimg.com/vi/${defaultMusicId}/hqdefault.jpg`,
-    url: `https://www.youtube.com/watch?v=${defaultMusicId}`,
-    embedHtml: youtubePlayerHtml({ videoId: defaultMusicId, title }),
-    playerUrl: youtubeVideoPlayerUrl(defaultMusicId),
+    videoId: safeYouTubeVideoId(id),
+    title: preset.title,
+    thumbnailUrl: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
+    url: `https://www.youtube.com/watch?v=${id}`,
+    embedHtml: youtubePlayerHtml({ videoId: id, title: preset.title }),
+    playerUrl: youtubeVideoPlayerUrl(id),
     source: 'preset',
   };
 }

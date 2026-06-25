@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef } from 'react';
-import { Animated, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Animated, Platform, StyleSheet, Text, View } from 'react-native';
 import { youtubeEmbedHtml, youtubeSearchEmbedHtml, youtubeSearchPlayerUrl, youtubeVideoPlayerUrl } from '../media/youtube';
 import { measureMark } from '../observability/measure';
 import { colors, radius, spacing } from './theme';
@@ -37,11 +37,27 @@ function htmlForNative(input: { videoId?: string; query?: string; embedHtml?: st
   return youtubeSearchEmbedHtml(input.query || input.title);
 }
 
+function eventJson(type: string, payload: Record<string, unknown> = {}) {
+  return JSON.stringify({ type, ...payload });
+}
+
 function WebIframe({ url, title, onEvent }: { url: string; title: string; onEvent?: (event: string) => void }) {
+  const onEventRef = useRef(onEvent);
+  const mountedUrlRef = useRef<string | null>(null);
+
   useEffect(() => {
-    measureMark('youtube.iframe.mount', { url: url.slice(0, 120) });
-    onEvent?.(JSON.stringify({ type: 'player.mount', provider: 'iframe' }));
-  }, [onEvent, url]);
+    onEventRef.current = onEvent;
+  }, [onEvent]);
+
+  useEffect(() => {
+    if (mountedUrlRef.current === url) return;
+    mountedUrlRef.current = url;
+    measureMark('youtube.iframe.mount', { url: url.slice(0, 140) });
+    // Important: do not depend on the callback identity here. Parent state changes
+    // produce fresh callbacks, and re-emitting player.mount on every render creates
+    // a maximum-update-depth loop. Emit only when the actual URL changes.
+    onEventRef.current?.(eventJson('player.mount', { provider: 'iframe', url }));
+  }, [url]);
 
   return React.createElement('iframe', {
     src: url,
@@ -66,13 +82,17 @@ export function YouTubePlayer({
   embedHtml,
   playerUrl,
   command,
-  onClose,
   onEvent,
 }: Props) {
   const webviewRef = useRef<any>(null);
+  const onEventRef = useRef(onEvent);
   const slide = useRef(new Animated.Value(0)).current;
   const url = useMemo(() => directPlayerUrl({ videoId, query, playerUrl, title }), [playerUrl, query, title, videoId]);
   const html = useMemo(() => htmlForNative({ videoId, query, embedHtml, title }), [embedHtml, query, title, videoId]);
+
+  useEffect(() => {
+    onEventRef.current = onEvent;
+  }, [onEvent]);
 
   useEffect(() => {
     Animated.spring(slide, { toValue: 1, useNativeDriver: true, damping: 18, stiffness: 130 }).start();
@@ -82,6 +102,12 @@ export function YouTubePlayer({
     if (!command) return;
     measureMark('youtube.command', { command });
     webviewRef.current?.postMessage?.(JSON.stringify({ type: command }));
+    if (Platform.OS === 'web') {
+      // iframe API commands are intentionally best-effort on web. We still report
+      // the requested command once so the engine can settle mediaCommand without
+      // an update loop.
+      onEventRef.current?.(eventJson(`player.${command}`));
+    }
   }, [command]);
 
   const isSearch = !videoId && !!query;
@@ -101,9 +127,9 @@ export function YouTubePlayer({
           <Text style={styles.kicker}>{isSearch ? 'YOUTUBE SEARCH' : 'NOW PLAYING'}</Text>
           <Text numberOfLines={1} style={styles.title}>{title}</Text>
         </View>
-        <Pressable onPress={onClose} style={styles.closeButton} accessibilityRole="button" accessibilityLabel="Close YouTube player">
-          <Text style={styles.closeText}>×</Text>
-        </Pressable>
+        <View style={styles.voiceOnlyClose}>
+          <Text style={styles.voiceOnlyCloseText}>say “AGA close video”</Text>
+        </View>
       </View>
       <View style={styles.webviewWrap}>
         {Platform.OS === 'web' ? (
@@ -117,9 +143,9 @@ export function YouTubePlayer({
             mediaPlaybackRequiresUserAction={false}
             javaScriptEnabled
             domStorageEnabled
-            onMessage={(event: any) => onEvent?.(event.nativeEvent.data)}
-            onLoad={() => onEvent?.(JSON.stringify({ type: 'player.load' }))}
-            onError={(event: any) => onEvent?.(JSON.stringify({ type: 'player.error', message: event?.nativeEvent?.description }))}
+            onMessage={(event: any) => onEventRef.current?.(event.nativeEvent.data)}
+            onLoad={() => onEventRef.current?.(eventJson('player.load'))}
+            onError={(event: any) => onEventRef.current?.(eventJson('player.error', { message: event?.nativeEvent?.description }))}
           />
         ) : (
           <View style={styles.fallback}>
@@ -128,9 +154,9 @@ export function YouTubePlayer({
         )}
       </View>
       <Text style={styles.hint}>
-        {Platform.OS === 'web'
-          ? 'If browser autoplay blocks sound, the video is still opened here. Say “AGA close video” to dismiss.'
-          : 'Say “AGA pause”, “AGA resume”, or “AGA close video”.'}
+        {videoId
+          ? 'Say “AGA pause”, “AGA resume”, or “AGA close video”.'
+          : 'Search playback needs a YouTube API key or backend for exact videos. AGA will use safe presets for music.'}
       </Text>
     </Animated.View>
   );
@@ -156,8 +182,8 @@ const styles = StyleSheet.create({
   header: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginBottom: spacing.sm },
   kicker: { color: colors.pink, fontSize: 10, fontWeight: '900', letterSpacing: 1.8, marginBottom: 2 },
   title: { color: colors.text, fontSize: 16, fontWeight: '900' },
-  closeButton: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.12)' },
-  closeText: { color: colors.text, fontSize: 25, lineHeight: 27, fontWeight: '700' },
+  voiceOnlyClose: { paddingHorizontal: 10, paddingVertical: 8, borderRadius: radius.pill, backgroundColor: 'rgba(255,255,255,0.08)' },
+  voiceOnlyCloseText: { color: colors.faint, fontSize: 10, fontWeight: '900' },
   webviewWrap: { height: 244, overflow: 'hidden', borderRadius: radius.lg, backgroundColor: '#050817' },
   webview: { flex: 1, backgroundColor: '#050817' },
   fallback: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.lg },

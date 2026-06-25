@@ -779,13 +779,30 @@ export class RealtimeSession {
     try { type = JSON.parse(raw)?.type ?? raw; } catch { /* keep raw */ }
     const current = this.snapshot.activeMedia;
     if (!current) return;
-    const state = String(type).includes('paused')
+
+    const text = String(type);
+    // Lifecycle events such as player.mount/load do not change media state.
+    // Publishing a cloned activeMedia object for these events causes React
+    // render loops when the iframe remounts or reports readiness.
+    if (text.includes('mount') || text.includes('load') || text.includes('ready') || text.includes('buffering')) {
+      if (this.snapshot.mediaCommand !== null) this.publish({ mediaCommand: null });
+      return;
+    }
+
+    const state = text.includes('paused') || text.includes('pause')
       ? 'paused'
-      : String(type).includes('playing')
+      : text.includes('playing') || text.includes('resume')
         ? 'playing'
-        : String(type).includes('ended')
+        : text.includes('ended') || text.includes('stop')
           ? 'stopped'
           : current.state;
+
+    if (state === current.state && this.snapshot.mediaCommand === null) return;
+    if (state === 'stopped') {
+      this.publish({ activeMedia: null, mediaCommand: null });
+      this.setMode('listening');
+      return;
+    }
     this.publish({ activeMedia: { ...current, state }, mediaCommand: null });
   }
 

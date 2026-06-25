@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CognitiveEngine, type AgaBrainSnapshot } from './CognitiveEngine';
 import { RealtimeSession, shouldUseRealtimeSession, type RealtimeSnapshot } from '../realtime/RealtimeSession';
 import { WakeRealtimeController } from './WakeRealtimeController';
@@ -66,14 +66,23 @@ export function useAgaBrain() {
     };
   }, []);
 
+  // These callbacks must be stable. The YouTube iframe emits lifecycle events,
+  // which update media state. If this hook returns a fresh onMediaEvent function
+  // for every snapshot, child effects can loop: mount event -> setState -> new
+  // callback -> mount event -> setState. Keep the imperative bridge stable.
+  const replay = useCallback((text: string) => engineRef.current?.replay?.(text), []);
+  const closeMedia = useCallback(() => engineRef.current?.closeMedia?.(), []);
+  const onMediaEvent = useCallback((event: string) => engineRef.current?.onMediaEvent?.(event), []);
+  const rearmMic = useCallback(() => engineRef.current?.rearmMic?.(), []);
+
   return useMemo(
     () => ({
       ...snapshot,
-      replay: (text: string) => engineRef.current?.replay?.(text),
-      closeMedia: () => engineRef.current?.closeMedia?.(),
-      onMediaEvent: (event: string) => engineRef.current?.onMediaEvent?.(event),
-      rearmMic: () => engineRef.current?.rearmMic?.(),
+      replay,
+      closeMedia,
+      onMediaEvent,
+      rearmMic,
     }),
-    [snapshot],
+    [snapshot, replay, closeMedia, onMediaEvent, rearmMic],
   );
 }
