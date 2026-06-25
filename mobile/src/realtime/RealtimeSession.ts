@@ -85,6 +85,51 @@ function realtimeVoice(prefs: Preferences | null) {
   return prefs?.realtimeVoice || DEFAULT_REALTIME_VOICE;
 }
 
+const STRICT_WAKE_RE = /^\s*(?:hey\s+)?(?:aga|a\s*g\s*a|okay\s+aga|ok\s+aga|angel)\b[,:\s-]*/i;
+const ACTIVE_ANSWER_WINDOW_MS = Number(process.env.EXPO_PUBLIC_AGA_ANSWER_WINDOW_MS || 45_000);
+
+function hasWakePrefix(text: string) {
+  return STRICT_WAKE_RE.test(String(text ?? '').trim());
+}
+
+function stripWakePrefix(text: string) {
+  return String(text ?? '').replace(STRICT_WAKE_RE, '').trim();
+}
+
+function looksLikeShortAnswer(text: string) {
+  const clean = String(text ?? '').trim();
+  if (!clean) return false;
+  const words = clean.split(/\s+/).length;
+  return words <= 18;
+}
+
+function looksLikeUserPrompt(text: string) {
+  const clean = String(text ?? '').trim();
+  return /[?？]\s*$/.test(clean) || /\b(which|what|where|when|who|how|choose|pick|say|tell me|which path|which option)\b/i.test(clean);
+}
+
+function realtimeTurnDetectionForUpdate() {
+  const disabled = process.env.EXPO_PUBLIC_AGA_REALTIME_VAD === 'off';
+  if (disabled) return null;
+  const mode = process.env.EXPO_PUBLIC_AGA_REALTIME_VAD || 'semantic_vad';
+  if (mode === 'server_vad') {
+    return {
+      type: 'server_vad',
+      threshold: Number(process.env.EXPO_PUBLIC_AGA_VAD_THRESHOLD || 0.72),
+      prefix_padding_ms: Number(process.env.EXPO_PUBLIC_AGA_VAD_PREFIX_MS || 250),
+      silence_duration_ms: Number(process.env.EXPO_PUBLIC_AGA_VAD_SILENCE_MS || 650),
+      create_response: true,
+      interrupt_response: process.env.EXPO_PUBLIC_AGA_ALLOW_BARGE_IN === '1',
+    };
+  }
+  return {
+    type: 'semantic_vad',
+    eagerness: process.env.EXPO_PUBLIC_AGA_SEMANTIC_VAD_EAGERNESS || 'low',
+    create_response: true,
+    interrupt_response: process.env.EXPO_PUBLIC_AGA_ALLOW_BARGE_IN === '1',
+  };
+}
+
 function sessionInstructions(prefs: Preferences | null) {
   const session = prefs?.activeSession;
   if (!session) return '';
@@ -126,22 +171,28 @@ function realtimeSessionConfig(prefs: Preferences | null, forUpdate = false) {
     sessionInstructions(prefs),
     'When the user asks for settings, a different voice, a new personality, skills, language learning, an imagination game, or a new session, call show_settings_menu with the best category.',
     'When choices are visible and the user answers with a number or letter, call choose_option with that spoken choice. Never ask the user to tap or click.',
+    'Hot-mic policy: unless AGA has just asked a question or a choice menu is visible, only respond to user speech that begins with “AGA”, “Hey AGA”, “OK AGA”, or “Angel”. Ignore background laughter, side conversations, music lyrics, and room noise silently.',
+    'If background music is playing, keep listening with echo cancellation and speak over it briefly. Do not stop music unless the user explicitly asks.',
   ].filter(Boolean).join('\n');
 
+  const audio: Record<string, unknown> = {
+    output: { voice: realtimeVoice(prefs) },
+  };
+
+  // Keep the initial SDP payload conservative. After the data channel opens,
+  // apply the stricter hot-mic/VAD policy through session.update. The GA field
+  // for VAD is session.audio.input.turn_detection, not session.turn_detection.
+  if (forUpdate) {
+    audio.input = { turn_detection: realtimeTurnDetectionForUpdate() };
+  }
+
   const config: Record<string, unknown> = {
-    audio: {
-      output: { voice: realtimeVoice(prefs) },
-    },
+    audio,
     instructions,
     tools: TOOLS,
     tool_choice: 'auto',
   };
 
-  // The /v1/realtime/calls WebRTC session payload is strict. Keep the initial
-  // session shape close to the GA docs: type, model, audio.output.voice,
-  // instructions, tools, and tool_choice. Do not put VAD at session.turn_detection
-  // or legacy transcription at session.input_audio_transcription; gpt-realtime-2
-  // rejects both in the Calls SDP exchange. Default server VAD is used.
   if (!forUpdate) {
     config.type = 'realtime';
     config.model = REALTIME_MODEL;
@@ -282,6 +333,8 @@ export class RealtimeSession {
   private assistantBuffer = '';
   private pendingSends: unknown[] = [];
   private connected = false;
+  private waitingForResponseUntil = 0;
+  private pendingReconnectReason: string | null = null;
 
   private snapshot: RealtimeSnapshot = {
     ready: false,
@@ -402,7 +455,14 @@ export class RealtimeSession {
         if (stream) this.meterStream(stream);
       };
 
-      this.micStream = await root.navigator.mediaDevices.getUserMedia({ audio: true });
+      this.micStream = await root.navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+        },
+      });
       for (const track of this.micStream.getTracks()) pc.addTrack(track, this.micStream);
       this.meterStream(this.micStream);
 
@@ -447,6 +507,26 @@ export class RealtimeSession {
     return this.connected && this.dc?.readyState === 'open';
   }
 
+  private shouldProcessTranscript(text: string) {
+    const clean = String(text ?? '').trim();
+    if (!clean) return false;
+    if (hasWakePrefix(clean)) return true;
+    if (this.snapshot.activeChoiceMenu && findChoice(this.snapshot.activeChoiceMenu, clean)) return true;
+    if (Date.now() < this.waitingForResponseUntil && looksLikeShortAnswer(clean)) return true;
+    return process.env.EXPO_PUBLIC_AGA_STRICT_WAKE_IN_REALTIME === '0';
+  }
+
+  private async ignoreHotMicTranscript(text: string) {
+    measureMark('realtime.hotmic.ignored', { chars: text.length });
+    await logEvent('realtime.hotmic.ignored', text.slice(0, 180));
+    this.publish({ interim: '', speechStatus: this.snapshot.activeMedia ? 'music + wake listening' : 'wake listening' });
+    // If the model started a response due to VAD, cancel it. With
+    // interrupt_response=false this should be rare, but it protects against
+    // laughter/music/side-talk starting unwanted turns.
+    this.send({ type: 'response.cancel' });
+    this.send({ type: 'input_audio_buffer.clear' });
+  }
+
   private async onServerEvent(raw: string) {
     let event: any;
     try { event = JSON.parse(raw); } catch { return; }
@@ -459,8 +539,13 @@ export class RealtimeSession {
         break;
       case 'conversation.item.input_audio_transcription.completed':
       case 'conversation.item.input_audio_transcription.done': {
-        const text = String(event.transcript ?? '').trim();
-        if (text) {
+        const rawText = String(event.transcript ?? '').trim();
+        if (rawText) {
+          if (!this.shouldProcessTranscript(rawText)) {
+            await this.ignoreHotMicTranscript(rawText);
+            break;
+          }
+          const text = hasWakePrefix(rawText) ? stripWakePrefix(rawText) || rawText : rawText;
           await addMessage('user', text);
           await logEvent('realtime.user', text);
           await this.refresh();
@@ -489,6 +574,7 @@ export class RealtimeSession {
         const text = String(event.transcript ?? event.text ?? this.assistantBuffer).trim();
         if (text) {
           await addMessage('assistant', text);
+          this.waitingForResponseUntil = looksLikeUserPrompt(text) ? Date.now() + ACTIVE_ANSWER_WINDOW_MS : 0;
           await this.refresh();
         }
         this.assistantBuffer = '';
@@ -507,6 +593,11 @@ export class RealtimeSession {
         // If media is active, return to media mode after AGA finishes speaking so
         // the player volume unducks. Music keeps playing underneath the voice.
         this.setMode(this.snapshot.activeMedia ? 'media' : 'listening');
+        if (this.pendingReconnectReason) {
+          const reason = this.pendingReconnectReason;
+          this.pendingReconnectReason = null;
+          void this.reconnect(reason);
+        }
         break;
       case 'error': {
         const message = String(event.error?.message ?? 'realtime error');
@@ -669,9 +760,15 @@ export class RealtimeSession {
 
     if (action.type === 'set_voice') {
       this.prefs = await savePreferences({ realtimeVoice: action.voice });
+      // Some Realtime voices are effectively fixed at session start in WebRTC.
+      // Persist immediately, update the live session best-effort, then restart
+      // after the confirmation finishes so the next response is definitely the
+      // selected voice.
       this.send({ type: 'session.update', session: realtimeSessionConfig(this.prefs, true) });
+      this.pendingReconnectReason = `voice:${action.voice}`;
+      this.publish({ speechStatus: `voice set: ${action.label}` });
       await logEvent('settings.voice', action.voice);
-      return `Voice changed to ${action.label}.`;
+      return `Voice changed to ${action.label}. I will use it from my next reply.`;
     }
 
     if (action.type === 'set_persona') {
@@ -820,21 +917,33 @@ export class RealtimeSession {
     this.publish({ activeMedia: { ...current, state }, mediaCommand: null });
   }
 
+  private async teardownPeer(clearPending = false) {
+    if (this.meterTimer) clearInterval(this.meterTimer);
+    this.meterTimer = null;
+    this.analysers = [];
+    this.connected = false;
+    if (clearPending) this.pendingSends = [];
+    try { this.dc?.close?.(); } catch { /* ignore */ }
+    try { this.pc?.close?.(); } catch { /* ignore */ }
+    try { for (const track of this.micStream?.getTracks?.() ?? []) track.stop(); } catch { /* ignore */ }
+    try { await this.audioCtx?.close?.(); } catch { /* ignore */ }
+    this.dc = null;
+    this.pc = null;
+    this.micStream = null;
+    this.audioCtx = null;
+  }
+
+  private async reconnect(reason: string) {
+    return measureAsync('realtime.reconnect', async () => {
+      this.publish({ speechStatus: `restarting realtime: ${reason}`, mode: 'recovering' });
+      await this.teardownPeer(false);
+      await this.connect();
+    }, { reason });
+  }
+
   async stop() {
     return measureAsync('realtime.stop', async () => {
-      if (this.meterTimer) clearInterval(this.meterTimer);
-      this.meterTimer = null;
-      this.analysers = [];
-      this.connected = false;
-      this.pendingSends = [];
-      try { this.dc?.close?.(); } catch { /* ignore */ }
-      try { this.pc?.close?.(); } catch { /* ignore */ }
-      try { for (const track of this.micStream?.getTracks?.() ?? []) track.stop(); } catch { /* ignore */ }
-      try { await this.audioCtx?.close?.(); } catch { /* ignore */ }
-      this.dc = null;
-      this.pc = null;
-      this.micStream = null;
-      this.audioCtx = null;
+      await this.teardownPeer(true);
     });
   }
 }
