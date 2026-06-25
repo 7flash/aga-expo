@@ -22,10 +22,12 @@ import {
   clearReminders,
   drainDueReminders,
   listPendingReminders,
+  compactEventLogIfIdle,
   type Reminder,
 } from '../db/localStore';
 import { NativeSpeechLoop } from '../voice/nativeSpeech';
 import { speak, stopSpeaking } from '../voice/tts';
+import { shouldAcceptFinalSpeech } from '../aga/turnGate';
 
 const initialPrefs: Preferences = {
   wakePhrase: 'hey aga',
@@ -52,11 +54,19 @@ export function AgaScreen() {
   const [speechStatus, setSpeechStatus] = useState('starting');
   const loopRef = useRef<NativeSpeechLoop | null>(null);
   const prefsRef = useRef(prefs);
+  const modeRef = useRef<AgaMode>('sleeping');
+  const ignoredSpeechRef = useRef(0);
   const processingRef = useRef(false);
   const activeUntilRef = useRef(0);
   const proactiveBusyRef = useRef(false);
 
   prefsRef.current = prefs;
+  modeRef.current = mode;
+
+  const setAgaMode = useCallback((next: AgaMode) => {
+    modeRef.current = next;
+    setMode(next);
+  }, []);
 
   const refresh = useCallback(async () => {
     setMessages(await listMessages(12));
@@ -67,13 +77,13 @@ export function AgaScreen() {
 
   const say = useCallback(async (text: string) => {
     const currentPrefs = prefsRef.current;
-    setMode('speaking');
+    setAgaMode('speaking');
     await addMessage('assistant', text);
     setMessages(await listMessages(12));
     await speak(text, currentPrefs, {
-      onDone: () => setMode(currentPrefs.translateTarget ? 'translating' : 'sleeping'),
+      onDone: () => setAgaMode(currentPrefs.translateTarget ? 'translating' : 'sleeping'),
     });
-  }, []);
+  }, [setAgaMode]);
 
   const applyAction = useCallback(async (action: AgaAction) => {
     const currentPrefs = prefsRef.current;
@@ -83,7 +93,7 @@ export function AgaScreen() {
         return;
       case 'stop_speaking':
         await stopSpeaking();
-        setMode('listening');
+        setAgaMode('listening');
         await logEvent('voice.stop', 'Stopped TTS by command');
         return;
       case 'remember':
@@ -116,14 +126,14 @@ export function AgaScreen() {
       case 'translate_start': {
         const next = await savePreferences({ translateTarget: action.target });
         setPrefs(next);
-        setMode('translating');
+        setAgaMode('translating');
         await logEvent('translate.start', action.target);
         return;
       }
       case 'translate_stop': {
         const next = await savePreferences({ translateTarget: null });
         setPrefs(next);
-        setMode('sleeping');
+        setAgaMode('sleeping');
         await logEvent('translate.stop');
         return;
       }
@@ -177,11 +187,29 @@ export function AgaScreen() {
       case 'chat':
         return;
     }
-  }, [refresh, say]);
+  }, [refresh, say, setAgaMode, speechStatus]);
 
   const handleRecognizedText = useCallback(async (recognized: string) => {
     const text = recognized.trim();
-    if (!text || processingRef.current) return;
+    if (!text) return;
+
+    const gate = shouldAcceptFinalSpeech(modeRef.current, text, processingRef.current);
+    if (gate.isBargeIn) {
+      await stopSpeaking();
+      processingRef.current = false;
+      setAgaMode('listening');
+      await logEvent('voice.barge_in', text);
+      await refresh();
+      return;
+    }
+    if (!gate.accept) {
+      ignoredSpeechRef.current += 1;
+      setInterim(text);
+      await logEvent('voice.ignored', `${gate.reason}: ${text.slice(0, 180)}`);
+      await refresh();
+      return;
+    }
+
     const currentPrefs = prefsRef.current;
     const now = Date.now();
     const woke = hasWakeWord(text, currentPrefs.wakePhrase);
@@ -194,7 +222,7 @@ export function AgaScreen() {
 
     activeUntilRef.current = Date.now() + 35000;
     processingRef.current = true;
-    setMode(currentPrefs.translateTarget ? 'translating' : 'thinking');
+    setAgaMode(currentPrefs.translateTarget ? 'translating' : 'thinking');
     setInterim(text);
     await addMessage('user', text);
     await logEvent('voice.final', text);
@@ -226,7 +254,7 @@ export function AgaScreen() {
       processingRef.current = false;
       await refresh();
     }
-  }, [applyAction, refresh, say]);
+  }, [applyAction, refresh, say, setAgaMode]);
 
   const handlersRef = useRef({ onFinal: handleRecognizedText });
   handlersRef.current.onFinal = handleRecognizedText;
@@ -257,7 +285,7 @@ export function AgaScreen() {
       onStatus: (status) => setSpeechStatus(status),
     }, prefs.voiceLocale || 'en-US');
     loopRef.current = loop;
-    void loop.start();
+    void loop.start({ watchdogEnabled: true });
     return () => { void loop.destroy(); loopRef.current = null; };
   }, [ready, prefs.voiceLocale, refresh]);
 
@@ -274,6 +302,7 @@ export function AgaScreen() {
             await say(`Reminder: ${reminder.text}`);
           }
           if (due.length) await refresh();
+          if (modeRef.current === 'sleeping') await compactEventLogIfIdle();
         } finally {
           proactiveBusyRef.current = false;
         }
@@ -359,7 +388,7 @@ export function AgaScreen() {
         {prefs.showDiagnostics && (
           <View style={styles.diagnosticsPanel}>
             <Text style={styles.kicker}>DIAGNOSTICS</Text>
-            <Text style={styles.diagText}>{JSON.stringify({ diagnostics, speech: loopRef.current?.diagnostics }, null, 2)}</Text>
+            <Text style={styles.diagText}>{JSON.stringify({ diagnostics, speech: loopRef.current?.diagnostics, ignoredSpeech: ignoredSpeechRef.current }, null, 2)}</Text>
             {events.map((event, index) => <Text key={`${event.createdAt}-${index}`} style={styles.eventText}>[{event.label}] {event.detail}</Text>)}
           </View>
         )}

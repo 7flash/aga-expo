@@ -1,6 +1,7 @@
 export const MODEL_IDS = {
   openaiChat: process.env.EXPO_PUBLIC_OPENAI_MODEL || 'gpt-5.5',
   geminiText: process.env.EXPO_PUBLIC_GEMINI_MODEL || 'gemini-2.5-flash',
+  geminiLiveTranslate: process.env.EXPO_PUBLIC_GEMINI_LIVE_TRANSLATE_MODEL || 'gemini-3.5-live-translate-preview',
 } as const;
 
 export const PROVIDER_ENDPOINTS = {

@@ -14,7 +14,22 @@ type Diagnostics = {
   lastError: string | null;
   lastFinal: string | null;
   lastStartedAt: string | null;
+  lastPartialAt: string | null;
+  lastRestartReason: string | null;
+  restartBackoffMs: number;
+  restartPending: boolean;
+  watchdogTicks: number;
+  teardownErrors: number;
 };
+
+type StartOptions = {
+  watchdogEnabled?: boolean;
+};
+
+const INITIAL_BACKOFF_MS = 450;
+const MAX_BACKOFF_MS = 4000;
+const WATCHDOG_INTERVAL_MS = 15000;
+const STALE_ENGINE_MS = 90000;
 
 async function importVoice(): Promise<VoiceModule | null> {
   try {
@@ -26,6 +41,10 @@ async function importVoice(): Promise<VoiceModule | null> {
   }
 }
 
+function doubleBackoff(current: number) {
+  return Math.min(MAX_BACKOFF_MS, Math.max(INITIAL_BACKOFF_MS, current * 2));
+}
+
 export class NativeSpeechLoop {
   private callbacks: SpeechCallbacks;
   private locale: string;
@@ -33,6 +52,8 @@ export class NativeSpeechLoop {
   private destroyed = false;
   private restarting = false;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
+  private watchdogTimer: ReturnType<typeof setInterval> | null = null;
+  private watchdogEnabled = true;
   private lastFinalFingerprint = '';
   diagnostics: Diagnostics = {
     available: false,
@@ -41,6 +62,12 @@ export class NativeSpeechLoop {
     lastError: null,
     lastFinal: null,
     lastStartedAt: null,
+    lastPartialAt: null,
+    lastRestartReason: null,
+    restartBackoffMs: INITIAL_BACKOFF_MS,
+    restartPending: false,
+    watchdogTicks: 0,
+    teardownErrors: 0,
   };
 
   constructor(callbacks: SpeechCallbacks, locale = 'en-US') {
@@ -52,8 +79,9 @@ export class NativeSpeechLoop {
     this.callbacks = callbacks;
   }
 
-  async start() {
+  async start(options: StartOptions = {}) {
     this.destroyed = false;
+    this.watchdogEnabled = options.watchdogEnabled !== false;
     this.voice = await importVoice();
     this.diagnostics.available = !!this.voice;
     if (!this.voice) {
@@ -68,11 +96,13 @@ export class NativeSpeechLoop {
     };
     this.voice.onSpeechEnd = () => {
       this.diagnostics.listening = false;
-      this.callbacks.onStatus?.('restarting');
+      this.callbacks.onStatus?.('speech ended; arming again');
       this.scheduleRestart('speech_end');
     };
     this.voice.onSpeechPartialResults = (event: any) => {
       const text = event?.value?.[0] ?? '';
+      this.diagnostics.lastPartialAt = new Date().toISOString();
+      this.diagnostics.lastError = null;
       if (text) this.callbacks.onPartial?.(text);
     };
     this.voice.onSpeechResults = (event: any) => {
@@ -93,44 +123,115 @@ export class NativeSpeechLoop {
       this.scheduleRestart('error');
     };
 
+    this.startWatchdog();
     await this.safeStart(false, 'initial');
+  }
+
+  private startWatchdog() {
+    if (!this.watchdogEnabled || this.watchdogTimer) return;
+    this.watchdogTimer = setInterval(() => {
+      if (this.destroyed || !this.voice) return;
+      this.diagnostics.watchdogTicks += 1;
+
+      const lastActivity = this.diagnostics.lastPartialAt || this.diagnostics.lastStartedAt;
+      const staleFor = lastActivity ? Date.now() - new Date(lastActivity).getTime() : Number.POSITIVE_INFINITY;
+
+      // Silence is normal. Restart only if the engine appears unarmed for a long time.
+      if (!this.diagnostics.listening && staleFor > STALE_ENGINE_MS) {
+        this.callbacks.onStatus?.('speech watchdog soft restart');
+        this.scheduleRestart('watchdog_stale_unarmed');
+      }
+    }, WATCHDOG_INTERVAL_MS);
+  }
+
+  private clearWatchdog() {
+    if (this.watchdogTimer) clearInterval(this.watchdogTimer);
+    this.watchdogTimer = null;
   }
 
   private scheduleRestart(reason: string) {
     if (this.destroyed || this.restarting || this.restartTimer) return;
+    this.diagnostics.lastRestartReason = reason;
+    this.diagnostics.restartPending = true;
+    const delay = this.diagnostics.restartBackoffMs;
+    this.callbacks.onStatus?.(`restart scheduled:${reason}:${delay}ms`);
     this.restartTimer = setTimeout(() => {
       this.restartTimer = null;
+      this.diagnostics.restartPending = false;
       void this.safeStart(true, reason);
-    }, 450);
+    }, delay);
+  }
+
+  private reportTeardownError(action: string, error: unknown) {
+    const message = error instanceof Error ? error.message : String(error || 'unknown teardown error');
+    this.diagnostics.teardownErrors += 1;
+    this.diagnostics.lastError = `${action}: ${message}`;
+    this.callbacks.onError?.(this.diagnostics.lastError);
+  }
+
+  private async safeCancelOrStop(action: 'cancel' | 'stop') {
+    try {
+      await this.voice?.[action]?.();
+    } catch (error) {
+      this.reportTeardownError(`voice.${action}`, error);
+    }
   }
 
   private async safeStart(isRestart: boolean, reason: string) {
     if (this.destroyed || !this.voice) return;
     this.restarting = true;
     try {
-      try { await this.voice.cancel?.(); } catch {}
-      try { await this.voice.stop?.(); } catch {}
-      if (isRestart) this.diagnostics.restarts += 1;
+      if (isRestart) {
+        await this.safeCancelOrStop('cancel');
+        await this.safeCancelOrStop('stop');
+        this.diagnostics.restarts += 1;
+      }
       this.diagnostics.lastStartedAt = new Date().toISOString();
+      this.diagnostics.lastRestartReason = isRestart ? reason : null;
       await this.voice.start(this.locale);
       this.diagnostics.listening = true;
+      this.diagnostics.lastError = null;
+      this.diagnostics.restartBackoffMs = INITIAL_BACKOFF_MS;
       this.callbacks.onStatus?.(isRestart ? `restarted:${reason}` : 'started');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Could not start speech recognition.';
       this.diagnostics.lastError = message;
       this.diagnostics.listening = false;
+      this.diagnostics.restartBackoffMs = doubleBackoff(this.diagnostics.restartBackoffMs);
       this.callbacks.onError?.(message);
+      this.scheduleRestart(`start_failed:${reason}`);
     } finally {
       this.restarting = false;
     }
+  }
+
+  async stop(reason = 'manual_stop') {
+    if (this.restartTimer) clearTimeout(this.restartTimer);
+    this.restartTimer = null;
+    this.diagnostics.restartPending = false;
+    this.diagnostics.lastRestartReason = reason;
+    await this.safeCancelOrStop('cancel');
+    await this.safeCancelOrStop('stop');
+    this.diagnostics.listening = false;
+    this.callbacks.onStatus?.(`stopped:${reason}`);
   }
 
   async destroy() {
     this.destroyed = true;
     if (this.restartTimer) clearTimeout(this.restartTimer);
     this.restartTimer = null;
-    try { await this.voice?.destroy?.(); } catch {}
-    try { this.voice?.removeAllListeners?.(); } catch {}
+    this.diagnostics.restartPending = false;
+    this.clearWatchdog();
+    try {
+      await this.voice?.destroy?.();
+    } catch (error) {
+      this.reportTeardownError('voice.destroy', error);
+    }
+    try {
+      this.voice?.removeAllListeners?.();
+    } catch (error) {
+      this.reportTeardownError('voice.removeAllListeners', error);
+    }
     this.diagnostics.listening = false;
   }
 }

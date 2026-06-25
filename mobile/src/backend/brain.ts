@@ -45,6 +45,26 @@ async function askOpenAI(input: BrainInput) {
   return extractOpenAIText(data);
 }
 
+function extractGeminiText(data: any) {
+  const blockReason = data?.promptFeedback?.blockReason;
+  if (blockReason) {
+    throw new Error(`Gemini blocked this request: ${blockReason}.`);
+  }
+
+  const candidate = data?.candidates?.[0];
+  const finishReason = candidate?.finishReason;
+  if (finishReason && !['STOP', 'MAX_TOKENS'].includes(finishReason)) {
+    throw new Error(`Gemini could not answer because finishReason=${finishReason}.`);
+  }
+
+  const text = candidate?.content?.parts
+    ?.map((part: any) => (typeof part?.text === 'string' ? part.text : ''))
+    ?.join('\n')
+    ?.trim();
+
+  return text || 'I could not generate a reply.';
+}
+
 async function askGemini(input: BrainInput) {
   const apiKey = input.prefs.geminiApiKey || process.env.EXPO_PUBLIC_GEMINI_API_KEY;
   if (!apiKey) throw new Error('Gemini key is not set.');
@@ -56,8 +76,9 @@ async function askGemini(input: BrainInput) {
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data?.error?.message || 'Gemini request failed.');
-  return data?.candidates?.[0]?.content?.parts?.map((part: any) => part.text).join('\n').trim() || 'I could not generate a reply.';
+  return extractGeminiText(data);
 }
+
 
 export async function askBrain(input: BrainInput) {
   try {
