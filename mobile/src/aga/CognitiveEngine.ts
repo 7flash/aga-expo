@@ -1,4 +1,5 @@
 import { hasWakeWord, parseVoiceCommand } from "./actions";
+import { detectWake } from "./text";
 import type { AgaAction, AgaMode } from "./turn";
 import { shouldAcceptFinalSpeech } from "./turnGate";
 import { FinalSpeechDeduper, SerialTurnQueue } from "./turnQueue";
@@ -59,6 +60,9 @@ export type AgaBrainSnapshot = {
 };
 
 type Listener = (snapshot: AgaBrainSnapshot) => void;
+
+const WEB_TAP_AWAKE_MS = 45_000;
+const ACTIVE_WINDOW_MS = 35_000;
 
 const initialPrefs: Preferences = {
   wakePhrase: "hey aga",
@@ -184,11 +188,13 @@ export class CognitiveEngine {
   async rearmMic() {
     return measureAsync("engine.rearmMic", async () => {
       this.finalDeduper.reset();
+      this.activeUntil = Date.now() + WEB_TAP_AWAKE_MS;
+      measureMark("engine.manualAwake", { ms: WEB_TAP_AWAKE_MS });
       const ttsReady = await primeTts(this.prefs.voiceLocale || "en-US").catch(() => false);
       this.publish({
         speechStatus: ttsReady
-          ? "audio enabled; listening"
-          : "audio still locked or unavailable; check browser/site sound",
+          ? "audio enabled; AGA is awake for 45 seconds"
+          : "audio still locked; AGA is awake for 45 seconds, but browser sound may be blocked",
       });
       await this.loop?.stop?.("manual_rearm").catch(() => undefined);
       await this.startSpeechLoop().catch((error) => {
@@ -594,15 +600,32 @@ export class CognitiveEngine {
         }
 
         const now = Date.now();
-        const woke = hasWakeWord(text, this.prefs.wakePhrase);
+        const wake = detectWake(text, this.prefs.wakePhrase);
+        const woke = wake.woke || hasWakeWord(text, this.prefs.wakePhrase);
         const active = now < this.activeUntil;
+        measureMark("engine.wake.decision", {
+          woke,
+          wakeKind: wake.kind,
+          active,
+          translate: Boolean(this.prefs.translateTarget),
+          mode: this.mode,
+          chars: text.length,
+        });
 
         if (!woke && !active && !this.prefs.translateTarget) {
-          this.publish({ interim: text });
+          this.publish({
+            interim: text,
+            speechStatus: `heard “${text.slice(0, 42)}” as background — tap avatar or say ${this.prefs.wakePhrase || "AGA"}`,
+          });
+          await logEvent("voice.passive_ignored", text.slice(0, 180)).catch(() => undefined);
           return;
         }
 
-        this.activeUntil = Date.now() + 35_000;
+        if (wake.kind === "fuzzy_prefix") {
+          await logEvent("voice.fuzzy_wake", `${wake.match} => ${text.slice(0, 180)}`).catch(() => undefined);
+        }
+
+        this.activeUntil = Date.now() + ACTIVE_WINDOW_MS;
         this.processing = true;
         this.setMode(this.prefs.translateTarget ? "translating" : "thinking");
         this.publish({ interim: text, error: null });
@@ -622,6 +645,10 @@ export class CognitiveEngine {
           }
 
           const parsed = parseVoiceCommand(text, this.prefs.wakePhrase);
+          measureMark("engine.action.plan", {
+            intent: parsed.intent,
+            actions: parsed.actions.map((action) => action.type).join(","),
+          });
           for (const action of parsed.actions) {
             if (action.type !== "chat") await this.applyAction(action);
           }
@@ -634,12 +661,13 @@ export class CognitiveEngine {
               listMessages(20),
               searchMemories(undefined, 8),
             ]);
-            const reply = await askBrain({
+            const reply = await measureAsync("engine.askBrain", () => askBrain({
               text: chatAction.text,
               prefs: this.prefs,
               history,
               memories,
-            });
+            }), { chars: chatAction.text.length });
+            measureMark("engine.chat.reply", { chars: reply.length });
             await this.say(reply);
           }
         } catch (error) {

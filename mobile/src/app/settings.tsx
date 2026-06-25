@@ -1,4 +1,4 @@
-import { AgaSettingsScreen } from '../src/ui/AgaSettingsScreen';
+import { AgaSettingsScreen } from '../ui/AgaSettingsScreen';
 
 export default function Settings() {
   return <AgaSettingsScreen />;

@@ -1,5 +1,5 @@
 import { matchPersona } from './personas';
-import { normalizeSpeech, removeWakePhrase, wakeRegex } from './text';
+import { detectWake, normalizeSpeech, removeWakePhrase } from './text';
 import type { AgaAction, AgaMode, AgaTurn } from './turn';
 
 export type { AgaAction, AgaMode, AgaTurn };
@@ -7,7 +7,7 @@ export type { AgaAction, AgaMode, AgaTurn };
 export type ParsedCommand = AgaTurn & { handledLocally: boolean };
 
 export function hasWakeWord(text: string, wakePhrase: string) {
-  return wakeRegex(wakePhrase).test(normalizeSpeech(text));
+  return detectWake(text, wakePhrase).woke;
 }
 
 function languageFromText(text: string) {
@@ -138,6 +138,16 @@ export function parseVoiceCommand(rawText: string, wakePhrase = 'hey aga'): Pars
   }
   if (/(?:help|what\s+can\s+i\s+(?:say|ask)|commands|what\s+can\s+you\s+do)/.test(lower)) {
     const speech = 'I can give advice, play YouTube videos, set reminders, remember things, switch how I sound, translate phrases, and more. Just talk to me — no buttons needed.';
+    return { speech, intent: 'system', actions: [{ type: 'speak', text: speech }], handledLocally: true };
+  }
+
+  if (/(?:where\s+are\s+you|are\s+you\s+there|can\s+you\s+hear\s+me|do\s+you\s+hear\s+me|are\s+you\s+listening)/.test(lower)) {
+    const speech = 'I am here. I can hear you, and I am ready to help.';
+    return { speech, intent: 'system', actions: [{ type: 'speak', text: speech }], handledLocally: true };
+  }
+
+  if (/^(?:hi|hello|hey|how\s+are\s+you|how\s+are\s+you\s+doing|you\s+there)$/.test(lower)) {
+    const speech = 'I am here, calm and listening. What would you like help with?';
     return { speech, intent: 'system', actions: [{ type: 'speak', text: speech }], handledLocally: true };
   }
 

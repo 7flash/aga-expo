@@ -36,33 +36,22 @@ function accentFor(mode: AgaMode) {
 }
 
 /**
- * AGA's quieter, less-cartoon guardian avatar.
+ * Abstract guardian-crystal avatar.
  *
- * The face is intentionally abstract: tiny awareness glints and a soft voice
- * light instead of a big cartoon mouth. That keeps AGA feeling protective and
- * alive without reading as a robot head.
+ * No cartoon face: AGA reads as a protective luminous artifact. This keeps the
+ * avatar calm, elegant, and less uncanny while preserving state-reactive life.
  */
-export function AgaAvatarZen({
-  mode,
-  audioLevel = 0,
-  compact,
-  size: requestedSize,
-}: Props) {
+export function AgaAvatarZen({ mode, audioLevel = 0, compact, size: requestedSize }: Props) {
   const breathe = useRef(new Animated.Value(0)).current;
   const halo = useRef(new Animated.Value(0)).current;
   const orbit = useRef(new Animated.Value(0)).current;
   const pulse = useRef(new Animated.Value(0)).current;
-  const blink = useRef(new Animated.Value(1)).current;
-  const voiceLight = useRef(new Animated.Value(0)).current;
   const wing = useRef(new Animated.Value(0)).current;
+  const voice = useRef(new Animated.Value(0)).current;
   const level = useRef(new Animated.Value(0)).current;
 
   const accent = useMemo(() => accentFor(mode), [mode]);
-  const live =
-    mode === "listening" ||
-    mode === "awake" ||
-    mode === "thinking" ||
-    mode === "translating";
+  const live = mode === "listening" || mode === "awake" || mode === "thinking" || mode === "translating";
   const speaking = mode === "speaking";
   const size = requestedSize ?? (compact ? 148 : 244);
   const stageSize = size + 128;
@@ -70,7 +59,7 @@ export function AgaAvatarZen({
   useEffect(() => {
     Animated.timing(level, {
       toValue: clamp01(audioLevel),
-      duration: 120,
+      duration: 140,
       easing: Easing.out(Easing.quad),
       useNativeDriver: true,
     }).start();
@@ -79,18 +68,8 @@ export function AgaAvatarZen({
   useEffect(() => {
     const loop = Animated.loop(
       Animated.sequence([
-        Animated.timing(breathe, {
-          toValue: 1,
-          duration: 3100,
-          easing: Easing.inOut(Easing.sin),
-          useNativeDriver: true,
-        }),
-        Animated.timing(breathe, {
-          toValue: 0,
-          duration: 3100,
-          easing: Easing.inOut(Easing.sin),
-          useNativeDriver: true,
-        }),
+        Animated.timing(breathe, { toValue: 1, duration: 3200, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+        Animated.timing(breathe, { toValue: 0, duration: 3200, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
       ]),
     );
     loop.start();
@@ -102,21 +81,21 @@ export function AgaAvatarZen({
     const loop = Animated.loop(
       Animated.timing(halo, {
         toValue: 1,
-        duration: live ? 5200 : 9800,
+        duration: live || speaking ? 5200 : 9800,
         easing: Easing.linear,
         useNativeDriver: true,
       }),
     );
     loop.start();
     return () => loop.stop();
-  }, [halo, live]);
+  }, [halo, live, speaking]);
 
   useEffect(() => {
     orbit.setValue(0);
     const loop = Animated.loop(
       Animated.timing(orbit, {
         toValue: 1,
-        duration: mode === "thinking" ? 2800 : 7200,
+        duration: mode === "thinking" ? 2600 : 7600,
         easing: Easing.linear,
         useNativeDriver: true,
       }),
@@ -130,7 +109,7 @@ export function AgaAvatarZen({
     const loop = Animated.loop(
       Animated.timing(pulse, {
         toValue: 1,
-        duration: speaking ? 1300 : live ? 2200 : 4200,
+        duration: speaking ? 1250 : live ? 2200 : 4400,
         easing: Easing.out(Easing.quad),
         useNativeDriver: true,
       }),
@@ -140,145 +119,54 @@ export function AgaAvatarZen({
   }, [pulse, live, speaking]);
 
   useEffect(() => {
-    let alive = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const schedule = () => {
-      timer = setTimeout(
-        () => {
-          if (!alive) return;
-          Animated.sequence([
-            Animated.timing(blink, {
-              toValue: 0.08,
-              duration: 80,
-              useNativeDriver: true,
-            }),
-            Animated.timing(blink, {
-              toValue: 1,
-              duration: 140,
-              useNativeDriver: true,
-            }),
-          ]).start(() => alive && schedule());
-        },
-        2400 + Math.random() * 4200,
-      );
-    };
-    schedule();
-    return () => {
-      alive = false;
-      if (timer) clearTimeout(timer);
-    };
-  }, [blink]);
-
-  useEffect(() => {
-    if (speaking) {
-      const loop = Animated.loop(
-        Animated.sequence([
-          Animated.timing(voiceLight, {
-            toValue: 1,
-            duration: 120 + Math.random() * 60,
-            easing: Easing.out(Easing.quad),
-            useNativeDriver: true,
-          }),
-          Animated.timing(voiceLight, {
-            toValue: 0.18,
-            duration: 100 + Math.random() * 80,
-            easing: Easing.in(Easing.quad),
-            useNativeDriver: true,
-          }),
-        ]),
-      );
-      loop.start();
-      return () => loop.stop();
-    }
-    Animated.timing(voiceLight, {
-      toValue: live ? 0.35 : 0.08,
-      duration: 260,
-      easing: Easing.out(Easing.quad),
-      useNativeDriver: true,
-    }).start();
-  }, [live, voiceLight, speaking]);
-
-  useEffect(() => {
     if (!live && !speaking) {
       wing.stopAnimation(() => wing.setValue(0));
       return;
     }
     const loop = Animated.loop(
       Animated.sequence([
-        Animated.timing(wing, {
-          toValue: 1,
-          duration: speaking ? 760 : 1300,
-          easing: Easing.inOut(Easing.sin),
-          useNativeDriver: true,
-        }),
-        Animated.timing(wing, {
-          toValue: 0,
-          duration: speaking ? 760 : 1300,
-          easing: Easing.inOut(Easing.sin),
-          useNativeDriver: true,
-        }),
+        Animated.timing(wing, { toValue: 1, duration: speaking ? 760 : 1450, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+        Animated.timing(wing, { toValue: 0, duration: speaking ? 760 : 1450, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
       ]),
     );
     loop.start();
     return () => loop.stop();
   }, [live, speaking, wing]);
 
-  const breatheScale = breathe.interpolate({
-    inputRange: [0, 1],
-    outputRange: [1, 1.026],
-  });
-  const levelScale = level.interpolate({
-    inputRange: [0, 1],
-    outputRange: [1, 1.05],
-  });
-  const haloSpin = halo.interpolate({
-    inputRange: [0, 1],
-    outputRange: ["0deg", "360deg"],
-  });
-  const orbitSpin = orbit.interpolate({
-    inputRange: [0, 1],
-    outputRange: ["0deg", "-360deg"],
-  });
-  const pulseScale = pulse.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0.86, 1.68],
-  });
-  const pulseOpacity = pulse.interpolate({
-    inputRange: [0, 0.55, 1],
-    outputRange: [0.36, 0.16, 0],
-  });
-  const wingScale = wing.interpolate({
-    inputRange: [0, 1],
-    outputRange: [1, 1.065],
-  });
-  const leftWingRotate = wing.interpolate({
-    inputRange: [0, 1],
-    outputRange: ["-28deg", "-18deg"],
-  });
-  const rightWingRotate = wing.interpolate({
-    inputRange: [0, 1],
-    outputRange: ["28deg", "18deg"],
-  });
-  const voiceLightScale = Animated.add(voiceLight, level).interpolate({
-    inputRange: [0, 0.5, 1, 2],
-    outputRange: [0.72, 0.92, 1.18, 1.36],
-  });
-  const pupilLift = level.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0, -size * 0.012],
-  });
+  useEffect(() => {
+    if (speaking) {
+      const loop = Animated.loop(
+        Animated.sequence([
+          Animated.timing(voice, { toValue: 1, duration: 110 + Math.random() * 70, easing: Easing.out(Easing.quad), useNativeDriver: true }),
+          Animated.timing(voice, { toValue: 0.18, duration: 100 + Math.random() * 80, easing: Easing.in(Easing.quad), useNativeDriver: true }),
+        ]),
+      );
+      loop.start();
+      return () => loop.stop();
+    }
+    Animated.timing(voice, { toValue: live ? 0.4 : 0.12, duration: 260, easing: Easing.out(Easing.quad), useNativeDriver: true }).start();
+  }, [voice, live, speaking]);
+
+  const breatheScale = breathe.interpolate({ inputRange: [0, 1], outputRange: [1, 1.025] });
+  const levelScale = level.interpolate({ inputRange: [0, 1], outputRange: [1, 1.055] });
+  const haloSpin = halo.interpolate({ inputRange: [0, 1], outputRange: ["0deg", "360deg"] });
+  const orbitSpin = orbit.interpolate({ inputRange: [0, 1], outputRange: ["0deg", "-360deg"] });
+  const pulseScale = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.82, 1.62] });
+  const pulseOpacity = pulse.interpolate({ inputRange: [0, 0.55, 1], outputRange: [0.34, 0.15, 0] });
+  const wingScale = wing.interpolate({ inputRange: [0, 1], outputRange: [1, 1.07] });
+  const leftWingRotate = wing.interpolate({ inputRange: [0, 1], outputRange: ["-34deg", "-24deg"] });
+  const rightWingRotate = wing.interpolate({ inputRange: [0, 1], outputRange: ["34deg", "24deg"] });
+  const voiceScale = Animated.add(voice, level).interpolate({ inputRange: [0, 0.5, 1, 2], outputRange: [0.65, 0.92, 1.2, 1.45] });
+  const coreLift = level.interpolate({ inputRange: [0, 1], outputRange: [0, -size * 0.018] });
 
   return (
-    <View
-      pointerEvents="none"
-      style={[styles.stage, { width: stageSize, height: stageSize }]}
-    >
+    <View pointerEvents="none" style={[styles.stage, { width: stageSize, height: stageSize }]}>
       <Animated.View
         style={[
           styles.pulseRing,
           {
-            width: size * 1.02,
-            height: size * 1.02,
+            width: size * 0.98,
+            height: size * 0.98,
             borderRadius: size,
             borderColor: accent,
             opacity: pulseOpacity,
@@ -287,26 +175,15 @@ export function AgaAvatarZen({
         ]}
       />
 
-      <View
-        style={[
-          styles.outerAura,
-          {
-            width: size * 1.26,
-            height: size * 1.26,
-            borderRadius: size,
-            shadowColor: accent,
-          },
-        ]}
-      />
+      <View style={[styles.aura, { width: size * 1.18, height: size * 1.18, borderRadius: size, shadowColor: accent }]} />
 
       <Animated.View
         style={[
-          styles.wingRibbon,
-          styles.leftRibbon,
+          styles.wingBlade,
+          styles.leftWingBack,
           {
-            width: size * 0.58,
-            height: size * 0.92,
-            borderRadius: size,
+            width: size * 0.3,
+            height: size * 0.75,
             borderColor: accent,
             transform: [{ rotate: leftWingRotate }, { scaleY: wingScale }],
           },
@@ -314,12 +191,35 @@ export function AgaAvatarZen({
       />
       <Animated.View
         style={[
-          styles.wingRibbon,
-          styles.rightRibbon,
+          styles.wingBlade,
+          styles.leftWingFront,
           {
-            width: size * 0.58,
-            height: size * 0.92,
-            borderRadius: size,
+            width: size * 0.24,
+            height: size * 0.58,
+            borderColor: accent,
+            transform: [{ rotate: leftWingRotate }, { scaleY: wingScale }],
+          },
+        ]}
+      />
+      <Animated.View
+        style={[
+          styles.wingBlade,
+          styles.rightWingBack,
+          {
+            width: size * 0.3,
+            height: size * 0.75,
+            borderColor: accent,
+            transform: [{ rotate: rightWingRotate }, { scaleY: wingScale }],
+          },
+        ]}
+      />
+      <Animated.View
+        style={[
+          styles.wingBlade,
+          styles.rightWingFront,
+          {
+            width: size * 0.24,
+            height: size * 0.58,
             borderColor: accent,
             transform: [{ rotate: rightWingRotate }, { scaleY: wingScale }],
           },
@@ -330,93 +230,51 @@ export function AgaAvatarZen({
         style={[
           styles.halo,
           {
-            width: size * 0.66,
+            width: size * 0.62,
             height: size * 0.16,
-            top: stageSize / 2 - size * 0.66,
+            top: stageSize / 2 - size * 0.67,
             borderColor: speaking ? colors.gold : accent,
-            opacity: mode === "sleeping" ? 0.56 : 0.84,
             transform: [{ rotate: haloSpin }],
           },
         ]}
       />
 
-      <Animated.View
-        style={[
-          styles.orbit,
-          {
-            width: size * 1.05,
-            height: size * 1.05,
-            borderRadius: size,
-            transform: [{ rotate: orbitSpin }],
-          },
-        ]}
-      >
-        <View
-          style={[
-            styles.orbitDot,
-            { backgroundColor: accent, shadowColor: accent },
-          ]}
-        />
+      <Animated.View style={[styles.orbit, { width: size * 1.05, height: size * 1.05, borderRadius: size, transform: [{ rotate: orbitSpin }] }]}>
+        <View style={[styles.orbitDot, { backgroundColor: accent, shadowColor: accent }]} />
       </Animated.View>
 
       <Animated.View
         style={[
-          styles.core,
+          styles.crystalShell,
           {
-            width: size,
-            height: size,
-            borderRadius: size,
+            width: size * 0.66,
+            height: size * 0.66,
+            borderRadius: size * 0.15,
             shadowColor: accent,
-            transform: [{ scale: breatheScale }, { scale: levelScale }],
+            transform: [{ translateY: coreLift }, { scale: breatheScale }, { scale: levelScale }, { rotate: "45deg" }],
           },
         ]}
       >
-        <View style={styles.coreGlow} />
-        <View
-          style={[
-            styles.upperGlow,
-            { width: size * 0.64, height: size * 0.5, borderRadius: size },
-          ]}
-        />
-
-        <View
-          style={[styles.eyes, { gap: size * 0.16, marginTop: size * 0.02 }]}
-        >
+        <View style={styles.shellGlow} />
+        <View style={styles.facets}>
+          <View style={styles.facetTop} />
+          <View style={styles.facetLeft} />
+          <View style={styles.facetRight} />
+        </View>
+        <View style={[styles.innerSigil, { transform: [{ rotate: "-45deg" }] }]}>
+          <View style={[styles.sigilLine, { backgroundColor: accent, shadowColor: accent }]} />
+          <View style={[styles.sigilDot, { backgroundColor: speaking ? colors.gold : accent, shadowColor: speaking ? colors.gold : accent }]} />
           <Animated.View
             style={[
-              styles.eye,
+              styles.voiceLine,
               {
-                width: size * 0.052,
-                height: size * 0.052,
-                transform: [{ scaleY: blink }, { translateY: pupilLift }],
-              },
-            ]}
-          />
-          <Animated.View
-            style={[
-              styles.eye,
-              {
-                width: size * 0.052,
-                height: size * 0.052,
-                transform: [{ scaleY: blink }, { translateY: pupilLift }],
+                backgroundColor: speaking ? colors.gold : accent,
+                shadowColor: speaking ? colors.gold : accent,
+                transform: [{ scaleX: voiceScale }, { scaleY: voiceScale }],
               },
             ]}
           />
         </View>
-
-        <Animated.View
-          style={[
-            styles.voiceLight,
-            {
-              width: size * 0.18,
-              height: size * 0.018,
-              marginTop: size * 0.105,
-              backgroundColor: speaking ? colors.gold : accent,
-              shadowColor: speaking ? colors.gold : accent,
-              transform: [{ scaleX: voiceLightScale }, { scaleY: voiceLightScale }],
-            },
-          ]}
-        />
       </Animated.View>
     </View>
   );
@@ -425,76 +283,128 @@ export function AgaAvatarZen({
 const styles = StyleSheet.create({
   stage: { alignItems: "center", justifyContent: "center" },
   pulseRing: { position: "absolute", borderWidth: 2 },
-  outerAura: {
+  aura: {
     position: "absolute",
     backgroundColor: "transparent",
-    shadowOpacity: 0.62,
-    shadowRadius: 44,
+    shadowOpacity: 0.6,
+    shadowRadius: 42,
     shadowOffset: { width: 0, height: 0 },
   },
-  wingRibbon: {
+  wingBlade: {
     position: "absolute",
-    backgroundColor: "rgba(255,255,255,0.07)",
-    borderWidth: 1.2,
-    opacity: 0.7,
-    shadowOpacity: 0.22,
-    shadowRadius: 20,
-    shadowOffset: { width: 0, height: 10 },
+    borderRadius: 999,
+    backgroundColor: "rgba(191,247,255,0.055)",
+    borderWidth: 1.1,
+    opacity: 0.72,
+    shadowOpacity: 0.2,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
   },
-  leftRibbon: { left: 26 },
-  rightRibbon: { right: 26 },
+  leftWingBack: { left: "17%" },
+  leftWingFront: { left: "23%" },
+  rightWingBack: { right: "17%" },
+  rightWingFront: { right: "23%" },
   halo: {
     position: "absolute",
-    borderWidth: 3.5,
+    borderWidth: 3.2,
     borderRadius: 999,
-    backgroundColor: "rgba(254,243,199,0.03)",
+    backgroundColor: "rgba(254,243,199,0.035)",
+    opacity: 0.82,
   },
-  orbit: {
-    position: "absolute",
-    alignItems: "center",
-    justifyContent: "flex-start",
-  },
+  orbit: { position: "absolute", alignItems: "center", justifyContent: "flex-start" },
   orbitDot: {
-    width: 11,
-    height: 11,
-    borderRadius: 6,
-    marginTop: -5,
-    shadowOpacity: 0.9,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    marginTop: -4,
+    shadowOpacity: 0.95,
     shadowRadius: 12,
     shadowOffset: { width: 0, height: 0 },
   },
-  core: {
-    backgroundColor: "#bff7ff",
+  crystalShell: {
     alignItems: "center",
     justifyContent: "center",
-    borderWidth: 1.5,
-    borderColor: "rgba(255,255,255,0.82)",
-    shadowOpacity: 0.56,
+    backgroundColor: "rgba(191,247,255,0.92)",
+    borderWidth: 1.4,
+    borderColor: "rgba(255,255,255,0.86)",
+    shadowOpacity: 0.58,
     shadowRadius: 34,
-    shadowOffset: { width: 0, height: 15 },
+    shadowOffset: { width: 0, height: 14 },
     overflow: "hidden",
   },
-  coreGlow: {
+  shellGlow: {
     position: "absolute",
     top: 0,
     left: 0,
     right: 0,
     bottom: 0,
-    backgroundColor: "rgba(255,255,255,0.18)",
+    backgroundColor: "rgba(255,255,255,0.2)",
   },
-  upperGlow: {
+  facets: {
     position: "absolute",
-    top: "10%",
-    backgroundColor: "rgba(255,255,255,0.34)",
-    opacity: 0.72,
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
   },
-  eyes: {
-    flexDirection: "row",
+  facetTop: {
+    position: "absolute",
+    top: "8%",
+    left: "8%",
+    right: "8%",
+    height: "32%",
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.28)",
+  },
+  facetLeft: {
+    position: "absolute",
+    left: "8%",
+    bottom: "10%",
+    width: "42%",
+    height: "52%",
+    backgroundColor: "rgba(103,232,249,0.13)",
+  },
+  facetRight: {
+    position: "absolute",
+    right: "6%",
+    bottom: "8%",
+    width: "38%",
+    height: "56%",
+    backgroundColor: "rgba(167,139,250,0.12)",
+  },
+  innerSigil: {
     alignItems: "center",
     justifyContent: "center",
   },
-  eye: { borderRadius: 999, backgroundColor: "#12182c", opacity: 0.62 },
-  voiceLight: { borderRadius: 999, opacity: 0.92, shadowOpacity: 0.55, shadowRadius: 10, shadowOffset: { width: 0, height: 0 } },
+  sigilLine: {
+    width: 4,
+    height: 34,
+    borderRadius: 4,
+    opacity: 0.7,
+    shadowOpacity: 0.6,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  sigilDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    marginTop: 7,
+    opacity: 0.92,
+    shadowOpacity: 0.7,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  voiceLine: {
+    width: 28,
+    height: 4,
+    borderRadius: 4,
+    marginTop: 12,
+    opacity: 0.9,
+    shadowOpacity: 0.6,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 0 },
+  },
 });
 
 export default AgaAvatarZen;

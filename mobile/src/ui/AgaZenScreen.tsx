@@ -14,6 +14,7 @@ import { AgaAvatarZen } from "./AgaAvatarZen";
 import { MessageBubble } from "./MessageBubble";
 import { YouTubePlayer } from "./YouTubePlayer";
 import { colors, radius, spacing } from "./theme";
+import { AGA_APP_VERSION } from "../config/appVersion";
 
 export function AgaZenScreen() {
   const {
@@ -74,7 +75,7 @@ export function AgaZenScreen() {
           </View>
           <View>
             <Text style={styles.brand}>AGA</Text>
-            <Text style={styles.brandSub}>guardian voice</Text>
+            <Text style={styles.brandSub}>guardian voice · v{AGA_APP_VERSION}</Text>
           </View>
         </View>
         <View style={styles.statusPill}>
@@ -125,7 +126,9 @@ export function AgaZenScreen() {
         <Pressable
           onPress={rearmMic}
           accessibilityRole="button"
-          accessibilityLabel="Restart AGA microphone"
+          accessibilityLabel="Wake AGA for forty five seconds and restart the microphone"
+          focusable={false}
+          style={styles.avatarPressable}
         >
           <AgaAvatarZen
             mode={mode}
@@ -164,8 +167,9 @@ export function AgaZenScreen() {
                 Ask for advice, reminders, memory, translation, or YouTube.
               </Text>
               <Text style={styles.emptyText}>
-                On web, tap the avatar once if AGA can hear you but you cannot hear AGA.
+                On web, tap the avatar once to wake AGA for 45 seconds and unlock speech output.
               </Text>
+              <Text style={styles.versionText}>v{AGA_APP_VERSION}</Text>
               <Text style={styles.speechStatus}>{speechStatus}</Text>
               {!!ttsStatus && (
                 <Text style={styles.measureStatus}>TTS {ttsStatus}</Text>
@@ -299,6 +303,9 @@ const styles = StyleSheet.create({
     zIndex: 5,
     alignItems: "center",
   },
+  avatarPressable: {
+    ...({ outlineStyle: "none", outlineWidth: 0 } as any),
+  },
   interimPill: {
     position: "absolute",
     top: "48%",
@@ -359,6 +366,7 @@ const styles = StyleSheet.create({
     marginTop: spacing.sm,
     lineHeight: 20,
   },
+  versionText: { color: colors.faint, fontSize: 11, fontWeight: "800", marginTop: spacing.xs },
   speechStatus: {
     color: colors.faint,
     textAlign: "center",
