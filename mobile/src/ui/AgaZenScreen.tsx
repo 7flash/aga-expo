@@ -169,6 +169,7 @@ export function AgaZenScreen() {
           title={activeMedia.title}
           query={activeMedia.query}
           embedHtml={activeMedia.embedHtml}
+          playerUrl={activeMedia.playerUrl}
           command={mediaCommand}
           onClose={closeMedia}
           onEvent={onMediaEvent}

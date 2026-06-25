@@ -5,3 +5,4 @@ bun.lock
 .expo
 data
 android
+.env

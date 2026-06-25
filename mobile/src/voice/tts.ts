@@ -5,7 +5,7 @@ import { measureAsync, measureMark } from "../observability/measure";
 
 declare function require(name: string): any;
 
-type TtsProvider = "expo-speech" | "web-speech" | "none";
+type TtsProvider = "expo-speech" | "web-speech" | "openai-tts" | "none";
 
 type TtsCallbacks = {
   onStart?: () => void;
@@ -25,10 +25,13 @@ type TtsDiagnostics = {
   lastStartedAt: string | null;
   lastFinishedAt: string | null;
   lastTextChars: number;
+  lastVoiceName: string | null;
+  voiceCount: number;
 };
 
 let speaking = false;
 let currentUtterance: any | null = null;
+let currentAudio: any | null = null;
 let cachedSpeech: any | null | undefined;
 
 const diagnostics: TtsDiagnostics = {
@@ -43,6 +46,8 @@ const diagnostics: TtsDiagnostics = {
   lastStartedAt: null,
   lastFinishedAt: null,
   lastTextChars: 0,
+  lastVoiceName: null,
+  voiceCount: 0,
 };
 
 async function importSpeech() {
@@ -83,6 +88,16 @@ function env(name: string) {
   return process.env?.[name] ?? "";
 }
 
+function openAiApiKey() {
+  return env("EXPO_PUBLIC_OPENAI_API_KEY") || env("OPENAI_API_KEY");
+}
+
+function preferOpenAiTts() {
+  const provider = env("EXPO_PUBLIC_AGA_TTS_PROVIDER").trim().toLowerCase();
+  if (provider === "web" || provider === "expo") return false;
+  return Platform.OS === "web" && !!openAiApiKey();
+}
+
 function voiceScore(voice: any, wanted: string) {
   const name = String(voice?.name ?? "").toLowerCase();
   const lang = String(voice?.lang ?? "").toLowerCase();
@@ -102,6 +117,7 @@ function chooseWebVoice(locale: string) {
   const web = getWebSpeech();
   if (!web?.synth?.getVoices) return null;
   const voices: any[] = web.synth.getVoices?.() ?? [];
+  diagnostics.voiceCount = voices.length;
   if (!voices.length) return null;
 
   const requested = env("EXPO_PUBLIC_AGA_WEB_TTS_VOICE").trim().toLowerCase();
@@ -189,6 +205,15 @@ export async function stopSpeaking() {
     speaking = false;
     diagnostics.speaking = false;
     currentUtterance = null;
+    try {
+      currentAudio?.pause?.();
+      if (currentAudio?.src && typeof URL !== "undefined" && String(currentAudio.src).startsWith("blob:")) {
+        URL.revokeObjectURL(currentAudio.src);
+      }
+    } catch {
+      // ignore audio teardown issues
+    }
+    currentAudio = null;
 
     const web = getWebSpeech();
     try {
@@ -203,6 +228,90 @@ export async function stopSpeaking() {
     } catch {
       // ignore native/web TTS teardown issues
     }
+  });
+}
+
+
+async function speakWithOpenAiWebTts(clean: string, prefs: Preferences, callbacks?: TtsCallbacks) {
+  if (Platform.OS !== "web") return false;
+  const key = openAiApiKey();
+  if (!key) return false;
+
+  diagnostics.provider = "openai-tts";
+  diagnostics.available = true;
+  await stopSpeaking();
+
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    let objectUrl: string | null = null;
+    const done = (ok: boolean, error?: string) => {
+      if (settled) return;
+      settled = true;
+      try {
+        currentAudio?.pause?.();
+        if (objectUrl && typeof URL !== "undefined") URL.revokeObjectURL(objectUrl);
+      } catch {
+        // ignore audio cleanup
+      }
+      currentAudio = null;
+      finish(callbacks, error);
+      resolve(ok);
+    };
+
+    (async () => {
+      try {
+        const persona = getPersona(prefs.persona);
+        const model = env("EXPO_PUBLIC_OPENAI_TTS_MODEL") || "gpt-4o-mini-tts";
+        const voice = env("EXPO_PUBLIC_OPENAI_TTS_VOICE") || "shimmer";
+        const response = await fetch("https://api.openai.com/v1/audio/speech", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${key}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model,
+            voice,
+            input: softenForSpeech(clean),
+            response_format: "mp3",
+            speed: Math.max(0.75, Math.min(1.05, persona.rate)),
+          }),
+        });
+        if (!response.ok) {
+          const message = await response.text().catch(() => "OpenAI TTS request failed");
+          done(false, `OpenAI TTS failed: ${message.slice(0, 160)}`);
+          return;
+        }
+        const blob = await response.blob();
+        objectUrl = URL.createObjectURL(blob);
+        const AudioCtor = (globalThis as any).Audio;
+        if (!AudioCtor) {
+          done(false, "Browser Audio element is unavailable.");
+          return;
+        }
+        const audio = new AudioCtor(objectUrl);
+        currentAudio = audio;
+        audio.onplay = () => {
+          diagnostics.unlocked = true;
+          diagnostics.lastVoiceName = `openai:${voice}`;
+          measureMark("voice.tts.openai.start", { chars: clean.length, model, voice });
+        };
+        audio.onended = () => done(true);
+        audio.onerror = () => done(false, "OpenAI TTS audio playback failed or was blocked by the browser.");
+
+        speaking = true;
+        diagnostics.speaking = true;
+        diagnostics.starts += 1;
+        diagnostics.lastStartedAt = new Date().toISOString();
+        diagnostics.lastTextChars = clean.length;
+        diagnostics.lastError = null;
+        callbacks?.onStart?.();
+        await audio.play();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error ?? "OpenAI TTS failed");
+        done(false, message);
+      }
+    })();
   });
 }
 
@@ -235,6 +344,7 @@ async function speakWithWebSpeech(clean: string, prefs: Preferences, callbacks?:
       utterance.volume = 1;
       const selectedVoice = chooseWebVoice(utterance.lang);
       if (selectedVoice) utterance.voice = selectedVoice;
+      diagnostics.lastVoiceName = selectedVoice?.name ?? null;
 
       utterance.onstart = () => {
         diagnostics.unlocked = true;
@@ -317,6 +427,14 @@ export async function speak(text: string, prefs: Preferences, callbacks?: TtsCal
     if (!clean) {
       callbacks?.onDone?.();
       return false;
+    }
+
+    // Prefer generated OpenAI audio on web when an API key is present because
+    // browser voices can be robotic. If browser autoplay blocks it, fall back to
+    // local Web Speech so AGA still answers.
+    if (preferOpenAiTts()) {
+      const openAiOk = await speakWithOpenAiWebTts(clean, prefs, callbacks);
+      if (openAiOk) return true;
     }
 
     // Prefer direct Web Speech on web because it gives us start/end/error events
