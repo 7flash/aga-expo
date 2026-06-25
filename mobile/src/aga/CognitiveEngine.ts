@@ -30,7 +30,7 @@ import {
   scheduleAgaReminderNotification,
 } from "../notifications/localNotifications";
 import { NativeSpeechLoop } from "../voice/nativeSpeech";
-import { speak, stopSpeaking } from "../voice/tts";
+import { getTtsDiagnostics, isTtsAvailable, primeTts, speak, stopSpeaking } from "../voice/tts";
 import {
   getRecentAgaMeasures,
   measureAsync,
@@ -55,6 +55,7 @@ export type AgaBrainSnapshot = {
   speechStatus: string;
   error: string | null;
   lastMeasure?: string;
+  ttsStatus?: string;
 };
 
 type Listener = (snapshot: AgaBrainSnapshot) => void;
@@ -97,6 +98,7 @@ export class CognitiveEngine {
     speechStatus: "starting",
     error: null,
     lastMeasure: undefined,
+    ttsStatus: undefined,
   };
 
   subscribe(listener: Listener) {
@@ -108,6 +110,7 @@ export class CognitiveEngine {
   private publish(patch: Partial<AgaBrainSnapshot>) {
     const recentMeasures = getRecentAgaMeasures();
     const latestMeasure = recentMeasures[recentMeasures.length - 1];
+    const tts = getTtsDiagnostics();
     this.snapshot = {
       ...this.snapshot,
       ...(latestMeasure
@@ -115,6 +118,7 @@ export class CognitiveEngine {
             lastMeasure: `${latestMeasure.label} ${Math.round(latestMeasure.durationMs)}ms`,
           }
         : null),
+      ttsStatus: `${tts.provider}${tts.available ? "" : ":unavailable"}${tts.unlocked ? ":unlocked" : ""}${tts.lastError ? ` — ${tts.lastError}` : ""}`,
       ...patch,
     };
     for (const listener of this.listeners) listener(this.snapshot);
@@ -139,7 +143,13 @@ export class CognitiveEngine {
           await initializeLocalStore();
           this.prefs = await loadPreferences();
           await this.refresh();
-          this.publish({ ready: true, speechStatus: "ready" });
+          const ttsReady = await isTtsAvailable().catch(() => false);
+          this.publish({
+            ready: true,
+            speechStatus: ttsReady
+              ? "ready — tap avatar once if voice is silent"
+              : "ready — voice output unavailable",
+          });
           await this.startSpeechLoop();
           this.startDreamLoop();
         } catch (error) {
@@ -174,6 +184,12 @@ export class CognitiveEngine {
   async rearmMic() {
     return measureAsync("engine.rearmMic", async () => {
       this.finalDeduper.reset();
+      const ttsReady = await primeTts(this.prefs.voiceLocale || "en-US").catch(() => false);
+      this.publish({
+        speechStatus: ttsReady
+          ? "audio enabled; listening"
+          : "audio still locked or unavailable; check browser/site sound",
+      });
       await this.loop?.stop?.("manual_rearm").catch(() => undefined);
       await this.startSpeechLoop().catch((error) => {
         const message =
@@ -314,16 +330,43 @@ export class CognitiveEngine {
         this.setMode("speaking");
         await addMessage("assistant", clean);
         await this.refresh();
-        await speak(clean, this.prefs, {
-          onDone: () =>
-            this.setMode(
-              this.snapshot.activeMedia
-                ? "media"
-                : this.prefs.translateTarget
-                  ? "translating"
-                  : "listening",
-            ),
+
+        // Speech recognition and speech synthesis fight each other on web and
+        // can cause silent output or self-transcription. Fully suspend the mic
+        // loop while AGA speaks, then restart it.
+        const loopToRestore = this.loop;
+        this.loop = null;
+        await loopToRestore?.destroy?.().catch(() => undefined);
+
+        const ok = await speak(clean, this.prefs, {
+          onError: (message) => {
+            this.publish({
+              speechStatus: `tts issue: ${message}`,
+              error: null,
+            });
+            void logEvent("tts.error", message);
+          },
         });
+
+        if (!ok) {
+          this.publish({
+            speechStatus: "voice output unavailable — tap avatar once or check browser sound",
+          });
+        }
+
+        const nextMode = this.snapshot.activeMedia
+          ? "media"
+          : this.prefs.translateTarget
+            ? "translating"
+            : "listening";
+
+        if (!this.stopped) {
+          await this.startSpeechLoop().catch((error) => {
+            const message = error instanceof Error ? error.message : "Could not restart speech recognition after speaking.";
+            this.publish({ speechStatus: `mic restart failed after speech: ${message}` });
+          });
+        }
+        this.setMode(nextMode);
       },
       { chars: text.length },
     );

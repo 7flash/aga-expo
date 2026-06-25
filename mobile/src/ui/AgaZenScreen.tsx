@@ -25,6 +25,7 @@ export function AgaZenScreen() {
     speechStatus,
     error,
     lastMeasure,
+    ttsStatus,
     replay,
     closeMedia,
     onMediaEvent,
@@ -162,7 +163,13 @@ export function AgaZenScreen() {
               <Text style={styles.emptyText}>
                 Ask for advice, reminders, memory, translation, or YouTube.
               </Text>
+              <Text style={styles.emptyText}>
+                On web, tap the avatar once if AGA can hear you but you cannot hear AGA.
+              </Text>
               <Text style={styles.speechStatus}>{speechStatus}</Text>
+              {!!ttsStatus && (
+                <Text style={styles.measureStatus}>TTS {ttsStatus}</Text>
+              )}
               {!!lastMeasure && (
                 <Text style={styles.measureStatus}>{lastMeasure}</Text>
               )}

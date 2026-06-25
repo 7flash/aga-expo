@@ -12,6 +12,7 @@ const INITIAL_SNAPSHOT: AgaBrainSnapshot = {
   speechStatus: "starting",
   error: null,
   lastMeasure: undefined,
+  ttsStatus: undefined,
 };
 
 export function useAgaBrain() {

@@ -36,12 +36,11 @@ function accentFor(mode: AgaMode) {
 }
 
 /**
- * AGA's less-cartoon, more-sacred avatar.
+ * AGA's quieter, less-cartoon guardian avatar.
  *
- * The old face/wing layout could read as a strange robot. This version treats
- * AGA as a living guardian orb: soft core, small awareness eyes, abstract wing
- * ribbons, halo, and orbiting light. It remains pure React Native Animated so
- * it works without Skia/SVG/native graphics dependencies.
+ * The face is intentionally abstract: tiny awareness glints and a soft voice
+ * light instead of a big cartoon mouth. That keeps AGA feeling protective and
+ * alive without reading as a robot head.
  */
 export function AgaAvatarZen({
   mode,
@@ -54,7 +53,7 @@ export function AgaAvatarZen({
   const orbit = useRef(new Animated.Value(0)).current;
   const pulse = useRef(new Animated.Value(0)).current;
   const blink = useRef(new Animated.Value(1)).current;
-  const mouth = useRef(new Animated.Value(0)).current;
+  const voiceLight = useRef(new Animated.Value(0)).current;
   const wing = useRef(new Animated.Value(0)).current;
   const level = useRef(new Animated.Value(0)).current;
 
@@ -174,13 +173,13 @@ export function AgaAvatarZen({
     if (speaking) {
       const loop = Animated.loop(
         Animated.sequence([
-          Animated.timing(mouth, {
+          Animated.timing(voiceLight, {
             toValue: 1,
             duration: 120 + Math.random() * 60,
             easing: Easing.out(Easing.quad),
             useNativeDriver: true,
           }),
-          Animated.timing(mouth, {
+          Animated.timing(voiceLight, {
             toValue: 0.18,
             duration: 100 + Math.random() * 80,
             easing: Easing.in(Easing.quad),
@@ -191,13 +190,13 @@ export function AgaAvatarZen({
       loop.start();
       return () => loop.stop();
     }
-    Animated.timing(mouth, {
+    Animated.timing(voiceLight, {
       toValue: live ? 0.35 : 0.08,
       duration: 260,
       easing: Easing.out(Easing.quad),
       useNativeDriver: true,
     }).start();
-  }, [live, mouth, speaking]);
+  }, [live, voiceLight, speaking]);
 
   useEffect(() => {
     if (!live && !speaking) {
@@ -260,9 +259,9 @@ export function AgaAvatarZen({
     inputRange: [0, 1],
     outputRange: ["28deg", "18deg"],
   });
-  const mouthScaleY = Animated.add(mouth, level).interpolate({
+  const voiceLightScale = Animated.add(voiceLight, level).interpolate({
     inputRange: [0, 0.5, 1, 2],
-    outputRange: [0.18, 0.52, 1.1, 1.36],
+    outputRange: [0.72, 0.92, 1.18, 1.36],
   });
   const pupilLift = level.interpolate({
     inputRange: [0, 1],
@@ -387,8 +386,8 @@ export function AgaAvatarZen({
             style={[
               styles.eye,
               {
-                width: size * 0.092,
-                height: size * 0.115,
+                width: size * 0.052,
+                height: size * 0.052,
                 transform: [{ scaleY: blink }, { translateY: pupilLift }],
               },
             ]}
@@ -397,8 +396,8 @@ export function AgaAvatarZen({
             style={[
               styles.eye,
               {
-                width: size * 0.092,
-                height: size * 0.115,
+                width: size * 0.052,
+                height: size * 0.052,
                 transform: [{ scaleY: blink }, { translateY: pupilLift }],
               },
             ]}
@@ -407,13 +406,14 @@ export function AgaAvatarZen({
 
         <Animated.View
           style={[
-            styles.mouth,
+            styles.voiceLight,
             {
-              width: size * 0.16,
-              height: size * 0.045,
-              marginTop: size * 0.11,
+              width: size * 0.18,
+              height: size * 0.018,
+              marginTop: size * 0.105,
               backgroundColor: speaking ? colors.gold : accent,
-              transform: [{ scaleY: mouthScaleY }],
+              shadowColor: speaking ? colors.gold : accent,
+              transform: [{ scaleX: voiceLightScale }, { scaleY: voiceLightScale }],
             },
           ]}
         />
@@ -493,8 +493,8 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  eye: { borderRadius: 999, backgroundColor: "#12182c", opacity: 0.94 },
-  mouth: { borderRadius: 999, opacity: 0.94 },
+  eye: { borderRadius: 999, backgroundColor: "#12182c", opacity: 0.62 },
+  voiceLight: { borderRadius: 999, opacity: 0.92, shadowOpacity: 0.55, shadowRadius: 10, shadowOffset: { width: 0, height: 0 } },
 });
 
 export default AgaAvatarZen;
