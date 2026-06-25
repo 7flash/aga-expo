@@ -1,5 +1,5 @@
 export type ChoiceAction =
-  | { type: 'show_menu'; menu: 'main' | 'voice' | 'personality' | 'session' | 'language' | 'imagination' }
+  | { type: 'show_menu'; menu: 'main' | 'voice' | 'personality' | 'session' | 'language' | 'imagination' | 'skills' }
   | { type: 'set_voice'; voice: string; label: string }
   | { type: 'set_persona'; persona: string; label: string }
   | { type: 'regenerate_personality'; style: string; label: string }
@@ -62,18 +62,29 @@ export function buildChoiceMenu(kind: string | null | undefined): ChoiceMenu {
       { key: '3', label: 'Tiny kingdom', description: 'cozy fantasy story', action: { type: 'start_session', kind: 'imagination', label: 'Tiny kingdom imagination game', theme: 'tiny kingdom' } },
     ]);
   }
+  if (normalized === 'skills' || normalized === 'skill') {
+    return menu('skills', 'Choose a skill', 'Say the number. AGA will start that voice-only skill.', [
+      { key: '1', label: 'Language learning', description: 'practice with corrections', action: { type: 'show_menu', menu: 'language' } },
+      { key: '2', label: 'Imagination adventure', description: 'guided story choices', action: { type: 'show_menu', menu: 'imagination' } },
+      { key: '3', label: 'Focus sprint', description: 'short coaching and check-ins', action: { type: 'start_session', kind: 'advice', label: 'Focus sprint', theme: 'focus sprint' } },
+      { key: '4', label: 'Breathing calm', description: 'slow grounding guidance', action: { type: 'start_session', kind: 'advice', label: 'Breathing calm', theme: 'breathing calm' } },
+      { key: '5', label: 'Bedtime story', description: 'soft imaginative wind-down', action: { type: 'start_session', kind: 'imagination', label: 'Bedtime story', theme: 'bedtime stars' } },
+    ]);
+  }
+
   if (normalized === 'session') {
     return menu('session', 'Start a new session', 'Say the number to switch AGA’s mode.', [
       { key: '1', label: 'Language learning', description: 'practice with corrections', action: { type: 'show_menu', menu: 'language' } },
       { key: '2', label: 'Imagination game', description: 'voice-only story play', action: { type: 'show_menu', menu: 'imagination' } },
       { key: '3', label: 'Calm advice', description: 'short supportive guidance', action: { type: 'start_session', kind: 'advice', label: 'Calm advice session', theme: 'calm advice' } },
       { key: '4', label: 'General guardian', description: 'normal AGA mode', action: { type: 'start_session', kind: 'general', label: 'General guardian session' } },
+      { key: '5', label: 'End current session', description: 'return to normal wake mode', action: { type: 'end_session' } },
     ]);
   }
   return menu('main', 'AGA settings', 'No buttons needed. Say a number or letter.', [
     { key: 'A', label: 'Change voice', description: 'choose a Realtime voice', action: { type: 'show_menu', menu: 'voice' } },
     { key: 'B', label: 'Change personality', description: 'warm, calm, bright, coach, or regenerate', action: { type: 'show_menu', menu: 'personality' } },
-    { key: 'C', label: 'Start language learning', description: 'practice a language by voice', action: { type: 'show_menu', menu: 'language' } },
+    { key: 'C', label: 'Choose a skill', description: 'language, story, focus, calm, bedtime', action: { type: 'show_menu', menu: 'skills' } },
     { key: 'D', label: 'Play imagination game', description: 'a guided voice story', action: { type: 'show_menu', menu: 'imagination' } },
     { key: 'E', label: 'Start new session', description: 'clear the current mode and choose one', action: { type: 'show_menu', menu: 'session' } },
   ]);
@@ -91,6 +102,7 @@ const WORD_NUMBERS: Record<string, string> = {
   c: 'C', see: 'C', sea: 'C', optionc: 'C',
   d: 'D', dee: 'D', optiond: 'D',
   e: 'E', ee: 'E', optione: 'E',
+  f: 'F', eff: 'F', optionf: 'F',
 };
 
 export function normalizeChoiceKey(raw: string): string | null {
@@ -105,7 +117,7 @@ export function normalizeChoiceKey(raw: string): string | null {
   for (const part of parts) {
     if (/^\d+$/.test(part)) return part;
     if (WORD_NUMBERS[part]) return WORD_NUMBERS[part];
-    if (/^[a-e]$/.test(part)) return part.toUpperCase();
+    if (/^[a-f]$/.test(part)) return part.toUpperCase();
   }
   return null;
 }

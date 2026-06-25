@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { CognitiveEngine, type AgaBrainSnapshot } from './CognitiveEngine';
 import { RealtimeSession, shouldUseRealtimeSession, type RealtimeSnapshot } from '../realtime/RealtimeSession';
+import { WakeRealtimeController } from './WakeRealtimeController';
 
 const INITIAL_SNAPSHOT: AgaBrainSnapshot = {
   ready: false,
@@ -49,7 +50,10 @@ export function useAgaBrain() {
 
   useEffect(() => {
     const useRealtime = shouldUseRealtimeSession();
-    const engine: BrainLike = useRealtime ? new RealtimeSession() : new CognitiveEngine();
+    const directRealtime = process.env.EXPO_PUBLIC_AGA_REALTIME_DIRECT === '1';
+    const engine: BrainLike = useRealtime
+      ? (directRealtime ? new RealtimeSession() : new WakeRealtimeController())
+      : new CognitiveEngine();
     engineRef.current = engine;
     const unsubscribe = engine.subscribe((next: any) => {
       setSnapshot(useRealtime ? normalizeRealtimeSnapshot(next) : next);

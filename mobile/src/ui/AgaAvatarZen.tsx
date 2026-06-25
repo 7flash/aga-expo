@@ -1,14 +1,6 @@
 import React, { useEffect, useMemo, useRef } from 'react';
 import { Animated, Easing, StyleSheet, View } from 'react-native';
-import Svg, {
-  Circle,
-  Defs,
-  Ellipse,
-  G,
-  Path,
-  RadialGradient,
-  Stop,
-} from 'react-native-svg';
+import Svg, { Circle, Defs, Ellipse, G, Path, RadialGradient, Stop } from 'react-native-svg';
 import { colors } from './theme';
 import type { AgaMode } from '../aga/turn';
 
@@ -18,9 +10,6 @@ type Props = {
   compact?: boolean;
   size?: number;
 };
-
-const AG = Animated.createAnimatedComponent(G);
-const ACircle = Animated.createAnimatedComponent(Circle);
 
 function clamp01(value: number) {
   return Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
@@ -66,7 +55,7 @@ export function AgaAvatarZen({ mode, audioLevel = 0, compact, size = compact ? 2
   useEffect(() => {
     Animated.timing(level, {
       toValue: clamp01(audioLevel),
-      duration: 130,
+      duration: 120,
       easing: Easing.out(Easing.quad),
       useNativeDriver: true,
     }).start();
@@ -114,8 +103,8 @@ export function AgaAvatarZen({ mode, audioLevel = 0, compact, size = compact ? 2
   useEffect(() => {
     const loop = Animated.loop(
       Animated.sequence([
-        Animated.timing(wing, { toValue: 1, duration: speaking ? 720 : 1500, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
-        Animated.timing(wing, { toValue: 0, duration: speaking ? 720 : 1500, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+        Animated.timing(wing, { toValue: 1, duration: speaking ? 760 : 1500, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+        Animated.timing(wing, { toValue: 0, duration: speaking ? 760 : 1500, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
       ]),
     );
     loop.start();
@@ -155,13 +144,20 @@ export function AgaAvatarZen({ mode, audioLevel = 0, compact, size = compact ? 2
     pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.12] }),
     level.interpolate({ inputRange: [0, 1], outputRange: [0, 0.22] }),
   );
-  const auraOpacity = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.32, 0.6] });
+  const auraOpacity = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.3, 0.58] });
   const leftWingRotate = wing.interpolate({ inputRange: [0, 1], outputRange: [speaking ? '-11deg' : '-7deg', speaking ? '9deg' : '5deg'] });
   const rightWingRotate = wing.interpolate({ inputRange: [0, 1], outputRange: [speaking ? '11deg' : '7deg', speaking ? '-9deg' : '-5deg'] });
   const shimmerX = shimmer.interpolate({ inputRange: [0, 1], outputRange: [-2.4, 2.4] });
   const coreScale = Animated.add(1, level.interpolate({ inputRange: [0, 1], outputRange: [0, 0.05] }));
+  const blinkScale = blink;
 
   const stage = size * 1.45;
+  const bodyWidth = size;
+  const bodyHeight = size * 1.18;
+  const bodyLeft = (stage - bodyWidth) / 2;
+  const bodyTop = (stage - bodyHeight) / 2 + 5;
+  const wingWidth = size * 0.58;
+  const wingHeight = size * 0.38;
 
   return (
     <View pointerEvents="none" style={[styles.root, { width: stage, height: stage }]}> 
@@ -174,65 +170,107 @@ export function AgaAvatarZen({ mode, audioLevel = 0, compact, size = compact ? 2
               <Stop offset="72%" stopColor={accent} stopOpacity={0} />
             </RadialGradient>
           </Defs>
-          <ACircle cx={stage / 2} cy={stage * 0.46} r={stage * 0.4} fill="url(#aura)" />
+          <Circle cx={stage / 2} cy={stage * 0.46} r={stage * 0.4} fill="url(#aura)" />
         </Svg>
       </Animated.View>
 
       <Animated.View style={[styles.center, { transform: [{ translateY: floatY }] }]}> 
-        <Svg width={size} height={size * 1.18} viewBox="0 0 340 400">
-          <Defs>
-            <RadialGradient id="body" cx="50%" cy="30%" r="80%">
-              <Stop offset="0%" stopColor="#f4ffff" stopOpacity={1} />
-              <Stop offset="55%" stopColor="#cdfaff" stopOpacity={0.96} />
-              <Stop offset="100%" stopColor={accent} stopOpacity={0.55} />
-            </RadialGradient>
-          </Defs>
-
-          <AG style={{ transform: [{ rotate: haloSpin }] }} originX={170} originY={58}>
+        <Animated.View
+          style={[
+            styles.haloLayer,
+            { width: size, height: size * 0.42, transform: [{ rotate: haloSpin }] },
+          ]}
+        >
+          <Svg width={size} height={size * 0.42} viewBox="0 0 340 140">
             <Ellipse cx={170} cy={58} rx={48} ry={13} fill="none" stroke={speaking ? colors.gold : accent} strokeWidth={3} opacity={0.9} />
-          </AG>
+          </Svg>
+        </Animated.View>
 
-          <AG style={{ transform: [{ rotate: leftWingRotate }] }} originX={118} originY={150}>
-            <Path d="M118 130c-46-6-86 18-102 72 32-14 58-12 86 8-2-30 4-56 16-80z" fill={accent} opacity={0.12} />
-            <Path d="M120 146c-36 1-66 20-80 56 24-7 46-4 68 12-1-25 4-47 12-68z" fill="#eaffff" opacity={0.18} />
-          </AG>
-          <AG style={{ transform: [{ rotate: rightWingRotate }] }} originX={222} originY={150}>
-            <Path d="M222 130c46-6 86 18 102 72-32-14-58-12-86 8 2-30-4-56-16-80z" fill={accent} opacity={0.12} />
-            <Path d="M220 146c36 1 66 20 80 56-24-7-46-4-68 12 1-25-4-47-12-68z" fill="#eaffff" opacity={0.18} />
-          </AG>
+        <Animated.View
+          style={[
+            styles.wingLayer,
+            {
+              left: bodyLeft - size * 0.08,
+              top: bodyTop + size * 0.17,
+              width: wingWidth,
+              height: wingHeight,
+              transform: [{ rotate: leftWingRotate }],
+            },
+          ]}
+        >
+          <Svg width={wingWidth} height={wingHeight} viewBox="0 0 170 120">
+            <Path d="M118 15c-46-6-86 18-102 72 32-14 58-12 86 8-2-30 4-56 16-80z" fill={accent} opacity={0.14} />
+            <Path d="M120 31c-36 1-66 20-80 56 24-7 46-4 68 12-1-25 4-47 12-68z" fill="#eaffff" opacity={0.2} />
+          </Svg>
+        </Animated.View>
 
-          <Path d={FIGURE_D} fill={colors.pink} opacity={0.26} transform="translate(-2.4,0)" />
-          <AnimatedFigure shimmerX={shimmerX} />
+        <Animated.View
+          style={[
+            styles.wingLayer,
+            {
+              right: bodyLeft - size * 0.08,
+              top: bodyTop + size * 0.17,
+              width: wingWidth,
+              height: wingHeight,
+              transform: [{ rotate: rightWingRotate }],
+            },
+          ]}
+        >
+          <Svg width={wingWidth} height={wingHeight} viewBox="170 0 170 120">
+            <Path d="M222 15c46-6 86 18 102 72-32-14-58-12-86 8 2-30-4-56-16-80z" fill={accent} opacity={0.14} />
+            <Path d="M220 31c36 1 66 20 80 56-24-7-46-4-68 12 1-25-4-47-12-68z" fill="#eaffff" opacity={0.2} />
+          </Svg>
+        </Animated.View>
 
-          <AG style={{ transform: [{ scale: coreScale }] }} originX={170} originY={210}>
+        <Animated.View style={[styles.bodyLayer, { width: bodyWidth, height: bodyHeight, transform: [{ scale: coreScale }] }]}> 
+          <Svg width={bodyWidth} height={bodyHeight} viewBox="0 0 340 400">
+            <Defs>
+              <RadialGradient id="body" cx="50%" cy="30%" r="80%">
+                <Stop offset="0%" stopColor="#f4ffff" stopOpacity={1} />
+                <Stop offset="55%" stopColor="#cdfaff" stopOpacity={0.96} />
+                <Stop offset="100%" stopColor={accent} stopOpacity={0.55} />
+              </RadialGradient>
+            </Defs>
+
+            <Path d={FIGURE_D} fill={colors.pink} opacity={0.22} transform="translate(-2.4,0)" />
+            <G transform="translate(2.0,0)">
+              <Path d={FIGURE_D} fill={colors.cyan} opacity={0.24} />
+            </G>
             <Path d={FIGURE_D} fill="url(#body)" />
             <Circle cx={170} cy={84} r={27} fill="#eafdff" />
             <Circle cx={150} cy={90} r={5.4} fill={colors.pink} opacity={0.5} />
             <Circle cx={190} cy={90} r={5.4} fill={colors.pink} opacity={0.5} />
             <Path d="M160 95c5.5 4.5 14 4.5 20 0" stroke="#0b1024" strokeWidth={2.6} fill="none" strokeLinecap="round" />
-          </AG>
+          </Svg>
+        </Animated.View>
 
-          <AG style={{ transform: [{ scaleY: blink }] }} originX={170} originY={84}>
+        <Animated.View
+          style={[
+            styles.eyeLayer,
+            {
+              width: bodyWidth,
+              height: bodyHeight,
+              transform: [{ scaleY: blinkScale }, { translateX: shimmerX }],
+            },
+          ]}
+        >
+          <Svg width={bodyWidth} height={bodyHeight} viewBox="0 0 340 400">
             <Ellipse cx={160} cy={84} rx={3.6} ry={5.2} fill="#0b1024" />
             <Ellipse cx={180} cy={84} rx={3.6} ry={5.2} fill="#0b1024" />
-          </AG>
-        </Svg>
+          </Svg>
+        </Animated.View>
       </Animated.View>
     </View>
-  );
-}
-
-function AnimatedFigure({ shimmerX }: { shimmerX: Animated.AnimatedInterpolation<number> }) {
-  return (
-    <AG style={{ transform: [{ translateX: shimmerX }] }}>
-      <Path d={FIGURE_D} fill={colors.cyan} opacity={0.28} />
-    </AG>
   );
 }
 
 const styles = StyleSheet.create({
   root: { alignItems: 'center', justifyContent: 'center' },
   center: { position: 'absolute', alignItems: 'center', justifyContent: 'center' },
+  haloLayer: { position: 'absolute', alignItems: 'center', justifyContent: 'center', zIndex: 5 },
+  wingLayer: { position: 'absolute', zIndex: 2 },
+  bodyLayer: { zIndex: 4 },
+  eyeLayer: { position: 'absolute', zIndex: 6 },
 });
 
 export default AgaAvatarZen;

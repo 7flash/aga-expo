@@ -1,8 +1,12 @@
+declare function require(name: string): any;
+
 type MaybeStorage = {
   getItem?: (key: string) => string | null;
   setItem?: (key: string, value: string) => void;
   removeItem?: (key: string) => void;
 };
+
+type SQLiteDatabase = any;
 
 export type Preferences = {
   wakePhrase: string;
@@ -48,7 +52,7 @@ const DEFAULT_PREFS: Preferences = {
   voiceLocale: 'en-US',
   openaiApiKey: process.env.EXPO_PUBLIC_OPENAI_API_KEY ?? '',
   geminiApiKey: process.env.EXPO_PUBLIC_GEMINI_API_KEY ?? '',
-  brainMode: ((process.env.EXPO_PUBLIC_AGA_BRAIN_MODE as Preferences['brainMode']) || 'openai') as Preferences['brainMode'],
+  brainMode: ((process.env.EXPO_PUBLIC_AGA_BRAIN_MODE as Preferences['brainMode']) || 'realtime') as Preferences['brainMode'],
   translateTarget: null,
   showDiagnostics: false,
   proactiveReminders: true,
@@ -57,7 +61,9 @@ const DEFAULT_PREFS: Preferences = {
   activeSession: null,
 };
 
-const STORAGE_KEY = 'aga.mobile.localStore.v11';
+const STORAGE_KEY = 'aga.mobile.localStore.v18';
+const LEGACY_KEYS = ['aga.mobile.localStore.v11'];
+const SQLITE_DB = 'aga-local-kv.db';
 
 let store: StoreShape = {
   preferences: { ...DEFAULT_PREFS },
@@ -67,6 +73,10 @@ let store: StoreShape = {
   events: [],
 };
 let initialized = false;
+let sqliteDbPromise: Promise<SQLiteDatabase | null> | null = null;
+let sqliteAvailable = false;
+let lastPersistenceError: string | null = null;
+let storageBackend: 'memory' | 'web-storage' | 'sqlite' = 'memory';
 
 function storage(): MaybeStorage | null {
   const root: any = globalThis as any;
@@ -77,14 +87,11 @@ function isoNow() {
   return new Date().toISOString();
 }
 
-function readPersisted() {
-  if (initialized) return;
-  initialized = true;
+function parseStore(raw: string | null | undefined): StoreShape | null {
+  if (!raw) return null;
   try {
-    const raw = storage()?.getItem?.(STORAGE_KEY);
-    if (!raw) return;
     const parsed = JSON.parse(raw);
-    store = {
+    return {
       preferences: { ...DEFAULT_PREFS, ...(parsed?.preferences ?? {}) },
       messages: Array.isArray(parsed?.messages) ? parsed.messages : [],
       memories: Array.isArray(parsed?.memories) ? parsed.memories : [],
@@ -92,68 +99,189 @@ function readPersisted() {
       events: Array.isArray(parsed?.events) ? parsed.events : [],
     };
   } catch {
-    // Keep in-memory defaults if persistence is unavailable/corrupt.
+    return null;
+  }
+}
+
+function serializeStore() {
+  return JSON.stringify(store);
+}
+
+async function importSQLite() {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    return require('expo-sqlite');
+  } catch {
+    return null;
+  }
+}
+
+async function openSqlite(): Promise<SQLiteDatabase | null> {
+  if (sqliteDbPromise) return sqliteDbPromise;
+  sqliteDbPromise = (async () => {
+    const SQLite = await importSQLite();
+    if (!SQLite) return null;
+    const anySQLite = SQLite as any;
+    let db: SQLiteDatabase | null = null;
+    if (typeof anySQLite.openDatabaseAsync === 'function') db = await anySQLite.openDatabaseAsync(SQLITE_DB);
+    else if (typeof anySQLite.openDatabaseSync === 'function') db = anySQLite.openDatabaseSync(SQLITE_DB);
+    else if (typeof anySQLite.openDatabase === 'function') db = anySQLite.openDatabase(SQLITE_DB);
+    if (!db) return null;
+    await sqlExec(db, 'CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL, updatedAt TEXT NOT NULL);');
+    sqliteAvailable = true;
+    return db;
+  })().catch((error) => {
+    lastPersistenceError = error instanceof Error ? error.message : String(error || 'sqlite open failed');
+    sqliteAvailable = false;
+    sqliteDbPromise = null;
+    return null;
+  });
+  return sqliteDbPromise;
+}
+
+async function sqlExec(db: SQLiteDatabase | null, sql: string, params: unknown[] = []) {
+  if (!db) return;
+  if (typeof db.runAsync === 'function') return db.runAsync(sql, params as any[]);
+  if (typeof db.execAsync === 'function' && params.length === 0) return db.execAsync(sql);
+  if (typeof db.transaction === 'function') {
+    return new Promise<void>((resolve, reject) => {
+      db.transaction((tx: any) => {
+        tx.executeSql(sql, params as any[], () => resolve(), (_: any, error: any) => { reject(error); return false; });
+      });
+    });
+  }
+}
+
+async function sqlFirst<T = any>(db: SQLiteDatabase | null, sql: string, params: unknown[] = []): Promise<T | null> {
+  if (!db) return null;
+  if (typeof db.getFirstAsync === 'function') return db.getFirstAsync(sql, params as any[]);
+  if (typeof db.getAllAsync === 'function') {
+    const rows = await db.getAllAsync(sql, params as any[]);
+    return rows?.[0] ?? null;
+  }
+  if (typeof db.transaction === 'function') {
+    return new Promise<T | null>((resolve, reject) => {
+      db.transaction((tx: any) => {
+        tx.executeSql(sql, params as any[], (_: any, result: any) => resolve(result.rows?._array?.[0] ?? null), (_: any, error: any) => { reject(error); return false; });
+      });
+    });
+  }
+  return null;
+}
+
+function readWebStorageOnce() {
+  const s = storage();
+  if (!s) return false;
+  for (const key of [STORAGE_KEY, ...LEGACY_KEYS]) {
+    const parsed = parseStore(s.getItem?.(key));
+    if (parsed) {
+      store = parsed;
+      storageBackend = 'web-storage';
+      return true;
+    }
+  }
+  return false;
+}
+
+async function readSqliteOnce() {
+  const db = await openSqlite();
+  if (!db) return false;
+  const row = await sqlFirst<{ value: string }>(db, 'SELECT value FROM kv WHERE key = ?', [STORAGE_KEY]);
+  const parsed = parseStore(row?.value);
+  if (parsed) {
+    store = parsed;
+    storageBackend = 'sqlite';
+    return true;
+  }
+  return false;
+}
+
+function persistWebStorage() {
+  try {
+    storage()?.setItem?.(STORAGE_KEY, serializeStore());
+  } catch (error) {
+    lastPersistenceError = error instanceof Error ? error.message : String(error || 'web storage persist failed');
+  }
+}
+
+async function persistSqlite() {
+  try {
+    const db = await openSqlite();
+    if (!db) return;
+    await sqlExec(db, 'INSERT OR REPLACE INTO kv (key, value, updatedAt) VALUES (?, ?, ?)', [STORAGE_KEY, serializeStore(), isoNow()]);
+    storageBackend = 'sqlite';
+  } catch (error) {
+    lastPersistenceError = error instanceof Error ? error.message : String(error || 'sqlite persist failed');
   }
 }
 
 function persist() {
-  try {
-    storage()?.setItem?.(STORAGE_KEY, JSON.stringify(store));
-  } catch {
-    // Ignore quota/native-webview storage failures. AGA should keep running.
-  }
+  persistWebStorage();
+  void persistSqlite();
+}
+
+function ensureRead() {
+  if (initialized) return;
+  initialized = true;
+  readWebStorageOnce();
 }
 
 export async function initializeLocalStore() {
-  readPersisted();
+  if (!initialized) {
+    initialized = true;
+    const webLoaded = readWebStorageOnce();
+    const sqliteLoaded = await readSqliteOnce();
+    if (!webLoaded && !sqliteLoaded) store.preferences = { ...DEFAULT_PREFS, ...store.preferences };
+  }
+  store.preferences = { ...DEFAULT_PREFS, ...store.preferences };
   persist();
-  return { sqliteAvailable: false, fallback: 'memory-web-storage' };
+  return { sqliteAvailable, fallback: sqliteAvailable ? 'sqlite-kv' : storage() ? 'web-storage' : 'memory' };
 }
 
 export async function loadPreferences(): Promise<Preferences> {
-  readPersisted();
+  ensureRead();
   store.preferences = { ...DEFAULT_PREFS, ...store.preferences };
   return { ...store.preferences };
 }
 
 export async function savePreferences(input: Partial<Preferences>) {
-  readPersisted();
+  ensureRead();
   store.preferences = { ...store.preferences, ...input };
   persist();
   return { ...store.preferences };
 }
 
 export async function addMessage(role: 'user' | 'assistant' | string, content: string) {
-  readPersisted();
+  ensureRead();
   const clean = String(content ?? '').trim();
   if (!clean) return;
   store.messages.push({ role, content: clean, createdAt: isoNow() });
-  store.messages = store.messages.slice(-120);
+  store.messages = store.messages.slice(-160);
   persist();
 }
 
 export async function listMessages(limit = 20) {
-  readPersisted();
+  ensureRead();
   return store.messages.slice(-limit);
 }
 
 export async function clearMessages() {
-  readPersisted();
+  ensureRead();
   store.messages = [];
   persist();
 }
 
 export async function addMemory(text: string) {
-  readPersisted();
+  ensureRead();
   const clean = String(text ?? '').trim();
   if (!clean) return;
   store.memories.push({ text: clean, createdAt: isoNow() });
-  store.memories = store.memories.slice(-200);
+  store.memories = store.memories.slice(-300);
   persist();
 }
 
 export async function searchMemories(query?: string, limit = 8) {
-  readPersisted();
+  ensureRead();
   const q = query?.trim().toLowerCase();
   return store.memories
     .filter((item) => !q || item.text.toLowerCase().includes(q))
@@ -162,7 +290,7 @@ export async function searchMemories(query?: string, limit = 8) {
 }
 
 export async function addReminder(text: string, dueAt: string, notificationId?: string | null): Promise<Reminder> {
-  readPersisted();
+  ensureRead();
   const reminder: Reminder = {
     id: Date.now() + Math.floor(Math.random() * 1000),
     text: String(text ?? '').trim(),
@@ -178,7 +306,7 @@ export async function addReminder(text: string, dueAt: string, notificationId?: 
 }
 
 export async function listPendingReminders(limit = 8) {
-  readPersisted();
+  ensureRead();
   return store.reminders
     .filter((reminder) => !reminder.delivered)
     .sort((a, b) => a.dueAt.localeCompare(b.dueAt))
@@ -186,7 +314,7 @@ export async function listPendingReminders(limit = 8) {
 }
 
 export async function drainDueReminders(now = new Date()) {
-  readPersisted();
+  ensureRead();
   const nowIso = now.toISOString();
   const due = store.reminders.filter((reminder) => !reminder.delivered && reminder.dueAt <= nowIso);
   if (due.length) {
@@ -198,34 +326,36 @@ export async function drainDueReminders(now = new Date()) {
 }
 
 export async function clearReminders() {
-  readPersisted();
+  ensureRead();
   store.reminders = [];
   persist();
 }
 
 export async function logEvent(label: string, detail = '') {
-  readPersisted();
+  ensureRead();
   store.events.push({ label: String(label), detail: String(detail ?? ''), createdAt: isoNow() });
-  store.events = store.events.slice(-500);
+  store.events = store.events.slice(-700);
   persist();
 }
 
 export async function compactEventLogIfIdle() {
-  readPersisted();
-  if (store.events.length > 250) {
-    store.events = store.events.slice(-250);
+  ensureRead();
+  if (store.events.length > 300) {
+    store.events = store.events.slice(-300);
     persist();
   }
 }
 
 export async function getDiagnostics() {
-  readPersisted();
+  ensureRead();
   return {
     messages: store.messages.length,
     memories: store.memories.length,
     pendingReminders: store.reminders.filter((reminder) => !reminder.delivered).length,
     reminders: store.reminders.length,
     events: store.events.length,
-    sqliteAvailable: false,
+    sqliteAvailable,
+    storageBackend,
+    lastPersistenceError,
   };
 }
