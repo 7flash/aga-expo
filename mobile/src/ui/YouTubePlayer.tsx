@@ -21,6 +21,13 @@ type Props = {
   embedHtml?: string;
   playerUrl?: string;
   command?: MediaCommand;
+  /**
+   * True while AGA is speaking over background media.
+   * We keep playback running, but duck the player volume so AGA's voice remains clear.
+   */
+  ducked?: boolean;
+  normalVolume?: number;
+  duckedVolume?: number;
   onClose?: () => void;
   onEvent?: (event: string) => void;
 };
@@ -31,7 +38,7 @@ function directPlayerUrl(input: { videoId?: string; query?: string; playerUrl?: 
   return youtubeSearchPlayerUrl(input.query || input.title);
 }
 
-function htmlForNative(input: { videoId?: string; query?: string; embedHtml?: string; title: string }) {
+function htmlForPlayer(input: { videoId?: string; query?: string; embedHtml?: string; title: string }) {
   if (input.embedHtml) return input.embedHtml;
   if (input.videoId) return youtubeEmbedHtml(input.videoId);
   return youtubeSearchEmbedHtml(input.query || input.title);
@@ -41,27 +48,74 @@ function eventJson(type: string, payload: Record<string, unknown> = {}) {
   return JSON.stringify({ type, ...payload });
 }
 
-function WebIframe({ url, title, onEvent }: { url: string; title: string; onEvent?: (event: string) => void }) {
+function playerMessage(type: string, payload: Record<string, unknown> = {}) {
+  return JSON.stringify({ type, ...payload });
+}
+
+function WebIframe({
+  url,
+  html,
+  title,
+  command,
+  volume,
+  onEvent,
+}: {
+  url: string;
+  html: string;
+  title: string;
+  command?: MediaCommand;
+  volume: number;
+  onEvent?: (event: string) => void;
+}) {
+  const iframeRef = useRef<any>(null);
   const onEventRef = useRef(onEvent);
-  const mountedUrlRef = useRef<string | null>(null);
+  const mountedKeyRef = useRef<string | null>(null);
+  const lastCommandRef = useRef<string>('');
+  const lastVolumeRef = useRef<number | null>(null);
 
   useEffect(() => {
     onEventRef.current = onEvent;
   }, [onEvent]);
 
   useEffect(() => {
-    if (mountedUrlRef.current === url) return;
-    mountedUrlRef.current = url;
-    measureMark('youtube.iframe.mount', { url: url.slice(0, 140) });
-    // Important: do not depend on the callback identity here. Parent state changes
-    // produce fresh callbacks, and re-emitting player.mount on every render creates
-    // a maximum-update-depth loop. Emit only when the actual URL changes.
+    const key = `${url}|${html.slice(0, 120)}`;
+    if (mountedKeyRef.current === key) return;
+    mountedKeyRef.current = key;
+    lastCommandRef.current = '';
+    lastVolumeRef.current = null;
+    measureMark('youtube.iframe.mount', { url: url.slice(0, 140), controlled: true });
+    // Do not emit parent-changing events repeatedly; emit only when actual media changes.
     onEventRef.current?.(eventJson('player.mount', { provider: 'iframe', url }));
-  }, [url]);
+  }, [html, url]);
+
+  useEffect(() => {
+    const cw = iframeRef.current?.contentWindow;
+    if (!cw || !command) return;
+    const key = `${command}:${Date.now()}`;
+    lastCommandRef.current = key;
+    measureMark('youtube.iframe.command', { command });
+    cw.postMessage(playerMessage(command), '*');
+    // Settle parent command state once. The iframe will also emit a player.* event when possible.
+    onEventRef.current?.(eventJson(`player.${command}`));
+  }, [command]);
+
+  useEffect(() => {
+    const safeVolume = Math.max(0, Math.min(100, Math.round(volume)));
+    if (lastVolumeRef.current === safeVolume) return;
+    lastVolumeRef.current = safeVolume;
+    const send = () => {
+      iframeRef.current?.contentWindow?.postMessage(playerMessage('volume', { value: safeVolume }), '*');
+    };
+    send();
+    const timer = setTimeout(send, 450);
+    measureMark('youtube.iframe.volume', { value: safeVolume });
+    return () => clearTimeout(timer);
+  }, [volume]);
 
   return React.createElement('iframe', {
-    src: url,
+    ref: iframeRef,
     title: `AGA YouTube player: ${title}`,
+    srcDoc: html,
     allow: 'autoplay; encrypted-media; picture-in-picture; fullscreen',
     allowFullScreen: true,
     referrerPolicy: 'strict-origin-when-cross-origin',
@@ -82,13 +136,17 @@ export function YouTubePlayer({
   embedHtml,
   playerUrl,
   command,
+  ducked = false,
+  normalVolume = Number(process.env.EXPO_PUBLIC_AGA_MEDIA_VOLUME ?? 42),
+  duckedVolume = Number(process.env.EXPO_PUBLIC_AGA_MEDIA_DUCK_VOLUME ?? 14),
   onEvent,
 }: Props) {
   const webviewRef = useRef<any>(null);
   const onEventRef = useRef(onEvent);
   const slide = useRef(new Animated.Value(0)).current;
   const url = useMemo(() => directPlayerUrl({ videoId, query, playerUrl, title }), [playerUrl, query, title, videoId]);
-  const html = useMemo(() => htmlForNative({ videoId, query, embedHtml, title }), [embedHtml, query, title, videoId]);
+  const html = useMemo(() => htmlForPlayer({ videoId, query, embedHtml, title }), [embedHtml, query, title, videoId]);
+  const targetVolume = ducked ? duckedVolume : normalVolume;
 
   useEffect(() => {
     onEventRef.current = onEvent;
@@ -102,13 +160,15 @@ export function YouTubePlayer({
     if (!command) return;
     measureMark('youtube.command', { command });
     webviewRef.current?.postMessage?.(JSON.stringify({ type: command }));
-    if (Platform.OS === 'web') {
-      // iframe API commands are intentionally best-effort on web. We still report
-      // the requested command once so the engine can settle mediaCommand without
-      // an update loop.
-      onEventRef.current?.(eventJson(`player.${command}`));
-    }
+    if (Platform.OS !== 'web') return;
+    // Web iframe command handling lives inside WebIframe so it can post to contentWindow.
   }, [command]);
+
+  useEffect(() => {
+    const safeVolume = Math.max(0, Math.min(100, Math.round(targetVolume)));
+    measureMark('youtube.volume', { ducked, value: safeVolume });
+    webviewRef.current?.postMessage?.(JSON.stringify({ type: 'volume', value: safeVolume }));
+  }, [ducked, targetVolume]);
 
   const isSearch = !videoId && !!query;
 
@@ -124,7 +184,7 @@ export function YouTubePlayer({
     >
       <View style={styles.header}>
         <View style={{ flex: 1 }}>
-          <Text style={styles.kicker}>{isSearch ? 'YOUTUBE SEARCH' : 'NOW PLAYING'}</Text>
+          <Text style={styles.kicker}>{isSearch ? 'YOUTUBE SEARCH' : ducked ? 'BACKGROUND MUSIC · AGA SPEAKING' : 'NOW PLAYING'}</Text>
           <Text numberOfLines={1} style={styles.title}>{title}</Text>
         </View>
         <View style={styles.voiceOnlyClose}>
@@ -133,7 +193,7 @@ export function YouTubePlayer({
       </View>
       <View style={styles.webviewWrap}>
         {Platform.OS === 'web' ? (
-          <WebIframe url={url} title={title} onEvent={onEvent} />
+          <WebIframe url={url} html={html} title={title} command={command} volume={targetVolume} onEvent={onEvent} />
         ) : WebView ? (
           <WebView
             ref={(ref: any) => { webviewRef.current = ref; }}
@@ -154,9 +214,11 @@ export function YouTubePlayer({
         )}
       </View>
       <Text style={styles.hint}>
-        {videoId
-          ? 'Say “AGA pause”, “AGA resume”, or “AGA close video”.'
-          : 'Search playback needs a YouTube API key or backend for exact videos. AGA will use safe presets for music.'}
+        {ducked
+          ? 'Music keeps playing quietly while AGA speaks.'
+          : videoId
+            ? 'Say “AGA pause”, “AGA resume”, or “AGA close video”.'
+            : 'Search playback needs a YouTube API key or backend for exact videos. AGA will use safe presets for music.'}
       </Text>
     </Animated.View>
   );

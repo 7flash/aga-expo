@@ -23,7 +23,7 @@ import {
 } from '../notifications/localNotifications';
 import { searchYouTube, type YouTubeResult } from '../media/youtube';
 import { measureAsync, measureMark } from '../observability/measure';
-import { buildChoiceMenu, findChoice, normalizeChoiceKey, type ChoiceMenu, type ChoiceOption, type ChoiceAction } from '../aga/choiceMenus';
+import { buildChoiceMenu, findChoice, normalizeChoiceKey, type ChoiceMenu, type ChoiceOption, type ChoiceAction, type SessionKind } from '../aga/choiceMenus';
 
 const REALTIME_MODEL =
   process.env.EXPO_PUBLIC_AGA_REALTIME_MODEL ||
@@ -97,6 +97,18 @@ function sessionInstructions(prefs: Preferences | null) {
   if (session.kind === 'advice') {
     return 'Current session: calm advice. Give short, grounded, emotionally safe guidance. Ask before going deep.';
   }
+  if (session.kind === 'focus') {
+    return 'Current session: focus coaching. Help the user pick one task, break it into tiny steps, and keep momentum. Ask one question at a time.';
+  }
+  if (session.kind === 'breathing') {
+    return 'Current session: breathing guide. Speak slowly. Lead simple inhale-hold-exhale cycles, then ask how the user feels.';
+  }
+  if (session.kind === 'bedtime') {
+    return 'Current session: bedtime story. Use soft, slow, sleep-friendly narration. Avoid suspense and loud energy.';
+  }
+  if (session.kind === 'music') {
+    return 'Current session: music companion. Keep music playing in the background while you speak briefly over it. The UI will duck music volume while AGA talks. Offer quiet context, focus support, or gentle conversation when asked.';
+  }
   return 'Current session: general guardian mode.';
 }
 
@@ -107,7 +119,7 @@ function realtimeSessionConfig(prefs: Preferences | null, forUpdate = false) {
     persona.system,
     'You are AGA, a cute holographic guardian angel in a touch-free speaker. Talk naturally, briefly, and warmly.',
     'Use tools for any media, reminder, memory, persona, translation, or settings action. Do not tell the user to click or tap.',
-    'When asked for YouTube or music, call play_youtube. For pause, resume, or stop playback, call media_control.',
+    'When asked for YouTube or music, call play_youtube. For pause, resume, or stop playback, call media_control. Background music may keep playing while you speak; do not pause music unless the user asks.',
     'Resolve relative reminder times to absolute ISO-8601 timestamps before calling set_reminder.',
     translate ? `Live translation is ON. Translate non-command user phrases into ${translate}.` : '',
     prefs?.personalityPrompt ? `Custom personality overlay: ${prefs.personalityPrompt}` : '',
@@ -235,7 +247,7 @@ const TOOLS = [
     parameters: {
       type: 'object',
       properties: {
-        kind: { type: 'string', enum: ['language', 'imagination', 'advice', 'general'] },
+        kind: { type: 'string', enum: ['language', 'imagination', 'advice', 'focus', 'bedtime', 'breathing', 'music', 'general'] },
         label: { type: 'string' },
         targetLanguage: { type: 'string' },
         theme: { type: 'string' },
@@ -492,7 +504,9 @@ export class RealtimeSession {
         }
         break;
       case 'response.done':
-        if (!this.snapshot.activeMedia) this.setMode('listening');
+        // If media is active, return to media mode after AGA finishes speaking so
+        // the player volume unducks. Music keeps playing underneath the voice.
+        this.setMode(this.snapshot.activeMedia ? 'media' : 'listening');
         break;
       case 'error': {
         const message = String(event.error?.message ?? 'realtime error');
@@ -548,7 +562,7 @@ export class RealtimeSession {
         this.publish({ activeMedia: { ...result, type: 'youtube', state: 'playing' }, mediaCommand: null });
         await logEvent('youtube.play', `${result.title} ${result.url}`);
         await this.refresh();
-        return `Opening ${result.title}.`;
+        return `Playing ${result.title}. I can still speak over the music; say pause, resume, or close video any time.`;
       },
       media_control: async ({ command }) => {
         const cmd = String(command ?? '') as 'pause' | 'resume' | 'stop';
@@ -585,7 +599,7 @@ export class RealtimeSession {
       },
       choose_option: async ({ choice }) => {
         const option = findChoice(this.snapshot.activeChoiceMenu, String(choice ?? ''));
-        if (!option) return `I could not match ${choice} to the visible options. Ask the user to say the number or letter again.`;
+        if (!option) return `I could not match ${choice} to the visible options. Say the number, letter, or option name again.`;
         return this.applyChoice(option);
       },
       set_voice: async ({ voice }) => this.applyChoice({
@@ -601,7 +615,7 @@ export class RealtimeSession {
       start_session: async ({ kind, label, targetLanguage, theme }) => this.applyChoice({
         key: 'session',
         label: String(label ?? kind ?? 'New session'),
-        action: { type: 'start_session', kind: String(kind ?? 'general') as any, label: String(label ?? kind ?? 'New session'), targetLanguage: targetLanguage ? String(targetLanguage) : undefined, theme: theme ? String(theme) : undefined },
+        action: { type: 'start_session', kind: String(kind ?? 'general') as SessionKind, label: String(label ?? kind ?? 'New session'), targetLanguage: targetLanguage ? String(targetLanguage) : undefined, theme: theme ? String(theme) : undefined },
       }),
       end_session: async () => this.applyChoice({
         key: 'end',
@@ -613,7 +627,7 @@ export class RealtimeSession {
 
   private menuSpokenSummary(menu: ChoiceMenu) {
     const options = menu.options.map((option) => `${option.key}: ${option.label}`).join('; ');
-    return `${menu.title}. ${options}. Ask the user to say the number or letter.`;
+    return `${menu.title}. ${options}. Say the number, letter, or option name.`;
   }
 
   private async maybeHandleChoiceTranscript(text: string) {

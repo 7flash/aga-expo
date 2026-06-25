@@ -94,6 +94,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:whit
 <script src="https://www.youtube.com/iframe_api"></script>
 <script>
 var player;
+var pendingVolume=null;
 var fallbackUrl=${jsString(fallbackUrl)};
 var mode=${jsString(hasVideo ? 'video' : 'search')};
 function tell(type,payload){try{window.ReactNativeWebView&&window.ReactNativeWebView.postMessage(JSON.stringify(Object.assign({type:type},payload||{})));}catch(e){}}
@@ -109,7 +110,7 @@ function onYouTubeIframeAPIReady(){
       height:'100%',
       playerVars:{autoplay:1,playsinline:1,controls:1,rel:0,modestbranding:1,enablejsapi:1},
       events:{
-        onReady:function(e){try{e.target.playVideo();}catch(err){} tell('player.ready')},
+        onReady:function(e){try{if(pendingVolume!==null)e.target.setVolume(pendingVolume); e.target.playVideo();}catch(err){} tell('player.ready')},
         onStateChange:function(e){if(e.data===0)tell('player.ended'); if(e.data===1)tell('player.playing'); if(e.data===2)tell('player.paused'); if(e.data===3)tell('player.buffering');},
         onError:function(e){tell('player.error',{code:e&&e.data}); makeFallback();}
       }
@@ -125,7 +126,7 @@ function onYouTubeIframeAPIReady(){
 setTimeout(function(){ if(!player) makeFallback(); }, 2200);
 document.addEventListener('message',function(event){handle(event.data)});
 window.addEventListener('message',function(event){handle(event.data)});
-function handle(raw){try{var msg=typeof raw==='string'?JSON.parse(raw):raw; if(!player)return; if(msg.type==='pause')player.pauseVideo(); if(msg.type==='resume')player.playVideo(); if(msg.type==='stop')player.stopVideo(); if(msg.type==='volume')player.setVolume(msg.value||50);}catch(e){}}
+function handle(raw){try{var msg=typeof raw==='string'?JSON.parse(raw):raw; if(msg.type==='volume'){pendingVolume=Math.max(0,Math.min(100,Number(msg.value)||50)); if(player&&player.setVolume)player.setVolume(pendingVolume); return;} if(!player)return; if(msg.type==='pause')player.pauseVideo(); if(msg.type==='resume')player.playVideo(); if(msg.type==='stop')player.stopVideo();}catch(e){}}
 </script>
 <noscript><div class="fallback"><a href="${htmlEscape(fallbackUrl)}">Open ${htmlEscape(title)} on YouTube</a></div></noscript>
 </body>

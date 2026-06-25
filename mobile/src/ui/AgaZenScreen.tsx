@@ -1,18 +1,19 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef } from 'react';
 import {
   Animated,
   FlatList,
   SafeAreaView,
+  ScrollView,
   StyleSheet,
   Text,
   View,
-} from "react-native";
-import { useAgaBrain } from "../aga/useAgaBrain";
-import { AngelVisual } from "../visual/AngelVisual";
-import { MessageBubble } from "./MessageBubble";
-import { YouTubePlayer } from "./YouTubePlayer";
-import { colors, radius, spacing } from "./theme";
-import { AGA_APP_VERSION } from "../config/appVersion";
+} from 'react-native';
+import { useAgaBrain } from '../aga/useAgaBrain';
+import { AngelVisual } from '../visual/AngelVisual';
+import { MessageBubble } from './MessageBubble';
+import { YouTubePlayer } from './YouTubePlayer';
+import { colors, radius, spacing } from './theme';
+import { AGA_APP_VERSION } from '../config/appVersion';
 
 export function AgaZenScreen() {
   const {
@@ -33,8 +34,9 @@ export function AgaZenScreen() {
     closeMedia,
     onMediaEvent,
   } = useAgaBrain();
+
   const avatarShift = useRef(new Animated.Value(0)).current;
-  const hasConversation = messages.length > 0 || !!activeMedia;
+  const hasConversation = messages.length > 0 || !!activeMedia || !!activeChoiceMenu;
 
   useEffect(() => {
     Animated.spring(avatarShift, {
@@ -46,26 +48,26 @@ export function AgaZenScreen() {
   }, [avatarShift, hasConversation]);
 
   const audioLevel =
-    typeof realtimeAudioLevel === "number" && realtimeAudioLevel > 0
+    typeof realtimeAudioLevel === 'number' && realtimeAudioLevel > 0
       ? realtimeAudioLevel
-      : mode === "speaking"
+      : mode === 'speaking'
         ? 0.82
         : interim
           ? 0.55
-          : mode === "listening"
+          : mode === 'listening'
             ? 0.2
             : 0;
-  const voiceUnavailable = /unavailable|unsupported|not available/i.test(
-    speechStatus,
-  );
+
+  const voiceUnavailable = /unavailable|unsupported|not available/i.test(speechStatus);
   const status = voiceUnavailable
-    ? "Voice fallback"
+    ? 'Voice fallback'
     : error
-      ? "Needs attention"
-      : mode === "sleeping" || mode === "listening"
-        ? "Listening for AGA"
+      ? 'Needs attention'
+      : mode === 'sleeping' || mode === 'listening'
+        ? 'Listening for AGA'
         : mode;
   const media: any = activeMedia;
+  const menu = activeChoiceMenu as any;
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -86,10 +88,7 @@ export function AgaZenScreen() {
           <View
             style={[
               styles.statusDot,
-              (mode === "listening" ||
-                mode === "speaking" ||
-                mode === "media") &&
-                styles.statusDotLive,
+              (mode === 'listening' || mode === 'speaking' || mode === 'media') && styles.statusDotLive,
             ]}
           />
           <Text style={styles.statusText}>{status}</Text>
@@ -105,13 +104,13 @@ export function AgaZenScreen() {
               {
                 translateY: avatarShift.interpolate({
                   inputRange: [0, 1],
-                  outputRange: [40, -86],
+                  outputRange: [40, -96],
                 }),
               },
               {
                 scale: avatarShift.interpolate({
                   inputRange: [0, 1],
-                  outputRange: [1.08, 0.82],
+                  outputRange: [1.08, 0.72],
                 }),
               },
             ],
@@ -121,27 +120,25 @@ export function AgaZenScreen() {
         <AngelVisual
           mode={mode}
           audioLevel={audioLevel}
-          compact={!!activeMedia}
-          size={activeMedia ? 156 : 282}
+          compact={!!activeMedia || !!activeChoiceMenu}
+          size={activeMedia || activeChoiceMenu ? 156 : 282}
         />
       </Animated.View>
 
-      {!!interim && (
+      {!!interim && !activeChoiceMenu && (
         <Animated.View style={styles.interimPill}>
           <Text style={styles.interimLabel}>AGA HEARS</Text>
-          <Text numberOfLines={2} style={styles.interimText}>
-            {interim}
-          </Text>
+          <Text numberOfLines={2} style={styles.interimText}>{interim}</Text>
         </Animated.View>
       )}
 
-      <View style={styles.feedShell}>
-        {!!activeChoiceMenu && (
-          <View style={styles.choiceCard}>
-            <Text style={styles.choiceTitle}>{activeChoiceMenu.title}</Text>
-            {!!activeChoiceMenu.subtitle && <Text style={styles.choiceSubtitle}>{activeChoiceMenu.subtitle}</Text>}
+      {!!menu && (
+        <View style={styles.choiceStage}>
+          <Text style={styles.choiceTitle}>{menu.title}</Text>
+          {!!menu.subtitle && <Text style={styles.choiceSubtitle}>{menu.subtitle}</Text>}
+          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.choiceScroll}>
             <View style={styles.choiceGrid}>
-              {activeChoiceMenu.options.map((option: any) => (
+              {menu.options.map((option: any) => (
                 <View key={option.key} style={styles.choiceOption}>
                   <Text style={styles.choiceKey}>{option.key}</Text>
                   <View style={styles.choiceCopy}>
@@ -151,42 +148,38 @@ export function AgaZenScreen() {
                 </View>
               ))}
             </View>
-          </View>
-        )}
+          </ScrollView>
+          <Text style={styles.choiceFooter}>Reply by voice: “one”, “two”, “A”, or the option name.</Text>
+        </View>
+      )}
+
+      <View style={[styles.feedShell, activeChoiceMenu ? styles.feedShellWithChoice : null, activeMedia ? styles.feedShellWithMedia : null]}>
         <FlatList
           inverted
-          data={messages.slice(-10).reverse()}
+          data={messages.slice(-12).reverse()}
           keyExtractor={(item, index) => `${item.createdAt ?? index}-${index}`}
-          contentContainerStyle={[styles.feedContent, activeChoiceMenu ? styles.feedWithChoices : null]}
+          contentContainerStyle={styles.feedContent}
           renderItem={({ item }) => (
             <MessageBubble
               message={item}
-              onReplay={item.role === "assistant" ? replay : undefined}
+              onReplay={item.role === 'assistant' ? replay : undefined}
             />
           )}
           ListEmptyComponent={
             <View style={styles.emptyState}>
               <Text style={styles.emptyTitle}>Say “Hey AGA”</Text>
-              <Text style={styles.emptyText}>
-                Ask for advice, reminders, memory, translation, or YouTube — all by voice.
-              </Text>
+              <Text style={styles.emptyText}>Ask for advice, reminders, memory, translation, YouTube, or a skill — all by voice.</Text>
               <Text style={styles.versionText}>v{AGA_APP_VERSION}</Text>
               <Text style={styles.speechStatus}>{speechStatus}</Text>
-              {!!voiceSummary && (
-                <Text style={styles.measureStatus}>{voiceSummary}</Text>
-              )}
-              {!!ttsStatus && (
-                <Text style={styles.measureStatus}>TTS {ttsStatus}</Text>
-              )}
-              {!!lastMeasure && (
-                <Text style={styles.measureStatus}>{lastMeasure}</Text>
-              )}
+              {!!voiceSummary && <Text style={styles.measureStatus}>{voiceSummary}</Text>}
+              {!!ttsStatus && <Text style={styles.measureStatus}>TTS {ttsStatus}</Text>}
+              {!!lastMeasure && <Text style={styles.measureStatus}>{lastMeasure}</Text>}
             </View>
           }
         />
       </View>
 
-      {media?.type === "youtube" && (media.videoId || media.playerUrl || media.embedHtml || media.query) && (
+      {media?.type === 'youtube' && (media.videoId || media.playerUrl || media.embedHtml || media.query) && (
         <YouTubePlayer
           videoId={media.videoId || undefined}
           title={media.title}
@@ -194,6 +187,7 @@ export function AgaZenScreen() {
           embedHtml={media.embedHtml}
           playerUrl={media.playerUrl}
           command={mediaCommand}
+          ducked={mode === 'speaking' || mode === 'thinking'}
           onClose={closeMedia}
           onEvent={onMediaEvent}
         />
@@ -203,208 +197,151 @@ export function AgaZenScreen() {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.bg, overflow: "hidden" },
+  safe: { flex: 1, backgroundColor: colors.bg, overflow: 'hidden' },
   backgroundOrbOne: {
-    position: "absolute",
+    position: 'absolute',
     width: 360,
     height: 360,
     borderRadius: 180,
-    backgroundColor: "rgba(103,232,249,0.13)",
+    backgroundColor: 'rgba(103,232,249,0.13)',
     top: -90,
     right: -120,
   },
   backgroundOrbTwo: {
-    position: "absolute",
+    position: 'absolute',
     width: 320,
     height: 320,
     borderRadius: 160,
-    backgroundColor: "rgba(167,139,250,0.12)",
+    backgroundColor: 'rgba(167,139,250,0.12)',
     bottom: -120,
     left: -90,
   },
   header: {
-    position: "absolute",
+    position: 'absolute',
     top: spacing.lg,
     left: spacing.lg,
     right: spacing.lg,
     zIndex: 40,
-    flexDirection: "row",
-    alignItems: "center",
+    flexDirection: 'row',
+    alignItems: 'center',
     gap: spacing.sm,
   },
   brandPill: {
-    flexDirection: "row",
-    alignItems: "center",
+    flexDirection: 'row',
+    alignItems: 'center',
     gap: spacing.sm,
     padding: spacing.sm,
     paddingRight: spacing.md,
     borderRadius: radius.pill,
-    backgroundColor: "rgba(255,255,255,0.08)",
+    backgroundColor: 'rgba(255,255,255,0.08)',
     borderWidth: 1,
     borderColor: colors.border,
   },
-  brandDot: {
-    width: 34,
-    height: 34,
-    borderRadius: 13,
-    backgroundColor: "#bff7ff",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  brandLetter: { color: "#14172b", fontWeight: "900", fontSize: 16 },
-  brand: {
-    color: colors.text,
-    fontWeight: "900",
-    fontSize: 14,
-    letterSpacing: 1.1,
-  },
-  brandSub: { color: colors.faint, fontSize: 10, fontWeight: "700" },
+  brandDot: { width: 34, height: 34, borderRadius: 13, backgroundColor: '#bff7ff', alignItems: 'center', justifyContent: 'center' },
+  brandLetter: { color: '#14172b', fontWeight: '900', fontSize: 16 },
+  brand: { color: colors.text, fontWeight: '900', fontSize: 14, letterSpacing: 1.1 },
+  brandSub: { color: colors.faint, fontSize: 10, fontWeight: '700' },
   statusPill: {
     flex: 1,
     minWidth: 0,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
     gap: spacing.sm,
     paddingHorizontal: spacing.md,
     height: 45,
     borderRadius: radius.pill,
-    backgroundColor: "rgba(255,255,255,0.07)",
+    backgroundColor: 'rgba(255,255,255,0.07)',
     borderWidth: 1,
     borderColor: colors.border,
   },
-  statusDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: colors.faint,
-  },
-  statusDotLive: {
-    backgroundColor: colors.cyan,
-    shadowColor: colors.cyan,
-    shadowOpacity: 0.85,
-    shadowRadius: 10,
-  },
-  statusText: {
-    color: colors.text,
-    fontSize: 12,
-    fontWeight: "900",
-    textTransform: "capitalize",
-  },
-  avatarWrap: {
-    position: "absolute",
-    top: "23%",
-    left: 0,
-    right: 0,
-    zIndex: 5,
-    alignItems: "center",
-  },
+  statusDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.faint },
+  statusDotLive: { backgroundColor: colors.cyan, shadowColor: colors.cyan, shadowOpacity: 0.85, shadowRadius: 10 },
+  statusText: { color: colors.text, fontSize: 12, fontWeight: '900', textTransform: 'capitalize' },
+  avatarWrap: { position: 'absolute', top: '23%', left: 0, right: 0, zIndex: 5, alignItems: 'center' },
   interimPill: {
-    position: "absolute",
-    top: "48%",
-    alignSelf: "center",
-    maxWidth: "86%",
+    position: 'absolute',
+    top: '48%',
+    alignSelf: 'center',
+    maxWidth: '86%',
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
     borderRadius: radius.xl,
-    backgroundColor: "rgba(103,232,249,0.13)",
+    backgroundColor: 'rgba(103,232,249,0.13)',
     borderWidth: 1,
-    borderColor: "rgba(103,232,249,0.28)",
+    borderColor: 'rgba(103,232,249,0.28)',
     zIndex: 15,
   },
-  interimLabel: {
-    color: colors.cyan,
-    fontSize: 10,
-    fontWeight: "900",
-    letterSpacing: 1.7,
-    textAlign: "center",
-    marginBottom: 4,
-  },
-  interimText: {
-    color: colors.text,
-    fontWeight: "800",
-    textAlign: "center",
-    fontSize: 16,
-    lineHeight: 22,
-  },
-  feedShell: {
-    position: "absolute",
+  interimLabel: { color: colors.cyan, fontSize: 10, fontWeight: '900', letterSpacing: 1.7, textAlign: 'center', marginBottom: 4 },
+  interimText: { color: colors.text, fontWeight: '800', textAlign: 'center', fontSize: 16, lineHeight: 22 },
+
+  choiceStage: {
+    position: 'absolute',
+    top: '16%',
     left: spacing.lg,
     right: spacing.lg,
-    bottom: spacing.lg,
-    top: "48%",
-    zIndex: 10,
-    borderRadius: radius.xl,
-    backgroundColor: "rgba(255,255,255,0.045)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.08)",
-    overflow: "hidden",
-  },
-  feedContent: { padding: spacing.md, paddingTop: spacing.lg },
-  emptyState: {
-    minHeight: 160,
-    alignItems: "center",
-    justifyContent: "center",
-    padding: spacing.lg,
-  },
-  emptyTitle: {
-    color: colors.text,
-    fontSize: 22,
-    fontWeight: "900",
-    letterSpacing: -0.4,
-  },
-  emptyText: {
-    color: colors.muted,
-    textAlign: "center",
-    marginTop: spacing.sm,
-    lineHeight: 20,
-  },
-  versionText: { color: colors.faint, fontSize: 11, fontWeight: "800", marginTop: spacing.xs },
-  speechStatus: {
-    color: colors.faint,
-    textAlign: "center",
-    marginTop: spacing.md,
-    fontSize: 11,
-    fontWeight: "700",
-  },
-  measureStatus: {
-    color: "rgba(103,232,249,0.58)",
-    textAlign: "center",
-    marginTop: spacing.xs,
-    fontSize: 10,
-    fontWeight: "800",
-  },
-
-  choiceCard: {
-    position: "absolute",
-    top: spacing.md,
-    left: spacing.md,
-    right: spacing.md,
-    zIndex: 20,
+    maxHeight: '36%',
+    zIndex: 25,
     padding: spacing.md,
     borderRadius: radius.xl,
-    backgroundColor: "rgba(103,232,249,0.12)",
+    backgroundColor: 'rgba(8,11,31,0.88)',
     borderWidth: 1,
-    borderColor: "rgba(103,232,249,0.3)",
+    borderColor: 'rgba(103,232,249,0.35)',
+    shadowColor: colors.cyan,
+    shadowOpacity: 0.28,
+    shadowRadius: 22,
+    shadowOffset: { width: 0, height: 14 },
   },
-  choiceTitle: { color: colors.text, fontSize: 17, fontWeight: "900", textAlign: "center" },
-  choiceSubtitle: { color: colors.muted, fontSize: 12, fontWeight: "700", textAlign: "center", marginTop: 4, marginBottom: spacing.sm },
+  choiceTitle: { color: colors.text, fontSize: 18, fontWeight: '900', textAlign: 'center' },
+  choiceSubtitle: { color: colors.muted, fontSize: 12, fontWeight: '700', textAlign: 'center', marginTop: 4, marginBottom: spacing.sm },
+  choiceScroll: { paddingBottom: spacing.xs },
   choiceGrid: { gap: spacing.xs },
-  choiceOption: { flexDirection: "row", alignItems: "center", gap: spacing.sm, paddingVertical: 4 },
+  choiceOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingVertical: 5,
+    paddingHorizontal: spacing.xs,
+    borderRadius: radius.md,
+    backgroundColor: 'rgba(255,255,255,0.045)',
+  },
   choiceKey: {
     width: 30,
     height: 30,
     borderRadius: 15,
-    textAlign: "center",
-    textAlignVertical: "center" as any,
-    overflow: "hidden",
-    color: "#0b1024",
+    textAlign: 'center',
+    textAlignVertical: 'center' as any,
+    overflow: 'hidden',
+    color: '#0b1024',
     backgroundColor: colors.cyan,
-    fontWeight: "900",
+    fontWeight: '900',
     lineHeight: 30,
   },
   choiceCopy: { flex: 1, minWidth: 0 },
-  choiceLabel: { color: colors.text, fontSize: 13, fontWeight: "900" },
-  choiceDescription: { color: colors.muted, fontSize: 11, fontWeight: "700", marginTop: 1 },
-  feedWithChoices: { paddingTop: 230 },
+  choiceLabel: { color: colors.text, fontSize: 13, fontWeight: '900' },
+  choiceDescription: { color: colors.muted, fontSize: 11, fontWeight: '700', marginTop: 1 },
+  choiceFooter: { color: colors.faint, fontSize: 11, textAlign: 'center', fontWeight: '800', marginTop: spacing.sm },
+
+  feedShell: {
+    position: 'absolute',
+    left: spacing.lg,
+    right: spacing.lg,
+    bottom: spacing.lg,
+    top: '48%',
+    zIndex: 10,
+    borderRadius: radius.xl,
+    backgroundColor: 'rgba(255,255,255,0.045)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    overflow: 'hidden',
+  },
+  feedShellWithChoice: { top: '56%' },
+  feedShellWithMedia: { bottom: 310 },
+  feedContent: { padding: spacing.md, paddingTop: spacing.lg },
+  emptyState: { minHeight: 160, alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
+  emptyTitle: { color: colors.text, fontSize: 22, fontWeight: '900', letterSpacing: -0.4 },
+  emptyText: { color: colors.muted, textAlign: 'center', marginTop: spacing.sm, lineHeight: 20 },
+  versionText: { color: colors.faint, fontSize: 11, fontWeight: '800', marginTop: spacing.xs },
+  speechStatus: { color: colors.faint, textAlign: 'center', marginTop: spacing.md, fontSize: 11, fontWeight: '700' },
+  measureStatus: { color: 'rgba(103,232,249,0.58)', textAlign: 'center', marginTop: spacing.xs, fontSize: 10, fontWeight: '800' },
 });
