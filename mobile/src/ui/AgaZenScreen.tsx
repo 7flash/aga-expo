@@ -21,6 +21,7 @@ export function AgaZenScreen() {
     interim,
     activeMedia,
     mediaCommand,
+    audioLevel: realtimeAudioLevel,
     speechStatus,
     error,
     lastMeasure,
@@ -43,13 +44,15 @@ export function AgaZenScreen() {
   }, [avatarShift, hasConversation]);
 
   const audioLevel =
-    mode === "speaking"
-      ? 0.82
-      : interim
-        ? 0.55
-        : mode === "listening"
-          ? 0.2
-          : 0;
+    typeof realtimeAudioLevel === "number" && realtimeAudioLevel > 0
+      ? realtimeAudioLevel
+      : mode === "speaking"
+        ? 0.82
+        : interim
+          ? 0.55
+          : mode === "listening"
+            ? 0.2
+            : 0;
   const voiceUnavailable = /unavailable|unsupported|not available/i.test(
     speechStatus,
   );
@@ -60,6 +63,7 @@ export function AgaZenScreen() {
       : mode === "sleeping" || mode === "listening"
         ? "Listening for AGA"
         : mode;
+  const media: any = activeMedia;
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -163,13 +167,13 @@ export function AgaZenScreen() {
         />
       </View>
 
-      {activeMedia?.type === "youtube" && (activeMedia.videoId || activeMedia.embedHtml || activeMedia.query) && (
+      {media?.type === "youtube" && (media.videoId || media.playerUrl || media.embedHtml || media.query) && (
         <YouTubePlayer
-          videoId={activeMedia.videoId || undefined}
-          title={activeMedia.title}
-          query={activeMedia.query}
-          embedHtml={activeMedia.embedHtml}
-          playerUrl={activeMedia.playerUrl}
+          videoId={media.videoId || undefined}
+          title={media.title}
+          query={media.query}
+          embedHtml={media.embedHtml}
+          playerUrl={media.playerUrl}
           command={mediaCommand}
           onClose={closeMedia}
           onEvent={onMediaEvent}

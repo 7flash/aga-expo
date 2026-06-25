@@ -523,7 +523,6 @@ export class CognitiveEngine {
                 title: action.query,
                 url: "",
                 thumbnailUrl: null,
-                query: action.query,
                 state: "loading",
               },
             });

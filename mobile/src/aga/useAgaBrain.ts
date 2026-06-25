@@ -1,15 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { CognitiveEngine, type AgaBrainSnapshot } from "./CognitiveEngine";
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { CognitiveEngine, type AgaBrainSnapshot } from './CognitiveEngine';
+import { RealtimeSession, shouldUseRealtimeSession, type RealtimeSnapshot } from '../realtime/RealtimeSession';
 
 const INITIAL_SNAPSHOT: AgaBrainSnapshot = {
   ready: false,
-  mode: "sleeping",
-  interim: "",
+  mode: 'sleeping',
+  interim: '',
   messages: [],
   reminders: [],
   activeMedia: null,
   mediaCommand: null,
-  speechStatus: "starting",
+  speechStatus: 'starting',
   error: null,
   lastMeasure: undefined,
   ttsStatus: undefined,
@@ -17,14 +18,38 @@ const INITIAL_SNAPSHOT: AgaBrainSnapshot = {
   voiceCapability: undefined,
 };
 
+type BrainLike = {
+  start(): Promise<void> | void;
+  stop(): Promise<void> | void;
+  subscribe(listener: (snapshot: any) => void): () => void;
+  replay?(text: string): void;
+  closeMedia?(): void;
+  onMediaEvent?(event: string): void;
+  rearmMic?(): void;
+};
+
+function normalizeRealtimeSnapshot(snapshot: RealtimeSnapshot): AgaBrainSnapshot {
+  return {
+    ...INITIAL_SNAPSHOT,
+    ...snapshot,
+    lastMeasure: snapshot.lastMeasure,
+    ttsStatus: undefined,
+    voiceSummary: 'realtime WebRTC',
+    voiceCapability: undefined,
+  } as AgaBrainSnapshot;
+}
+
 export function useAgaBrain() {
-  const engineRef = useRef<CognitiveEngine | null>(null);
+  const engineRef = useRef<BrainLike | null>(null);
   const [snapshot, setSnapshot] = useState<AgaBrainSnapshot>(INITIAL_SNAPSHOT);
 
   useEffect(() => {
-    const engine = new CognitiveEngine();
+    const useRealtime = shouldUseRealtimeSession();
+    const engine: BrainLike = useRealtime ? new RealtimeSession() : new CognitiveEngine();
     engineRef.current = engine;
-    const unsubscribe = engine.subscribe(setSnapshot);
+    const unsubscribe = engine.subscribe((next: any) => {
+      setSnapshot(useRealtime ? normalizeRealtimeSnapshot(next) : next);
+    });
     void engine.start();
     return () => {
       unsubscribe();
@@ -36,10 +61,10 @@ export function useAgaBrain() {
   return useMemo(
     () => ({
       ...snapshot,
-      replay: (text: string) => engineRef.current?.replay(text),
-      closeMedia: () => engineRef.current?.closeMedia(),
-      onMediaEvent: (event: string) => engineRef.current?.onMediaEvent(event),
-      rearmMic: () => engineRef.current?.rearmMic(),
+      replay: (text: string) => engineRef.current?.replay?.(text),
+      closeMedia: () => engineRef.current?.closeMedia?.(),
+      onMediaEvent: (event: string) => engineRef.current?.onMediaEvent?.(event),
+      rearmMic: () => engineRef.current?.rearmMic?.(),
     }),
     [snapshot],
   );
