@@ -163,10 +163,12 @@ export function AgaZenScreen() {
         />
       </View>
 
-      {activeMedia?.type === "youtube" && !!activeMedia.videoId && (
+      {activeMedia?.type === "youtube" && (activeMedia.videoId || activeMedia.embedHtml || activeMedia.query) && (
         <YouTubePlayer
-          videoId={activeMedia.videoId}
+          videoId={activeMedia.videoId || undefined}
           title={activeMedia.title}
+          query={activeMedia.query}
+          embedHtml={activeMedia.embedHtml}
           command={mediaCommand}
           onClose={closeMedia}
           onEvent={onMediaEvent}

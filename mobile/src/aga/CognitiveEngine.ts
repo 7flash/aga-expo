@@ -523,22 +523,17 @@ export class CognitiveEngine {
                 title: action.query,
                 url: "",
                 thumbnailUrl: null,
+                query: action.query,
                 state: "loading",
               },
             });
             const result = await searchYouTube(action.query);
-            if (!result.videoId) {
-              await this.say(
-                `I found YouTube results for ${action.query}, but could not auto-open a video.`,
-              );
-              return;
-            }
             this.publish({
               activeMedia: { ...result, type: "youtube", state: "playing" },
               mediaCommand: null,
             });
             await logEvent("youtube.play", `${result.title} ${result.url}`);
-            await this.say(`Playing ${result.title}.`);
+            await this.say(result.videoId ? `Playing ${result.title}.` : `Opening YouTube results for ${result.title}.`);
             this.setMode("media");
             return;
           }

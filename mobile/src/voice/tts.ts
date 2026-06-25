@@ -79,17 +79,51 @@ function finish(callbacks?: TtsCallbacks, error?: string) {
   callbacks?.onDone?.();
 }
 
+function env(name: string) {
+  return process.env?.[name] ?? "";
+}
+
+function voiceScore(voice: any, wanted: string) {
+  const name = String(voice?.name ?? "").toLowerCase();
+  const lang = String(voice?.lang ?? "").toLowerCase();
+  let score = 0;
+  if (lang === wanted) score += 100;
+  else if (lang.startsWith(wanted.split("-")[0])) score += 60;
+  if (/natural|neural|premium|enhanced/.test(name)) score += 40;
+  if (/samantha|karen|aria|jenny|zira|susan|ava|emma|serena|google us english|google uk english female/.test(name)) score += 35;
+  if (/microsoft/.test(name)) score += 12;
+  if (/google/.test(name)) score += 10;
+  if (/compact|robot|novelty/.test(name)) score -= 60;
+  if (voice?.localService) score += 4;
+  return score;
+}
+
 function chooseWebVoice(locale: string) {
   const web = getWebSpeech();
   if (!web?.synth?.getVoices) return null;
   const voices: any[] = web.synth.getVoices?.() ?? [];
+  if (!voices.length) return null;
+
+  const requested = env("EXPO_PUBLIC_AGA_WEB_TTS_VOICE").trim().toLowerCase();
+  if (requested) {
+    const exact = voices.find((voice) => String(voice.name ?? "").toLowerCase() === requested);
+    if (exact) return exact;
+    const fuzzy = voices.find((voice) => String(voice.name ?? "").toLowerCase().includes(requested));
+    if (fuzzy) return fuzzy;
+  }
+
   const wanted = locale.toLowerCase();
-  return (
-    voices.find((voice) => voice.lang?.toLowerCase() === wanted) ??
-    voices.find((voice) => voice.lang?.toLowerCase().startsWith(wanted.split("-")[0])) ??
-    voices[0] ??
-    null
-  );
+  return [...voices].sort((a, b) => voiceScore(b, wanted) - voiceScore(a, wanted))[0] ?? null;
+}
+
+function softenForSpeech(text: string) {
+  return text
+    .replace(/AGA/g, "Aga")
+    .replace(/\s+/g, " ")
+    .replace(/\.\s+/g, ".  ")
+    .replace(/!\s+/g, "!  ")
+    .replace(/\?\s+/g, "?  ")
+    .trim();
 }
 
 export function getTtsDiagnostics(): TtsDiagnostics {
@@ -192,18 +226,19 @@ async function speakWithWebSpeech(clean: string, prefs: Preferences, callbacks?:
     };
 
     try {
-      const utterance = new web.Utterance(clean);
+      const spoken = softenForSpeech(clean);
+      const utterance = new web.Utterance(spoken);
       currentUtterance = utterance;
       utterance.lang = prefs.voiceLocale || "en-US";
-      utterance.rate = persona.rate;
-      utterance.pitch = persona.pitch;
+      utterance.rate = Math.max(0.72, Math.min(1.02, persona.rate));
+      utterance.pitch = Math.max(0.85, Math.min(1.08, persona.pitch));
       utterance.volume = 1;
       const selectedVoice = chooseWebVoice(utterance.lang);
       if (selectedVoice) utterance.voice = selectedVoice;
 
       utterance.onstart = () => {
         diagnostics.unlocked = true;
-        measureMark("voice.tts.web.start", { chars: clean.length, voice: selectedVoice?.name ?? null });
+        measureMark("voice.tts.web.start", { chars: clean.length, voice: selectedVoice?.name ?? null, lang: selectedVoice?.lang ?? utterance.lang, rate: utterance.rate, pitch: utterance.pitch });
       };
       utterance.onend = () => done(true);
       utterance.onerror = (event: any) => {
@@ -261,10 +296,10 @@ async function speakWithExpoSpeech(clean: string, prefs: Preferences, callbacks?
       diagnostics.lastTextChars = clean.length;
       diagnostics.lastError = null;
       callbacks?.onStart?.();
-      Speech.speak(clean, {
+      Speech.speak(softenForSpeech(clean), {
         language: prefs.voiceLocale || "en-US",
-        rate: persona.rate,
-        pitch: persona.pitch,
+        rate: Math.max(0.72, Math.min(1.02, persona.rate)),
+        pitch: Math.max(0.85, Math.min(1.08, persona.pitch)),
         onDone: () => done(true),
         onStopped: () => done(true),
         onError: (error: any) => done(false, String(error?.message || error || "expo speech error")),
