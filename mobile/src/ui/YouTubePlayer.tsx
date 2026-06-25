@@ -89,6 +89,17 @@ function WebIframe({
   }, [html, url]);
 
   useEffect(() => {
+    if (Platform.OS !== 'web') return undefined;
+    const handler = (event: MessageEvent) => {
+      if (typeof event.data !== 'string') return;
+      if (!event.data.includes('player.')) return;
+      onEventRef.current?.(event.data);
+    };
+    globalThis.addEventListener?.('message', handler as any);
+    return () => globalThis.removeEventListener?.('message', handler as any);
+  }, []);
+
+  useEffect(() => {
     const cw = iframeRef.current?.contentWindow;
     if (!cw || !command) return;
     const key = `${command}:${Date.now()}`;

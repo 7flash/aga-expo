@@ -102,6 +102,19 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
     return next;
   }
 
+  async function rememberPreferenceSignal(kind: string, value: string, note: string) {
+    const clean = `${kind}: ${value}`.slice(0, 180);
+    await logEvent('profile.preference', `${clean} — ${note}`);
+    // These are durable personalization facts, not temporary chat context.
+    // They survive fresh Realtime sessions and can be wiped by “forget everything”.
+    await addMemory(`Preference — ${note}`);
+    await updateUserProfileFromSignal({
+      communicationStyle: kind === 'communication' || kind === 'language' || kind === 'persona' || kind === 'voice' ? note : undefined,
+      technique: kind === 'listening' ? note : undefined,
+      note: `User preference saved: ${note}`,
+    });
+  }
+
   async function applyChoice(option: ChoiceOption): Promise<string> {
     const action = option.action as ChoiceAction;
 
@@ -120,6 +133,7 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
       ctx.requestReconnect(`voice:${action.voice}`);
       ctx.publish({ speechStatus: `voice set: ${action.label}` });
       await logEvent('settings.voice', action.voice);
+      await rememberPreferenceSignal('voice', action.voice, `User chose AGA voice ${action.label}; use it persistently until changed.`);
       return `Voice changed to ${action.label}. I will use it from my next reply.`;
     }
 
@@ -127,6 +141,7 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
       await setPrefs({ persona: action.persona, personalityPrompt: null } as Partial<Preferences>);
       ctx.updateRealtimeSession();
       await logEvent('settings.persona', action.persona);
+      await rememberPreferenceSignal('persona', action.persona, `User chose ${action.label} personality for AGA.`);
       return `Personality changed to ${action.label}.`;
     }
 
@@ -135,6 +150,7 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
       await setPrefs({ personalityPrompt: prompt } as Partial<Preferences>);
       ctx.updateRealtimeSession();
       await logEvent('settings.personality.regenerate', action.style);
+      await rememberPreferenceSignal('persona', action.style, `User asked AGA to regenerate personality style: ${action.style}.`);
       return 'I regenerated my personality blend for this device.';
     }
 
@@ -186,8 +202,10 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
       await setPrefs({ realtimeListenMode: nextMode, allowBargeIn } as Partial<Preferences>);
       ctx.publish({ listeningMode: listeningModeLabel(nextMode, allowBargeIn) });
       ctx.updateRealtimeSession();
-      await logEvent('settings.listening', listeningModeLabel(nextMode, allowBargeIn));
-      return `Listening mode set to ${listeningModeLabel(nextMode, allowBargeIn)}.`;
+      const label = listeningModeLabel(nextMode, allowBargeIn);
+      await logEvent('settings.listening', label);
+      await rememberPreferenceSignal('listening', label, `User prefers AGA listening mode ${label}.`);
+      return `Listening mode set to ${label}.`;
     }
 
     return 'Done.';
@@ -331,10 +349,12 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
       const currentBarge = !!(ctx.getPrefs() as any)?.allowBargeIn;
       const nextBargeIn = typeof allow_barge_in === 'boolean' ? allow_barge_in : currentBarge;
       await setPrefs({ realtimeListenMode: nextMode, allowBargeIn: nextBargeIn } as Partial<Preferences>);
-      ctx.publish({ listeningMode: listeningModeLabel(nextMode, nextBargeIn) });
+      const label = listeningModeLabel(nextMode, nextBargeIn);
+      ctx.publish({ listeningMode: label });
       ctx.updateRealtimeSession();
-      await logEvent('settings.listening', listeningModeLabel(nextMode, nextBargeIn));
-      return `Listening mode set to ${listeningModeLabel(nextMode, nextBargeIn)}.`;
+      await logEvent('settings.listening', label);
+      await rememberPreferenceSignal('listening', label, `User prefers AGA listening mode ${label}.`);
+      return `Listening mode set to ${label}.`;
     },
 
     start_guided_session: async ({ kind, goal, durationMinutes }) => {
@@ -411,16 +431,19 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
       return `Pulled server configuration revision ${getRemoteConfigRevision()}.`;
     },
     set_persona: async ({ persona }) => {
-      await setPrefs({ persona: String(persona ?? 'warm') } as Partial<Preferences>);
+      const value = String(persona ?? 'warm');
+      await setPrefs({ persona: value } as Partial<Preferences>);
       ctx.updateRealtimeSession();
-      await logEvent('prefs.persona', String(persona ?? ''));
-      return `Persona set to ${persona}.`;
+      await logEvent('prefs.persona', value);
+      await rememberPreferenceSignal('persona', value, `User chose AGA persona ${value}.`);
+      return `Persona set to ${value}.`;
     },
     set_translate: async ({ target }) => {
       const value = target == null ? null : String(target);
       await setPrefs({ translateTarget: value } as Partial<Preferences>);
       ctx.updateRealtimeSession();
       ctx.setMode(value ? 'translating' : 'listening');
+      await rememberPreferenceSignal('language', value || 'translation off', value ? `User enabled translation to ${value}.` : 'User turned translation off.');
       return value ? `Translating to ${value}.` : 'Translation off.';
     },
     set_ui_language: async ({ locale, label }) => {
@@ -434,6 +457,7 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
       ctx.publish({ sessionLabel: null, activeChoiceMenu: null, speechStatus: `language set: ${cleanLabel}` });
       ctx.updateRealtimeSession();
       await logEvent('settings.language', `${cleanLabel} ${cleanLocale}`);
+      await rememberPreferenceSignal('language', cleanLocale, `User chose ${cleanLabel} as AGA's persistent UI/speaking preference.`);
       return `Okay. I will answer in ${cleanLabel} unless you speak another language or ask for translation.`;
     },
     show_settings_menu: async ({ category }) => {

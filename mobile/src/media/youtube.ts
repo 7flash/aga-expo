@@ -102,7 +102,7 @@ var mode=${jsString(hasVideo ? 'video' : 'search')};
 var primaryVideoId=${jsString(safeId)};
 var fallbackVideoIds=${JSON.stringify(fallbackVideoIds)};
 var fallbackIndex=0;
-function tell(type,payload){try{window.ReactNativeWebView&&window.ReactNativeWebView.postMessage(JSON.stringify(Object.assign({type:type},payload||{})));}catch(e){}}
+function tell(type,payload){try{var msg=JSON.stringify(Object.assign({type:type},payload||{})); if(window.ReactNativeWebView)window.ReactNativeWebView.postMessage(msg); if(window.parent&&window.parent!==window)window.parent.postMessage(msg,'*');}catch(e){}}
 function tryVideoFallback(reason){
   try{
     while(fallbackIndex<fallbackVideoIds.length && fallbackVideoIds[fallbackIndex]===primaryVideoId) fallbackIndex++;
@@ -212,14 +212,48 @@ async function searchYouTubeDataApi(query: string): Promise<YouTubeResult | null
     key,
     part: 'snippet',
     type: 'video',
-    maxResults: '1',
+    maxResults: '8',
     safeSearch: 'moderate',
+    videoEmbeddable: 'true',
+    videoSyndicated: 'true',
     q: query,
   });
   const response = await fetch(`https://www.googleapis.com/youtube/v3/search?${params.toString()}`);
   const data = await response.json().catch(() => null);
   if (!response.ok) return null;
-  return normalizeRemoteResult(data, query, 'youtube_api');
+  const ids = (data?.items ?? [])
+    .map((item: any) => item?.id?.videoId)
+    .filter((id: any) => typeof id === 'string' && /^[a-zA-Z0-9_-]{11}$/.test(id) && !KNOWN_BAD_YOUTUBE_IDS.has(id));
+  if (!ids.length) return null;
+
+  // Search filters reduce bad embeds, but videos.list status is the real check.
+  const verifyParams = new URLSearchParams({
+    key,
+    part: 'snippet,status,liveStreamingDetails',
+    id: ids.slice(0, 8).join(','),
+    maxResults: '8',
+  });
+  const verifyResponse = await fetch(`https://www.googleapis.com/youtube/v3/videos?${verifyParams.toString()}`);
+  const verify = await verifyResponse.json().catch(() => null);
+  if (!verifyResponse.ok) return null;
+  const item = (verify?.items ?? []).find((video: any) => {
+    const id = String(video?.id ?? '');
+    const status = video?.status ?? {};
+    const live = video?.snippet?.liveBroadcastContent === 'live' || video?.snippet?.liveBroadcastContent === 'upcoming' || !!video?.liveStreamingDetails;
+    return /^[a-zA-Z0-9_-]{11}$/.test(id) && !KNOWN_BAD_YOUTUBE_IDS.has(id) && status.embeddable !== false && status.privacyStatus === 'public' && !live;
+  });
+  if (!item) return null;
+  const safeId = safeYouTubeVideoId(item.id);
+  const title = item?.snippet?.title ?? query;
+  return {
+    videoId: safeId,
+    title,
+    thumbnailUrl: item?.snippet?.thumbnails?.high?.url ?? item?.snippet?.thumbnails?.default?.url ?? `https://i.ytimg.com/vi/${safeId}/hqdefault.jpg`,
+    url: `https://www.youtube.com/watch?v=${safeId}`,
+    embedHtml: youtubePlayerHtml({ videoId: safeId, title }),
+    playerUrl: youtubeVideoPlayerUrl(safeId),
+    source: 'youtube_api',
+  };
 }
 
 

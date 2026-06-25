@@ -14,7 +14,7 @@ import {
 } from '../db/localStore';
 import { configureNotificationHandler } from '../notifications/localNotifications';
 import type { YouTubeResult } from '../media/youtube';
-import type { AmbientResult } from '../media/ambient';
+import { resolveLocalAmbient, type AmbientResult } from '../media/ambient';
 import { measureAsync, measureMark } from '../observability/measure';
 import { findChoice, normalizeChoiceKey, type ChoiceMenu } from '../aga/choiceMenus';
 import { BUILTIN_CAPABILITY_TOOLS, buildTurnContextBlock } from '../aga/capabilityRegistry';
@@ -118,10 +118,13 @@ function allowBargeIn(prefs: Preferences | null) {
 }
 
 function realtimeAutoResponse() {
-  // Default false: validate transcript/local controls before creating a model
-  // response. This prevents stale-language monologues and menus being delayed
-  // by server-side automatic VAD responses.
-  return process.env.EXPO_PUBLIC_AGA_REALTIME_AUTO_RESPONSE === '1';
+  // Default true for reliability: the Realtime model should answer even when
+  // optional input transcription events are unavailable or delayed. v35 made
+  // manual validation the default; that can feel like AGA stopped hearing.
+  // Set EXPO_PUBLIC_AGA_REALTIME_VALIDATED_TURNS=1 to require transcript-first
+  // validation again once transcription is proven stable on the target build.
+  if (process.env.EXPO_PUBLIC_AGA_REALTIME_VALIDATED_TURNS === '1') return false;
+  return process.env.EXPO_PUBLIC_AGA_REALTIME_AUTO_RESPONSE !== '0';
 }
 
 function inputTranscriptionConfig(prefs: Preferences | null) {
@@ -225,7 +228,9 @@ function realtimeSessionConfig(prefs: Preferences | null, forUpdate = false) {
   const translate = prefs?.translateTarget;
   const instructions = [
     persona.system,
-    'You are AGA, a cute holographic guardian angel in a touch-free speaker. Talk naturally, briefly, and warmly.',
+    'You are AGA, a cute holographic guardian angel in a touch-free speaker. Talk naturally, briefly, softly, and warmly.',
+    'Voice style: gentle, friendly, close, emotionally safe, and never robotic. Sound like a kind companion beside the user, not a customer-support bot.',
+    'Light humor policy: when it fits, add tiny harmless warmth — a soft pun, playful image, or charming self-correction. Do not force jokes during distress, meditation, hypnosis, or serious conflict. Never pretend to be incompetent; be reliable with a little sparkle.',
     'Use tools for any media, reminder, memory, weather, time, persona, translation, or settings action. Do not tell the user to click or tap.',
     'When asked for YouTube or music, call play_youtube. For pause, resume, or stop playback, call media_control. Background music may keep playing while you speak; do not pause music unless the user asks.',
     'Resolve relative reminder times to absolute ISO-8601 timestamps before calling set_reminder. Use get_time for current time/date and get_weather for weather.',
@@ -338,7 +343,7 @@ function localControlIntent(text: string): LocalControlIntent {
     return { tool: 'media_control', args: { command: 'resume' } };
   }
   if (/\b(play|put on|start)\b.*\b(music|youtube|song|ambient|lofi|lo-fi|calm|meditation music|relaxing)\b|^music$|^calm music$/.test(clean)) {
-    return { tool: 'play_youtube', args: { query: clean || 'calm music' } };
+    return { tool: 'play_youtube', args: { query: clean || 'calm music', forceYouTube: /youtube|youtu\.be/.test(clean) } };
   }
 
   if (/\b(body\s+scan)\b/.test(clean)) return { tool: 'start_guided_session', args: { kind: 'body_scan', goal: 'body scan' } };
@@ -712,10 +717,11 @@ export class RealtimeSession {
             this.publish({ interim: '' });
             break;
           }
-          // With turn_detection.create_response=false, Realtime will commit and
-          // transcribe the user's turn but will not answer until the client
-          // explicitly approves it. This is the core anti-stale-context gate.
-          this.requestResponse('validated_audio_transcript');
+          // If validated-turn mode is enabled, VAD did not auto-create a response,
+          // so manually create one after transcript/local-control validation.
+          // In the default reliable mode, VAD already created the response;
+          // requestResponse() will queue safely if a response is active.
+          if (!realtimeAutoResponse()) this.requestResponse('validated_audio_transcript');
         }
         this.publish({ interim: '' });
         break;
@@ -943,6 +949,16 @@ export class RealtimeSession {
     if (!current) return;
 
     const text = String(type);
+    if (text.includes('error') && (current as any).type === 'youtube') {
+      const q = String((current as any).query || (current as any).title || 'calm ambient music');
+      const ambient = resolveLocalAmbient(q) || resolveLocalAmbient('calm ambient music');
+      if (ambient) {
+        void logEvent('youtube.error.fallback_ambient', q).catch(() => undefined);
+        this.publish({ activeMedia: { ...ambient, state: 'playing' }, mediaCommand: null, speechStatus: 'youtube failed; using local ambient' });
+        this.setMode('media');
+        return;
+      }
+    }
     // Lifecycle events such as player.mount/load do not change media state.
     // Publishing a cloned activeMedia object for these events causes React
     // render loops when the iframe remounts or reports readiness.

@@ -53,7 +53,7 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#050817;col
 <body><div class="stage"><div class="ring"></div><div class="ring two"></div><div class="core"></div><div class="label">${htmlEscape(title)}</div></div>
 <script>
 var ctx=null, master=null, nodes=[], started=false, paused=false, pendingVolume=42, kind=${jsString(kind)};
-function tell(type,payload){try{window.ReactNativeWebView&&window.ReactNativeWebView.postMessage(JSON.stringify(Object.assign({type:type},payload||{})));}catch(e){}}
+function tell(type,payload){try{var msg=JSON.stringify(Object.assign({type:type},payload||{})); if(window.ReactNativeWebView)window.ReactNativeWebView.postMessage(msg); if(window.parent&&window.parent!==window)window.parent.postMessage(msg,'*');}catch(e){}}
 function noiseBuffer(color){
   var len=(ctx.sampleRate||44100)*2, buffer=ctx.createBuffer(1,len,ctx.sampleRate||44100), data=buffer.getChannelData(0);
   var last=0, b0=0,b1=0,b2=0,b3=0,b4=0,b5=0,b6=0;
