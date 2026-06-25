@@ -1,10 +1,3 @@
-import { AgaZenScreen } from '../ui/AgaZenScreen';
-import { AgaErrorBoundary } from '../ui/AgaErrorBoundary';
+import AgaIndexRoute from '../routes/AgaIndexRoute';
 
-export default function Index() {
-  return (
-    <AgaErrorBoundary>
-      <AgaZenScreen />
-    </AgaErrorBoundary>
-  );
-}
+export default AgaIndexRoute;

@@ -13,6 +13,8 @@ const INITIAL_SNAPSHOT: AgaBrainSnapshot = {
   error: null,
   lastMeasure: undefined,
   ttsStatus: undefined,
+  voiceSummary: undefined,
+  voiceCapability: undefined,
 };
 
 export function useAgaBrain() {

@@ -2,15 +2,13 @@ import React, { useEffect, useRef } from "react";
 import {
   Animated,
   FlatList,
-  Pressable,
   SafeAreaView,
   StyleSheet,
   Text,
   View,
 } from "react-native";
-import { Link } from "expo-router";
 import { useAgaBrain } from "../aga/useAgaBrain";
-import { AgaAvatarZen } from "./AgaAvatarZen";
+import { AngelVisual } from "../visual/AngelVisual";
 import { MessageBubble } from "./MessageBubble";
 import { YouTubePlayer } from "./YouTubePlayer";
 import { colors, radius, spacing } from "./theme";
@@ -27,10 +25,10 @@ export function AgaZenScreen() {
     error,
     lastMeasure,
     ttsStatus,
+    voiceSummary,
     replay,
     closeMedia,
     onMediaEvent,
-    rearmMic,
   } = useAgaBrain();
   const avatarShift = useRef(new Animated.Value(0)).current;
   const hasConversation = messages.length > 0 || !!activeMedia;
@@ -90,15 +88,6 @@ export function AgaZenScreen() {
           />
           <Text style={styles.statusText}>{status}</Text>
         </View>
-        <Link href="/settings" asChild>
-          <Pressable
-            style={styles.settingsButton}
-            accessibilityRole="button"
-            accessibilityLabel="Open settings"
-          >
-            <Text style={styles.settingsText}>⚙</Text>
-          </Pressable>
-        </Link>
       </View>
 
       <Animated.View
@@ -123,20 +112,12 @@ export function AgaZenScreen() {
           },
         ]}
       >
-        <Pressable
-          onPress={rearmMic}
-          accessibilityRole="button"
-          accessibilityLabel="Wake AGA for forty five seconds and restart the microphone"
-          focusable={false}
-          style={styles.avatarPressable}
-        >
-          <AgaAvatarZen
-            mode={mode}
-            audioLevel={audioLevel}
-            compact={!!activeMedia}
-            size={activeMedia ? 156 : 282}
-          />
-        </Pressable>
+        <AngelVisual
+          mode={mode}
+          audioLevel={audioLevel}
+          compact={!!activeMedia}
+          size={activeMedia ? 156 : 282}
+        />
       </Animated.View>
 
       {!!interim && (
@@ -164,13 +145,13 @@ export function AgaZenScreen() {
             <View style={styles.emptyState}>
               <Text style={styles.emptyTitle}>Say “Hey AGA”</Text>
               <Text style={styles.emptyText}>
-                Ask for advice, reminders, memory, translation, or YouTube.
-              </Text>
-              <Text style={styles.emptyText}>
-                On web, tap the avatar once to wake AGA for 45 seconds and unlock speech output.
+                Ask for advice, reminders, memory, translation, or YouTube — all by voice.
               </Text>
               <Text style={styles.versionText}>v{AGA_APP_VERSION}</Text>
               <Text style={styles.speechStatus}>{speechStatus}</Text>
+              {!!voiceSummary && (
+                <Text style={styles.measureStatus}>{voiceSummary}</Text>
+              )}
               {!!ttsStatus && (
                 <Text style={styles.measureStatus}>TTS {ttsStatus}</Text>
               )}
@@ -284,17 +265,6 @@ const styles = StyleSheet.create({
     fontWeight: "900",
     textTransform: "capitalize",
   },
-  settingsButton: {
-    width: 45,
-    height: 45,
-    borderRadius: 22.5,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(255,255,255,0.08)",
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  settingsText: { color: colors.text, fontSize: 18 },
   avatarWrap: {
     position: "absolute",
     top: "23%",
@@ -302,9 +272,6 @@ const styles = StyleSheet.create({
     right: 0,
     zIndex: 5,
     alignItems: "center",
-  },
-  avatarPressable: {
-    ...({ outlineStyle: "none", outlineWidth: 0 } as any),
   },
   interimPill: {
     position: "absolute",

@@ -3,6 +3,7 @@ import { detectWake } from "./text";
 import type { AgaAction, AgaMode } from "./turn";
 import { shouldAcceptFinalSpeech } from "./turnGate";
 import { FinalSpeechDeduper, SerialTurnQueue } from "./turnQueue";
+import { runDreamTick } from "./dreaming";
 import { askBrain, translatePhrase } from "../backend/brain";
 import {
   addMemory,
@@ -31,6 +32,7 @@ import {
   scheduleAgaReminderNotification,
 } from "../notifications/localNotifications";
 import { NativeSpeechLoop } from "../voice/nativeSpeech";
+import { getVoiceCapability, summarizeVoiceCapability, type VoiceCapability } from "../voice/voiceHealth";
 import { getTtsDiagnostics, isTtsAvailable, primeTts, speak, stopSpeaking } from "../voice/tts";
 import {
   getRecentAgaMeasures,
@@ -57,12 +59,14 @@ export type AgaBrainSnapshot = {
   error: string | null;
   lastMeasure?: string;
   ttsStatus?: string;
+  voiceSummary?: string;
+  voiceCapability?: VoiceCapability;
 };
 
 type Listener = (snapshot: AgaBrainSnapshot) => void;
 
-const WEB_TAP_AWAKE_MS = 45_000;
 const ACTIVE_WINDOW_MS = 35_000;
+const MANUAL_AWAKE_MS = 45_000;
 
 const initialPrefs: Preferences = {
   wakePhrase: "hey aga",
@@ -103,6 +107,8 @@ export class CognitiveEngine {
     error: null,
     lastMeasure: undefined,
     ttsStatus: undefined,
+    voiceSummary: undefined,
+    voiceCapability: undefined,
   };
 
   subscribe(listener: Listener) {
@@ -115,6 +121,7 @@ export class CognitiveEngine {
     const recentMeasures = getRecentAgaMeasures();
     const latestMeasure = recentMeasures[recentMeasures.length - 1];
     const tts = getTtsDiagnostics();
+    const voiceCapability = getVoiceCapability();
     this.snapshot = {
       ...this.snapshot,
       ...(latestMeasure
@@ -123,6 +130,8 @@ export class CognitiveEngine {
           }
         : null),
       ttsStatus: `${tts.provider}${tts.available ? "" : ":unavailable"}${tts.unlocked ? ":unlocked" : ""}${tts.lastError ? ` — ${tts.lastError}` : ""}`,
+      voiceSummary: summarizeVoiceCapability(voiceCapability),
+      voiceCapability,
       ...patch,
     };
     for (const listener of this.listeners) listener(this.snapshot);
@@ -148,11 +157,14 @@ export class CognitiveEngine {
           this.prefs = await loadPreferences();
           await this.refresh();
           const ttsReady = await isTtsAvailable().catch(() => false);
+          const voiceCapability = getVoiceCapability();
           this.publish({
             ready: true,
+            voiceCapability,
+            voiceSummary: summarizeVoiceCapability(voiceCapability),
             speechStatus: ttsReady
-              ? "ready — tap avatar once if voice is silent"
-              : "ready — voice output unavailable",
+              ? `${summarizeVoiceCapability(voiceCapability)} — say hey aga`
+              : `${summarizeVoiceCapability(voiceCapability)} — voice output unavailable`,
           });
           await this.startSpeechLoop();
           this.startDreamLoop();
@@ -188,13 +200,13 @@ export class CognitiveEngine {
   async rearmMic() {
     return measureAsync("engine.rearmMic", async () => {
       this.finalDeduper.reset();
-      this.activeUntil = Date.now() + WEB_TAP_AWAKE_MS;
-      measureMark("engine.manualAwake", { ms: WEB_TAP_AWAKE_MS });
+      this.activeUntil = Date.now() + MANUAL_AWAKE_MS;
+      measureMark("engine.manualAwake", { ms: MANUAL_AWAKE_MS });
       const ttsReady = await primeTts(this.prefs.voiceLocale || "en-US").catch(() => false);
       this.publish({
         speechStatus: ttsReady
-          ? "audio enabled; AGA is awake for 45 seconds"
-          : "audio still locked; AGA is awake for 45 seconds, but browser sound may be blocked",
+          ? "manual rearm complete; AGA is awake for 45 seconds"
+          : "manual rearm complete; AGA is awake for 45 seconds, but browser sound may be blocked",
       });
       await this.loop?.stop?.("manual_rearm").catch(() => undefined);
       await this.startSpeechLoop().catch((error) => {
@@ -276,15 +288,20 @@ export class CognitiveEngine {
               this.turnQueue.enqueue(() => this.handleRecognizedText(text));
             },
             onError: (message) => {
+              const lifecycle = /^(no-speech|aborted)$/i.test(message.trim());
               const unavailable =
                 /unavailable|unsupported|not available|startSpeech|NativeModule/i.test(
                   message,
                 );
               this.publish({
-                speechStatus: unavailable ? message : `mic error: ${message}`,
-                error: unavailable ? null : message,
+                speechStatus: lifecycle
+                  ? `arming:${message}`
+                  : unavailable
+                    ? message
+                    : `mic error: ${message}`,
+                error: unavailable || lifecycle ? null : message,
               });
-              void logEvent("voice.error", message);
+              void logEvent(lifecycle ? "voice.lifecycle" : "voice.error", message);
             },
             onStatus: (status) => this.publish({ speechStatus: status }),
           },
@@ -317,9 +334,24 @@ export class CognitiveEngine {
             await logEvent("reminder.due", reminder.text);
             await this.say(`Reminder: ${reminder.text}`);
           }
+
+          const [pendingReminders, recentMessages] = await Promise.all([
+            listPendingReminders(8),
+            listMessages(18),
+          ]);
+          const dream = runDreamTick({
+            mode: this.mode,
+            proactiveEnabled: this.prefs.proactiveReminders,
+            pendingReminders,
+            recentMessages,
+          });
+          await logEvent("dream.tick", dream.labels.join(","));
+          if (dream.shouldCompactLogs) await compactEventLogIfIdle();
+          // Phase one deliberately does not speak proactive suggestions except
+          // due reminders. Manifestations are logged for later consent-based UI.
+          if (dream.manifestation) await logEvent("dream.manifestation", dream.manifestation);
+
           if (due.length) await this.refresh();
-          if (this.mode === "sleeping" || this.mode === "listening")
-            await compactEventLogIfIdle();
         } finally {
           this.proactiveBusy = false;
         }
@@ -356,7 +388,7 @@ export class CognitiveEngine {
 
         if (!ok) {
           this.publish({
-            speechStatus: "voice output unavailable — tap avatar once or check browser sound",
+            speechStatus: "voice output unavailable — AGA will still show replies in the feed",
           });
         }
 
@@ -547,7 +579,7 @@ export class CognitiveEngine {
           }
           case "open_settings":
             await this.say(
-              "Open settings with the small gear, or say what you want me to change.",
+              "Settings are voice controlled. Tell me what you want to change, like my voice, wake phrase, translation, reminders, or diagnostics.",
             );
             return;
           case "reset_conversation":
@@ -615,7 +647,7 @@ export class CognitiveEngine {
         if (!woke && !active && !this.prefs.translateTarget) {
           this.publish({
             interim: text,
-            speechStatus: `heard “${text.slice(0, 42)}” as background — tap avatar or say ${this.prefs.wakePhrase || "AGA"}`,
+            speechStatus: `heard “${text.slice(0, 42)}” as background — say ${this.prefs.wakePhrase || "AGA"}`,
           });
           await logEvent("voice.passive_ignored", text.slice(0, 180)).catch(() => undefined);
           return;

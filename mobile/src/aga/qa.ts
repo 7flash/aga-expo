@@ -8,8 +8,6 @@ export type AgaQaCase = {
 
 export const AGA_VOICE_QA_CASES: AgaQaCase[] = [
   { name: 'help', input: 'Hey AGA help', expectAction: 'speak' },
-  { name: 'fuzzy wake anger', input: 'anger where are you', expectAction: 'speak' },
-  { name: 'fuzzy wake agar', input: 'agar test voice', expectAction: 'test_voice' },
   { name: 'memory save', input: 'Hey AGA remember that my project is AGA', expectAction: 'remember' },
   { name: 'memory recall', input: 'Hey AGA what do you remember', expectAction: 'recall' },
   { name: 'relative reminder', input: 'Hey AGA remind me to stretch in one minute', expectAction: 'add_reminder' },

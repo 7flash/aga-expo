@@ -1,5 +1,4 @@
-import { AgaSettingsScreen } from '../ui/AgaSettingsScreen';
+import AgaIndexRoute from '../routes/AgaIndexRoute';
 
-export default function Settings() {
-  return <AgaSettingsScreen />;
-}
+// AGA is voice-first; settings are handled by voice commands for now.
+export default AgaIndexRoute;

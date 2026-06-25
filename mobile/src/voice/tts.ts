@@ -225,7 +225,7 @@ async function speakWithWebSpeech(clean: string, prefs: Preferences, callbacks?:
       // the engine can recover instead of staying in speaking mode forever.
       setTimeout(() => {
         if (!settled && speaking && web.synth.paused) {
-          done(false, "Browser speech synthesis appears paused or locked. Tap the avatar once to enable voice.");
+          done(false, "Browser speech synthesis appears paused or locked. AGA will still show replies in the feed.");
         }
       }, 1200);
     } catch (error) {
@@ -295,7 +295,7 @@ export async function speak(text: string, prefs: Preferences, callbacks?: TtsCal
     const expoOk = await speakWithExpoSpeech(clean, prefs, callbacks);
     if (expoOk) return true;
 
-    const message = "No speech synthesis provider is available. On web, tap the avatar once; on native, install/rebuild expo-speech.";
+    const message = "No speech synthesis provider is available. On native, install/rebuild expo-speech.";
     diagnostics.provider = "none";
     diagnostics.available = false;
     finish(callbacks, message);

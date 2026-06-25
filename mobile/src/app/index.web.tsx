@@ -1,1 +1,3 @@
-export { default } from './index';
+import AgaIndexRoute from '../routes/AgaIndexRoute';
+
+export default AgaIndexRoute;

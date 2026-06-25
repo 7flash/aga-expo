@@ -1,11 +1,13 @@
-import { getPreferences } from '../db/preferences';
-
 export type YouTubeResult = {
   videoId: string;
   title: string;
   thumbnailUrl: string | null;
   url: string;
 };
+
+function env(name: string) {
+  return process.env?.[name] ?? '';
+}
 
 export function safeYouTubeVideoId(videoId: string) {
   const match = String(videoId || '').match(/^[a-zA-Z0-9_-]{11}$/);
@@ -62,15 +64,25 @@ function normalizeRemoteResult(data: any, query: string): YouTubeResult | null {
   };
 }
 
+function remoteBackendConfig() {
+  const base =
+    env('EXPO_PUBLIC_AGA_YOUTUBE_BACKEND_URL') ||
+    env('EXPO_PUBLIC_AGA_REMOTE_BACKEND_URL') ||
+    env('EXPO_PUBLIC_ASSISTANT_WEB_URL');
+  const token =
+    env('EXPO_PUBLIC_AGA_YOUTUBE_BACKEND_TOKEN') ||
+    env('EXPO_PUBLIC_AGA_REMOTE_BACKEND_TOKEN');
+  return { base: base.replace(/\/$/, ''), token };
+}
+
 async function searchRemoteYouTube(query: string): Promise<YouTubeResult | null> {
-  const prefs = await getPreferences();
-  if (!prefs.remoteBackendUrl) return null;
-  const base = prefs.remoteBackendUrl.replace(/\/$/, '');
+  const { base, token } = remoteBackendConfig();
+  if (!base) return null;
   const response = await fetch(`${base}/api/youtube`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...(prefs.remoteBackendToken ? { Authorization: `Bearer ${prefs.remoteBackendToken}` } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: JSON.stringify({ query, limit: 1 }),
   });
