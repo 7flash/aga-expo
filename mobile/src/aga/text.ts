@@ -21,6 +21,64 @@ export function normalizeSpeech(text: string) {
     .trim();
 }
 
+
+function compactSpeech(text: string) {
+  return normalizeSpeech(text).toLowerCase().replace(/[^a-z0-9а-яё]+/gi, '');
+}
+
+function levenshteinDistance(a: string, b: string) {
+  const left = String(a || '');
+  const right = String(b || '');
+  const rows = left.length + 1;
+  const cols = right.length + 1;
+  const dp: number[] = [];
+  for (let j = 0; j < cols; j += 1) dp[j] = j;
+  for (let i = 1; i < rows; i += 1) {
+    let prev = dp[0];
+    dp[0] = i;
+    for (let j = 1; j < cols; j += 1) {
+      const old = dp[j];
+      const cost = left[i - 1] === right[j - 1] ? 0 : 1;
+      dp[j] = Math.min(dp[j] + 1, dp[j - 1] + 1, prev + cost);
+      prev = old;
+    }
+  }
+  return dp[cols - 1] ?? 99;
+}
+
+function fuzzyWakeFromShortUtterance(text: string): { woke: boolean; match: string; index: number } {
+  const normalized = normalizeSpeech(text).toLowerCase();
+  if (!normalized) return { woke: false, match: '', index: -1 };
+  const compact = compactSpeech(normalized);
+
+  // Web/Android STT often turns “hey AGA” into things like “hey agar”,
+  // “hey a guy”, “hey egg a”, “hey ay gee ay”, or just “hey ag…”.
+  // This fallback only applies to short wake-sized utterances so normal room
+  // speech does not randomly summon the assistant.
+  const words = normalized.split(/\s+/).filter(Boolean);
+  const shortWakeSized = words.length <= 5 && normalized.length <= 42;
+  if (!shortWakeSized) return { woke: false, match: '', index: -1 };
+
+  if (/^(?:hey|hi|ok|okay|yo)?(?:aga|agga|agha|aiga|ayga|agar|agaur|egga|eggah|aguy|agay|aijay)$/i.test(compact)) {
+    return { woke: true, match: normalized, index: 0 };
+  }
+  if (/^(?:hey|hi|ok|okay|yo)?a(?:g|gee|ji|je|jay)a$/i.test(compact)) {
+    return { woke: true, match: normalized, index: 0 };
+  }
+  if (/^(?:hey|hi|ok|okay|yo)?aygee(?:ay|a)$/i.test(compact)) {
+    return { woke: true, match: normalized, index: 0 };
+  }
+
+  const startIndex = /^(hey|hi|ok|okay|yo)$/i.test(words[0] || '') ? 1 : 0;
+  const candidate = words.slice(startIndex, startIndex + 3).join('');
+  const cleanedCandidate = candidate.replace(/[^a-z0-9]+/gi, '');
+  if (cleanedCandidate && (levenshteinDistance(cleanedCandidate, 'aga') <= 1 || /^(a?g+a?|a+g+a+|e+g+a+|a+guy)$/i.test(cleanedCandidate))) {
+    return { woke: true, match: words.slice(0, startIndex + 3).join(' '), index: 0 };
+  }
+
+  return { woke: false, match: '', index: -1 };
+}
+
 export function hasWord(text: string, alternatives: string) {
   return new RegExp(`\\b(?:${alternatives})\\b`, 'i').test(normalizeSpeech(text));
 }
@@ -110,6 +168,11 @@ export function detectWake(text: string, wakePhrase: string): WakeDetection {
   const fuzzy = normalized.match(fuzzyPrefixWakeRegex(wakePhrase));
   if (fuzzy && fuzzy.index === 0) {
     return { woke: true, kind: 'fuzzy_prefix', match: fuzzy[0], index: 0 };
+  }
+
+  const shortFuzzy = fuzzyWakeFromShortUtterance(normalized);
+  if (shortFuzzy.woke) {
+    return { woke: true, kind: 'fuzzy_prefix', match: shortFuzzy.match, index: shortFuzzy.index };
   }
 
   return { woke: false, kind: 'none', match: '', index: -1 };

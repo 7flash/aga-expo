@@ -39,6 +39,15 @@ import {
   getRemoteTools,
 } from '../remote/config';
 
+
+function env(name: string) {
+  return process.env?.[name] ?? '';
+}
+
+function hasYoutubeVerifier() {
+  return !!(env('EXPO_PUBLIC_YOUTUBE_API_KEY') || env('EXPO_PUBLIC_GOOGLE_API_KEY') || env('EXPO_PUBLIC_AGA_YOUTUBE_BACKEND_URL') || env('EXPO_PUBLIC_AGA_REMOTE_BACKEND_URL'));
+}
+
 export type CapabilityPatch = Record<string, unknown>;
 export type CapabilityHandler = (args: JsonObject) => Promise<string>;
 
@@ -314,14 +323,14 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
       // Broad background music is a local ambient capability by default. YouTube
       // embed availability is not deterministic without a server/Data API check;
       // a broken iframe is worse than a simple local soundscape.
-      if (!forceYouTube && !explicitYouTube) {
+      if (!forceYouTube && !explicitYouTube && !hasYoutubeVerifier()) {
         const ambient = resolveLocalAmbient(q);
         if (ambient) {
           ctx.publish({ activeMedia: { ...ambient, state: 'playing' }, mediaCommand: null });
           ctx.setMode('media');
           await logEvent('ambient.play', `${ambient.kind}: ${q}`);
           await ctx.refresh();
-          return `Playing ${ambient.title}. This is generated locally, so it keeps working even when YouTube embeds fail.`;
+          return `Playing ${ambient.title}. This is generated locally because no verified YouTube lookup is configured.`;
         }
       }
 

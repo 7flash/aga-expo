@@ -302,7 +302,7 @@ export class NativeSpeechLoop {
             this.lastFinalFingerprint = fingerprint;
             this.diagnostics.lastFinal = final;
             this.callbacks.onFinal?.(final);
-            measureMark('voice.web.final', { chars: final.length });
+            measureMark('voice.web.final', { chars: final.length, text: final.slice(0, 100) });
           }
         }
       };

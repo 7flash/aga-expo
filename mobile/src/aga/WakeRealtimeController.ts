@@ -1,5 +1,5 @@
 import { NativeSpeechLoop } from '../voice/nativeSpeech';
-import { loadPreferences, initializeLocalStore, listMessages, listPendingReminders, logEvent, type Preferences } from '../db/localStore';
+import { loadPreferences, initializeLocalStore, listMessages, listPendingReminders, logEvent, startNewConversationSession, type Preferences } from '../db/localStore';
 import { detectWake, removeWakePhrase, normalizeSpeech } from './text';
 import { measureAsync, measureMark } from '../observability/measure';
 import { RealtimeSession, type RealtimeSnapshot } from '../realtime/RealtimeSession';
@@ -81,6 +81,11 @@ export class WakeRealtimeController {
       this.started = true;
       await initializeLocalStore();
       this.prefs = await loadPreferences();
+      if (envFlag('EXPO_PUBLIC_AGA_CLEAR_TRANSIENT_ON_BOOT', true)) {
+        await startNewConversationSession('app_boot', { clearTranscript: true, endActiveSession: true }).catch(() => undefined);
+        await logEvent('conversation.session.boot_reset', 'cleared transient transcript/session/language on app start').catch(() => undefined);
+        this.prefs = await loadPreferences();
+      }
       await this.refresh();
       await this.startWakeScout('initial');
     });
@@ -155,7 +160,7 @@ export class WakeRealtimeController {
           const clean = normalizeSpeech(text);
           this.wakeEvents.partials += 1;
           this.publish({ interim: clean.slice(0, 120), speechStatus: `wake scout: hearing “${clean.slice(0, 64)}”` });
-          measureMark('wakeScout.partial', { chars: text.length, partials: this.wakeEvents.partials });
+          measureMark('wakeScout.partial', { chars: text.length, partials: this.wakeEvents.partials, text: clean.slice(0, 80) });
 
           // Some Android/Web speech engines are slow to emit final results while
           // the room stays noisy. Wake on a partial phrase so “hey AGA” actually
@@ -233,9 +238,9 @@ export class WakeRealtimeController {
     this.prefs = prefs;
     const wakePhrase = prefs?.wakePhrase || 'aga';
     const wake = detectWake(text, wakePhrase);
-    measureMark('wakeScout.final', { woke: wake.woke, kind: wake.kind, source, chars: text.length });
+    measureMark('wakeScout.final', { woke: wake.woke, kind: wake.kind, match: wake.match, source, chars: text.length, text: text.slice(0, 120) });
     if (!wake.woke) {
-      if (source === 'final') this.publish({ interim: '', speechStatus: 'wake scout: waiting for AGA / hey AGA' });
+      if (source === 'final') this.publish({ speechStatus: `wake scout heard “${text.slice(0, 72)}” — waiting for AGA / hey AGA` });
       return;
     }
 
