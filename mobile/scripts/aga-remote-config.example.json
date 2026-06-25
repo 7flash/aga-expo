@@ -1,63 +1,69 @@
 {
   "schemaVersion": 1,
-  "revision": "2026-06-25.1",
-  "deviceLabel": "kitchen-angel-01",
+  "revision": "tradjs-example-v1",
+  "deviceLabel": "Kitchen AGA",
   "pollMs": 60000,
+  "labels": {
+    "brand": "AGA",
+    "wakeHint": "Say AGA",
+    "theme": "guardian-glass"
+  },
+  "images": {
+    "guardianAura": "https://your-tradjs.example.com/assets/aga/aura.png",
+    "skillLanguage": "https://your-tradjs.example.com/assets/aga/language.png"
+  },
   "settings": {
     "realtimeVoice": "marin",
     "realtimeListenMode": "strict",
     "allowBargeIn": false,
-    "personalityPrompt": "AGA is gentle, concise, playful, and protective."
+    "mediaDuckingEnabled": true,
+    "homeLatitude": -8.65,
+    "homeLongitude": 115.22,
+    "homeLabel": "home",
+    "temperatureUnit": "celsius"
   },
   "realtime": {
-    "instructions": "Prefer short spoken answers. Offer numbered choices when changing modes."
-  },
-  "labels": {
-    "brand.subtitle": "guardian voice · managed by TradJS",
-    "wake.hint": "Say AGA"
-  },
-  "images": {
-    "avatar.backdrop": "https://example.com/aga/backdrop.png"
+    "model": "gpt-realtime-2",
+    "voice": "marin",
+    "listenMode": "strict",
+    "allowBargeIn": false,
+    "instructions": "Server-managed AGA personality overlay. Keep responses short and voice-first. Use server skills when selected."
   },
   "skills": [
     {
-      "id": "language_russian_travel",
-      "label": "Russian travel tutor",
-      "description": "Practice cafe, airport, and directions in Russian.",
-      "aliases": ["russian travel", "travel tutor"],
-      "instructions": "Run a Russian travel language lesson. Ask one short prompt at a time. Let the user try first, then correct gently. Keep explanations under two sentences.",
+      "id": "server_language_game",
+      "label": "Server language game",
+      "description": "Editable language-learning game from TradJS.",
+      "aliases": ["language game", "practice language"],
       "kind": "language",
-      "targetLanguage": "Russian",
-      "theme": "travel",
-      "iconUrl": "https://example.com/skills/russian.png"
-    },
-    {
-      "id": "dragon_castle_game",
-      "label": "Dragon castle game",
-      "description": "A cozy imagination game with choices.",
-      "aliases": ["dragon", "castle game"],
-      "instructions": "Run a gentle imagination game in a dragon castle. Narrate one scene, then offer exactly three spoken options. Wait for the user's choice.",
-      "kind": "imagination",
-      "theme": "dragon castle"
+      "targetLanguage": "English",
+      "instructions": "Run a playful language practice game. Give one challenge, wait for the answer, then correct gently."
     }
   ],
   "tools": [
     {
-      "name": "server_weather_brief",
-      "description": "Ask the TradJS server for a short local weather brief.",
-      "endpoint": "https://example.com/aga/tools",
+      "name": "tradjs_note",
+      "description": "Send a note to the TradJS automation server.",
+      "endpoint": "https://your-tradjs.example.com/aga/tools",
       "parameters": {
         "type": "object",
-        "properties": { "location": { "type": "string" } },
-        "required": ["location"]
+        "properties": {
+          "text": { "type": "string" },
+          "kind": { "type": "string" }
+        },
+        "required": ["text"]
       }
     }
   ],
   "observability": {
-    "endpoint": "https://example.com/aga/observability"
+    "endpoint": "https://your-tradjs.example.com/aga/observability",
+    "sampleRate": 0.5
   },
   "updates": {
-    "ota": "fetch",
-    "message": "A JavaScript update is available and will apply on next restart."
+    "ota": "check",
+    "apkVersion": "1.0.0",
+    "apkUrl": "https://your-tradjs.example.com/downloads/aga.apk",
+    "nativeUpdateRequired": false,
+    "message": "New config available from TradJS."
   }
 }

@@ -1,6 +1,8 @@
 import { loadPreferences, logEvent, savePreferences, type Preferences } from '../db/localStore';
 import { emitObservation } from './observability';
 
+declare function require(name: string): any;
+
 type JsonObject = Record<string, unknown>;
 
 export type RemoteSkill = {
@@ -33,6 +35,8 @@ export type RemoteConfig = {
   revision?: string;
   deviceLabel?: string;
   pollMs?: number;
+  replaceLocalSkills?: boolean;
+  replaceLocalTools?: boolean;
   labels?: Record<string, string>;
   images?: Record<string, string>;
   settings?: Partial<Preferences> & {
@@ -66,14 +70,13 @@ export type RemoteConfig = {
 };
 
 type RemoteState = {
+  localConfig: RemoteConfig;
   config: RemoteConfig;
   lastFetchedAt: string | null;
   lastError: string | null;
   stopPoller: (() => void) | null;
+  localApplied: boolean;
 };
-
-const DEFAULT_CONFIG: RemoteConfig = { schemaVersion: 1, revision: 'local', skills: [], tools: [] };
-const state: RemoteState = { config: DEFAULT_CONFIG, lastFetchedAt: null, lastError: null, stopPoller: null };
 
 function env(name: string) {
   return process.env?.[name] ?? '';
@@ -106,11 +109,11 @@ function sanitizeFunctionName(value: unknown) {
 function sanitizeSkill(raw: unknown, index: number): RemoteSkill | null {
   if (!isObject(raw)) return null;
   if (raw.enabled === false) return null;
-  const label = stringOrNull(raw.label) ?? stringOrNull(raw.title) ?? `Server skill ${index + 1}`;
+  const label = stringOrNull(raw.label) ?? stringOrNull(raw.title) ?? `Local skill ${index + 1}`;
   const instructions = stringOrNull(raw.instructions) ?? stringOrNull(raw.prompt) ?? '';
   if (!instructions) return null;
   return {
-    id: sanitizeId(raw.id, `remote-skill-${index + 1}`),
+    id: sanitizeId(raw.id, `skill-${index + 1}`),
     label,
     description: stringOrNull(raw.description) ?? undefined,
     aliases: arrayOfStrings(raw.aliases),
@@ -140,8 +143,8 @@ function sanitizeTool(raw: unknown): RemoteTool | null {
   };
 }
 
-function sanitizeConfig(input: unknown): RemoteConfig {
-  if (!isObject(input)) return DEFAULT_CONFIG;
+function sanitizeConfig(input: unknown, fallbackRevision = 'local'): RemoteConfig {
+  if (!isObject(input)) return { schemaVersion: 1, revision: fallbackRevision, skills: [], tools: [] };
   const skills = Array.isArray(input.skills) ? input.skills.map(sanitizeSkill).filter(Boolean) as RemoteSkill[] : [];
   const tools = Array.isArray(input.tools) ? input.tools.map(sanitizeTool).filter(Boolean) as RemoteTool[] : [];
   const settings = isObject(input.settings) ? input.settings as Partial<Preferences> : undefined;
@@ -152,26 +155,103 @@ function sanitizeConfig(input: unknown): RemoteConfig {
   const images = isObject(input.images) ? Object.fromEntries(Object.entries(input.images).map(([k, v]) => [k, String(v ?? '')])) : undefined;
   return {
     schemaVersion: Number.isFinite(Number(input.schemaVersion)) ? Number(input.schemaVersion) : 1,
-    revision: stringOrNull(input.revision) ?? stringOrNull(input.version) ?? String(Date.now()),
+    revision: stringOrNull(input.revision) ?? stringOrNull(input.version) ?? fallbackRevision,
     deviceLabel: stringOrNull(input.deviceLabel) ?? stringOrNull(input.device_label) ?? undefined,
     pollMs: Number.isFinite(Number(input.pollMs)) ? Math.max(15_000, Number(input.pollMs)) : undefined,
+    replaceLocalSkills: input.replaceLocalSkills === true,
+    replaceLocalTools: input.replaceLocalTools === true,
     labels,
     images,
     settings,
     realtime,
-    skills: skills.sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0)).slice(0, 32),
-    tools: tools.slice(0, 32),
+    skills: skills.sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0)).slice(0, 64),
+    tools: tools.slice(0, 64),
     observability,
     updates,
   };
 }
 
+function loadBundledLocalConfig(): RemoteConfig {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    return sanitizeConfig(require('./localConfig.json'), 'local-bundled');
+  } catch {
+    return sanitizeConfig({ schemaVersion: 1, revision: 'local-bundled', skills: [], tools: [] }, 'local-bundled');
+  }
+}
+
+function byId<T extends { id?: string; name?: string }>(items: T[], key: 'id' | 'name') {
+  const map = new Map<string, T>();
+  for (const item of items) {
+    const id = String((item as any)[key] ?? '').trim();
+    if (id) map.set(id, item);
+  }
+  return map;
+}
+
+function mergeConfig(base: RemoteConfig, overlay: RemoteConfig): RemoteConfig {
+  const baseSkills = base.skills ?? [];
+  const overlaySkills = overlay.skills ?? [];
+  const baseTools = base.tools ?? [];
+  const overlayTools = overlay.tools ?? [];
+  const skillMap = byId(overlay.replaceLocalSkills ? [] : baseSkills, 'id');
+  for (const skill of overlaySkills) skillMap.set(skill.id, skill);
+  const toolMap = byId(overlay.replaceLocalTools ? [] : baseTools, 'name');
+  for (const tool of overlayTools) toolMap.set(tool.name, tool);
+  return sanitizeConfig({
+    ...base,
+    ...overlay,
+    revision: overlay.revision ?? base.revision ?? 'local',
+    labels: { ...(base.labels ?? {}), ...(overlay.labels ?? {}) },
+    images: { ...(base.images ?? {}), ...(overlay.images ?? {}) },
+    settings: { ...(base.settings ?? {}), ...(overlay.settings ?? {}) },
+    realtime: { ...(base.realtime ?? {}), ...(overlay.realtime ?? {}) },
+    observability: { ...(base.observability ?? {}), ...(overlay.observability ?? {}) },
+    updates: { ...(base.updates ?? {}), ...(overlay.updates ?? {}) },
+    skills: Array.from(skillMap.values()),
+    tools: Array.from(toolMap.values()),
+  }, overlay.revision ?? base.revision ?? 'merged');
+}
+
+const LOCAL_CONFIG = loadBundledLocalConfig();
+const state: RemoteState = {
+  localConfig: LOCAL_CONFIG,
+  config: LOCAL_CONFIG,
+  lastFetchedAt: null,
+  lastError: null,
+  stopPoller: null,
+  localApplied: false,
+};
+
 export function getRemoteConfigUrl() {
   return env('EXPO_PUBLIC_AGA_CONFIG_URL') || env('EXPO_PUBLIC_TRADJS_CONFIG_URL') || env('EXPO_PUBLIC_REMOTE_CONFIG_URL');
 }
 
+async function resolveRemoteConfigUrl() {
+  const fromEnv = getRemoteConfigUrl();
+  if (fromEnv) return fromEnv;
+  const prefs = await loadPreferences().catch(() => null);
+  return prefs?.remoteConfigUrl || '';
+}
+
+export function getLocalRemoteConfig() {
+  return state.localConfig;
+}
+
 export function getRemoteConfig() {
   return state.config;
+}
+
+export function getRemoteConfigStatus() {
+  return {
+    revision: state.config.revision ?? 'local',
+    localRevision: state.localConfig.revision ?? 'local',
+    lastFetchedAt: state.lastFetchedAt,
+    lastError: state.lastError,
+    hasServerUrl: !!getRemoteConfigUrl(),
+    skills: state.config.skills?.length ?? 0,
+    tools: state.config.tools?.length ?? 0,
+  };
 }
 
 export function getRemoteConfigRevision() {
@@ -190,16 +270,17 @@ export function remoteConfigPromptBlock() {
   const cfg = getRemoteConfig();
   const parts: string[] = [];
   if (cfg.deviceLabel) parts.push(`Device label: ${cfg.deviceLabel}.`);
-  if (cfg.realtime?.instructions) parts.push(`Server instructions: ${cfg.realtime.instructions}`);
-  if (cfg.labels && Object.keys(cfg.labels).length) parts.push(`Server labels: ${Object.entries(cfg.labels).slice(0, 12).map(([k, v]) => `${k}=${v}`).join(', ')}.`);
-  if (cfg.skills?.length) parts.push(`Server skills available: ${cfg.skills.map((skill) => skill.label).join(', ')}.`);
+  if (cfg.realtime?.instructions) parts.push(`Configuration instructions: ${cfg.realtime.instructions}`);
+  if (cfg.labels && Object.keys(cfg.labels).length) parts.push(`Labels: ${Object.entries(cfg.labels).slice(0, 12).map(([k, v]) => `${k}=${v}`).join(', ')}.`);
+  if (cfg.skills?.length) parts.push(`Config skills available: ${cfg.skills.map((skill) => skill.label).join(', ')}.`);
+  if (state.lastError) parts.push(`Remote server unavailable; using local/last-good config. Last error: ${state.lastError.slice(0, 120)}.`);
   return parts.join('\n');
 }
 
-function remotePrefsPatch(config: RemoteConfig, current: Preferences): Partial<Preferences> {
+function remotePrefsPatch(config: RemoteConfig, _current: Preferences): Partial<Preferences> {
   const patch: Partial<Preferences> = {};
   const settings = config.settings ?? {};
-  for (const key of ['wakePhrase', 'persona', 'voiceLocale', 'translateTarget', 'showDiagnostics', 'proactiveReminders', 'realtimeVoice', 'personalityPrompt', 'realtimeListenMode', 'allowBargeIn', 'mediaDuckingEnabled'] as const) {
+  for (const key of ['wakePhrase', 'persona', 'voiceLocale', 'translateTarget', 'showDiagnostics', 'proactiveReminders', 'realtimeVoice', 'personalityPrompt', 'realtimeListenMode', 'allowBargeIn', 'mediaDuckingEnabled', 'remoteConfigUrl', 'homeLatitude', 'homeLongitude', 'homeLabel', 'temperatureUnit'] as const) {
     if ((settings as any)[key] !== undefined) (patch as any)[key] = (settings as any)[key];
   }
   if (config.realtime?.voice) patch.realtimeVoice = config.realtime.voice;
@@ -213,22 +294,28 @@ function remotePrefsPatch(config: RemoteConfig, current: Preferences): Partial<P
   return patch;
 }
 
-export async function applyRemoteConfig(config: RemoteConfig, reason = 'manual') {
-  const sanitized = sanitizeConfig(config);
+export async function applyRemoteConfig(config: RemoteConfig, reason = 'manual', mergeWithBundled = true) {
+  const sanitized = sanitizeConfig(config, reason === 'local' ? 'local' : 'server');
+  const next = mergeWithBundled ? mergeConfig(state.localConfig, sanitized) : sanitized;
   const previousRevision = state.config.revision;
-  state.config = sanitized;
-  state.lastFetchedAt = new Date().toISOString();
+  state.config = next;
+  state.lastFetchedAt = reason.includes('remote') || reason === 'poll' || reason === 'start' ? new Date().toISOString() : state.lastFetchedAt;
   state.lastError = null;
   const prefs = await loadPreferences();
-  const patch = remotePrefsPatch(sanitized, prefs);
+  const patch = remotePrefsPatch(next, prefs);
   if (Object.keys(patch).length) await savePreferences(patch);
-  await logEvent('remote.config.apply', `${reason}: ${sanitized.revision ?? 'unknown'}`);
-  emitObservation('remote_config', 'apply', { reason, revision: sanitized.revision, previousRevision, skills: sanitized.skills?.length ?? 0, tools: sanitized.tools?.length ?? 0 });
-  return sanitized;
+  await logEvent('remote.config.apply', `${reason}: ${next.revision ?? 'unknown'}`);
+  emitObservation('remote_config', 'apply', { reason, revision: next.revision, previousRevision, skills: next.skills?.length ?? 0, tools: next.tools?.length ?? 0, fallback: next.revision === state.localConfig.revision });
+  return next;
+}
+
+export async function applyLocalConfig(reason = 'local') {
+  state.localApplied = true;
+  return applyRemoteConfig(state.localConfig, reason, false);
 }
 
 export async function fetchRemoteConfig(reason = 'poll') {
-  const url = getRemoteConfigUrl();
+  const url = await resolveRemoteConfigUrl();
   if (!url) return null;
   const prefs = await loadPreferences().catch(() => null);
   const root: any = globalThis as any;
@@ -240,21 +327,29 @@ export async function fetchRemoteConfig(reason = 'poll') {
   const response = await fetch(absolute.toString(), { headers: { Accept: 'application/json' } });
   const data = await response.json().catch(() => null);
   if (!response.ok) throw new Error(`Remote config ${response.status}: ${JSON.stringify(data).slice(0, 180)}`);
-  return sanitizeConfig(data);
+  return sanitizeConfig(data, 'server');
 }
 
 export async function fetchAndApplyRemoteConfig(reason = 'poll') {
+  if (!state.localApplied) await applyLocalConfig('local_boot');
+  const url = await resolveRemoteConfigUrl();
+  if (!url) return state.config;
   try {
     const cfg = await fetchRemoteConfig(reason);
-    if (!cfg) return null;
-    return await applyRemoteConfig(cfg, reason);
+    if (!cfg) return state.config;
+    return await applyRemoteConfig(cfg, reason, true);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error || 'remote config failed');
     state.lastError = message;
-    await logEvent('remote.config.error', message);
-    emitObservation('remote_config', 'error', { reason, message });
-    return null;
+    await logEvent('remote.config.unavailable', `${reason}: ${message}`);
+    emitObservation('remote_config', 'unavailable', { reason, message, fallbackRevision: state.config.revision ?? state.localConfig.revision });
+    return state.config;
   }
+}
+
+export async function initializeRemoteConfig(reason = 'start') {
+  await applyLocalConfig('local_boot');
+  return fetchAndApplyRemoteConfig(reason);
 }
 
 export function startRemoteConfigPoller(onConfig?: (config: RemoteConfig) => void | Promise<void>) {
@@ -269,7 +364,7 @@ export function startRemoteConfigPoller(onConfig?: (config: RemoteConfig) => voi
       timer = setTimeout(() => void tick('poll'), Math.max(15_000, interval));
     }
   };
-  void tick('start');
+  void tick('poller_start');
   state.stopPoller = () => {
     stopped = true;
     if (timer) clearTimeout(timer);
@@ -281,8 +376,8 @@ export function startRemoteConfigPoller(onConfig?: (config: RemoteConfig) => voi
 export async function executeRemoteTool(name: string, args: Record<string, unknown>, context: Record<string, unknown> = {}) {
   const tool = getRemoteTools().find((item) => item.name === name);
   if (!tool) return `Unknown remote tool: ${name}`;
-  const endpoint = tool.endpoint || getRemoteConfig().observability?.endpoint || env('EXPO_PUBLIC_AGA_TOOL_PROXY_URL');
-  if (!endpoint) return `Remote tool ${name} has no endpoint configured.`;
+  const endpoint = tool.endpoint || env('EXPO_PUBLIC_AGA_TOOL_PROXY_URL');
+  if (!endpoint) return `Remote tool ${name} is configured, but no server/tool endpoint is currently reachable. I can keep using local skills.`;
   const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
   const timeout = setTimeout(() => controller?.abort(), Math.max(1_000, tool.timeoutMs ?? 12_000));
   try {
@@ -300,7 +395,7 @@ export async function executeRemoteTool(name: string, args: Record<string, unkno
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error || 'remote tool failed');
     emitObservation('remote_tool', name, { ok: false, message });
-    return `Remote tool ${name} failed: ${message}`;
+    return `Remote tool ${name} is unavailable right now. ${message}`;
   } finally {
     clearTimeout(timeout);
   }

@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "revision": "local-default-v1",
+  "deviceLabel": "AGA local runtime",
+  "pollMs": 60000,
+  "labels": {
+    "brand": "AGA",
+    "wakeHint": "Say AGA",
+    "serverOffline": "Local config active"
+  },
+  "images": {
+    "guardianAura": "local://guardian-aura",
+    "skillLanguage": "local://skill-language",
+    "skillImagination": "local://skill-imagination"
+  },
+  "settings": {
+    "realtimeVoice": "marin",
+    "realtimeListenMode": "strict",
+    "allowBargeIn": false,
+    "mediaDuckingEnabled": true,
+    "temperatureUnit": "celsius"
+  },
+  "realtime": {
+    "model": "gpt-realtime-2",
+    "voice": "marin",
+    "listenMode": "strict",
+    "allowBargeIn": false,
+    "instructions": "You are AGA running from the bundled local configuration. Work fully even when the server is offline. Prefer local skills and local tools unless a server tool is available."
+  },
+  "skills": [
+    {
+      "id": "local_language_learning",
+      "label": "Language learning",
+      "description": "Gentle speaking practice with corrections and choices.",
+      "aliases": ["language", "learn", "practice English", "practice bahasa", "practice Russian"],
+      "kind": "language",
+      "targetLanguage": "English",
+      "theme": "conversation practice",
+      "priority": 10,
+      "instructions": "Run a voice-only language learning session. Ask what language the user wants if unknown. Use short turns, one correction at a time, and offer numbered choices when helpful."
+    },
+    {
+      "id": "local_imagination_game",
+      "label": "Imagination game",
+      "description": "A cozy interactive story with spoken choices.",
+      "aliases": ["imagination", "game", "story", "adventure"],
+      "kind": "imagination",
+      "theme": "crystal forest",
+      "priority": 20,
+      "instructions": "Run a gentle imagination game. Narrate one vivid scene, then offer exactly three numbered spoken choices. Wait for the user to choose by number, letter, or phrase."
+    },
+    {
+      "id": "local_breathing_guide",
+      "label": "Breathing guide",
+      "description": "Slow calming breath pacing.",
+      "aliases": ["breathing", "breathe", "calm down", "meditation"],
+      "kind": "breathing",
+      "theme": "nervous system reset",
+      "priority": 30,
+      "instructions": "Guide a short calming breathing session. Speak very slowly. Use brief inhale, hold, exhale cues. Ask before continuing past two cycles."
+    },
+    {
+      "id": "local_music_companion",
+      "label": "Music companion",
+      "description": "Quiet conversation over background music.",
+      "aliases": ["music companion", "music", "ambient", "lofi"],
+      "kind": "music",
+      "theme": "ambient music",
+      "priority": 40,
+      "instructions": "Be a quiet companion while music plays. Do not stop music unless asked. Keep replies short and let the background music carry the mood."
+    }
+  ],
+  "tools": [],
+  "observability": {
+    "sampleRate": 0.25
+  },
+  "updates": {
+    "ota": "off",
+    "message": "Bundled local configuration is active. Server configuration will overlay this when reachable."
+  }
+}
