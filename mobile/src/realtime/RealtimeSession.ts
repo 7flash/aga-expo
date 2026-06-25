@@ -53,6 +53,7 @@ export type RealtimeSnapshot = {
   voiceCapability?: unknown;
   activeChoiceMenu?: ChoiceMenu | null;
   sessionLabel?: string | null;
+  listeningMode?: string | null;
 };
 
 type Listener = (snapshot: RealtimeSnapshot) => void;
@@ -85,6 +86,26 @@ function realtimeVoice(prefs: Preferences | null) {
   return prefs?.realtimeVoice || DEFAULT_REALTIME_VOICE;
 }
 
+type RealtimeListenMode = 'strict' | 'answer_window' | 'handsfree';
+
+function realtimeListenMode(prefs: Preferences | null): RealtimeListenMode {
+  const raw = String((prefs as any)?.realtimeListenMode || process.env.EXPO_PUBLIC_AGA_REALTIME_LISTEN_MODE || 'strict').toLowerCase();
+  if (raw === 'handsfree' || raw === 'hands-free' || raw === 'conversation') return 'handsfree';
+  if (raw === 'answer_window' || raw === 'answer-window' || raw === 'question' || raw === 'question_window') return 'answer_window';
+  return 'strict';
+}
+
+function allowBargeIn(prefs: Preferences | null) {
+  const stored = (prefs as any)?.allowBargeIn;
+  if (typeof stored === 'boolean') return stored;
+  return process.env.EXPO_PUBLIC_AGA_ALLOW_BARGE_IN === '1';
+}
+
+function listeningModeLabel(mode: RealtimeListenMode, bargeIn: boolean) {
+  const label = mode === 'handsfree' ? 'hands-free' : mode === 'answer_window' ? 'question-window' : 'wake-word';
+  return `${label}${bargeIn ? ' + interruption' : ''}`;
+}
+
 const STRICT_WAKE_RE = /^\s*(?:hey\s+)?(?:aga|a\s*g\s*a|okay\s+aga|ok\s+aga|angel)\b[,:\s-]*/i;
 const ACTIVE_ANSWER_WINDOW_MS = Number(process.env.EXPO_PUBLIC_AGA_ANSWER_WINDOW_MS || 45_000);
 
@@ -108,7 +129,7 @@ function looksLikeUserPrompt(text: string) {
   return /[?？]\s*$/.test(clean) || /\b(which|what|where|when|who|how|choose|pick|say|tell me|which path|which option)\b/i.test(clean);
 }
 
-function realtimeTurnDetectionForUpdate() {
+function realtimeTurnDetectionForUpdate(prefs: Preferences | null) {
   const disabled = process.env.EXPO_PUBLIC_AGA_REALTIME_VAD === 'off';
   if (disabled) return null;
   const mode = process.env.EXPO_PUBLIC_AGA_REALTIME_VAD || 'semantic_vad';
@@ -119,14 +140,14 @@ function realtimeTurnDetectionForUpdate() {
       prefix_padding_ms: Number(process.env.EXPO_PUBLIC_AGA_VAD_PREFIX_MS || 250),
       silence_duration_ms: Number(process.env.EXPO_PUBLIC_AGA_VAD_SILENCE_MS || 650),
       create_response: true,
-      interrupt_response: process.env.EXPO_PUBLIC_AGA_ALLOW_BARGE_IN === '1',
+      interrupt_response: allowBargeIn(prefs),
     };
   }
   return {
     type: 'semantic_vad',
     eagerness: process.env.EXPO_PUBLIC_AGA_SEMANTIC_VAD_EAGERNESS || 'low',
     create_response: true,
-    interrupt_response: process.env.EXPO_PUBLIC_AGA_ALLOW_BARGE_IN === '1',
+    interrupt_response: allowBargeIn(prefs),
   };
 }
 
@@ -171,8 +192,10 @@ function realtimeSessionConfig(prefs: Preferences | null, forUpdate = false) {
     sessionInstructions(prefs),
     'When the user asks for settings, a different voice, a new personality, skills, language learning, an imagination game, or a new session, call show_settings_menu with the best category.',
     'When choices are visible and the user answers with a number or letter, call choose_option with that spoken choice. Never ask the user to tap or click.',
-    'Hot-mic policy: unless AGA has just asked a question or a choice menu is visible, only respond to user speech that begins with “AGA”, “Hey AGA”, “OK AGA”, or “Angel”. Ignore background laughter, side conversations, music lyrics, and room noise silently.',
+    `Current listening mode: ${listeningModeLabel(realtimeListenMode(prefs), allowBargeIn(prefs))}.`,
+    'Hot-mic policy: in wake-word mode, unless AGA has just asked a question or a choice menu is visible, only respond to user speech that begins with “AGA”, “Hey AGA”, “OK AGA”, or “Angel”. Ignore background laughter, side conversations, music lyrics, and room noise silently.',
     'If background music is playing, keep listening with echo cancellation and speak over it briefly. Do not stop music unless the user explicitly asks.',
+    'If the user says be less sensitive, change listening sensitivity, stop interrupting, or listen hands-free, call show_settings_menu with category listening.',
   ].filter(Boolean).join('\n');
 
   const audio: Record<string, unknown> = {
@@ -183,7 +206,7 @@ function realtimeSessionConfig(prefs: Preferences | null, forUpdate = false) {
   // apply the stricter hot-mic/VAD policy through session.update. The GA field
   // for VAD is session.audio.input.turn_detection, not session.turn_detection.
   if (forUpdate) {
-    audio.input = { turn_detection: realtimeTurnDetectionForUpdate() };
+    audio.input = { turn_detection: realtimeTurnDetectionForUpdate(prefs) };
   }
 
   const config: Record<string, unknown> = {
@@ -254,6 +277,19 @@ const TOOLS = [
   },
   {
     type: 'function',
+    name: 'set_listening_mode',
+    description: 'Change hot-mic sensitivity: strict wake-word mode, question-window mode, hands-free mode, and whether interruption is allowed.',
+    parameters: {
+      type: 'object',
+      properties: {
+        mode: { type: 'string', enum: ['strict', 'answer_window', 'handsfree'] },
+        allow_barge_in: { type: 'boolean' },
+      },
+      required: ['mode'],
+    },
+  },
+  {
+    type: 'function',
     name: 'set_persona',
     description: 'Switch voice persona: warm, calm, bright, coach, whisper.',
     parameters: { type: 'object', properties: { persona: { type: 'string' } }, required: ['persona'] },
@@ -267,10 +303,10 @@ const TOOLS = [
   {
     type: 'function',
     name: 'show_settings_menu',
-    description: 'Show a spoken-choice settings/session menu. Use this for changing voice, personality, language learning, imagination games, or session modes.',
+    description: 'Show a spoken-choice settings/session menu. Use this for changing voice, personality, listening sensitivity, language learning, imagination games, or session modes.',
     parameters: {
       type: 'object',
-      properties: { category: { type: 'string', enum: ['main', 'voice', 'personality', 'session', 'language', 'imagination', 'skills'] } },
+      properties: { category: { type: 'string', enum: ['main', 'voice', 'personality', 'session', 'language', 'imagination', 'skills', 'listening', 'sensitivity'] } },
     },
   },
   {
@@ -335,6 +371,7 @@ export class RealtimeSession {
   private connected = false;
   private waitingForResponseUntil = 0;
   private pendingReconnectReason: string | null = null;
+  private lastGoodVoice = DEFAULT_REALTIME_VOICE;
 
   private snapshot: RealtimeSnapshot = {
     ready: false,
@@ -349,6 +386,7 @@ export class RealtimeSession {
     error: null,
     activeChoiceMenu: null,
     sessionLabel: null,
+    listeningMode: null,
   };
 
   subscribe(listener: Listener) {
@@ -371,7 +409,10 @@ export class RealtimeSession {
       configureNotificationHandler();
       await initializeLocalStore();
       this.prefs = await loadPreferences();
-      this.publish({ sessionLabel: this.prefs.activeSession?.label ?? null });
+      this.publish({
+        sessionLabel: this.prefs.activeSession?.label ?? null,
+        listeningMode: listeningModeLabel(realtimeListenMode(this.prefs), allowBargeIn(this.prefs)),
+      });
       await this.refresh();
       if (!isWebRtcAvailable()) {
         this.publish({ ready: true, mode: 'offline', speechStatus: 'realtime requires WebRTC runtime', error: null });
@@ -474,7 +515,8 @@ export class RealtimeSession {
         this.flushPendingSends();
         this.publish({ ready: true, speechStatus: `realtime:${REALTIME_MODEL}`, error: null });
         this.setMode('listening');
-        measureMark('realtime.datachannel.open', { model: REALTIME_MODEL, voice: realtimeVoice(this.prefs) });
+        this.lastGoodVoice = realtimeVoice(this.prefs);
+        measureMark('realtime.datachannel.open', { model: REALTIME_MODEL, voice: realtimeVoice(this.prefs), listeningMode: listeningModeLabel(realtimeListenMode(this.prefs), allowBargeIn(this.prefs)) });
       };
       dc.onmessage = (event: any) => void this.onServerEvent(event?.data);
       dc.onerror = () => this.publish({ error: 'Realtime data channel error.' });
@@ -512,7 +554,14 @@ export class RealtimeSession {
     if (!clean) return false;
     if (hasWakePrefix(clean)) return true;
     if (this.snapshot.activeChoiceMenu && findChoice(this.snapshot.activeChoiceMenu, clean)) return true;
-    if (Date.now() < this.waitingForResponseUntil && looksLikeShortAnswer(clean)) return true;
+
+    const listenMode = realtimeListenMode(this.prefs);
+    const waiting = Date.now() < this.waitingForResponseUntil;
+    if (waiting && looksLikeShortAnswer(clean)) return true;
+    if (listenMode === 'answer_window' && waiting) return true;
+    if (listenMode === 'handsfree') return true;
+
+    // Legacy override for testing only.
     return process.env.EXPO_PUBLIC_AGA_STRICT_WAKE_IN_REALTIME === '0';
   }
 
@@ -669,6 +718,16 @@ export class RealtimeSession {
         });
         return cmd === 'pause' ? 'Paused.' : 'Resuming.';
       },
+      set_listening_mode: async ({ mode, allow_barge_in }) => {
+        const raw = String(mode ?? 'strict').toLowerCase();
+        const nextMode: RealtimeListenMode = raw === 'handsfree' ? 'handsfree' : raw === 'answer_window' ? 'answer_window' : 'strict';
+        const nextBargeIn = typeof allow_barge_in === 'boolean' ? allow_barge_in : allowBargeIn(this.prefs);
+        this.prefs = await savePreferences({ realtimeListenMode: nextMode, allowBargeIn: nextBargeIn } as Partial<Preferences>);
+        this.publish({ listeningMode: listeningModeLabel(nextMode, nextBargeIn) });
+        this.send({ type: 'session.update', session: realtimeSessionConfig(this.prefs, true) });
+        await logEvent('settings.listening', listeningModeLabel(nextMode, nextBargeIn));
+        return `Listening mode set to ${listeningModeLabel(nextMode, nextBargeIn)}.`;
+      },
       set_persona: async ({ persona }) => {
         this.prefs = await savePreferences({ persona: String(persona ?? 'warm') });
         this.send({ type: 'session.update', session: realtimeSessionConfig(this.prefs, true) });
@@ -808,6 +867,14 @@ export class RealtimeSession {
       return 'Session ended. Back to normal guardian mode.';
     }
 
+    if (action.type === 'set_listening_mode') {
+      this.prefs = await savePreferences({ realtimeListenMode: action.mode, allowBargeIn: !!action.allowBargeIn } as Partial<Preferences>);
+      this.publish({ listeningMode: listeningModeLabel(action.mode, !!action.allowBargeIn) });
+      this.send({ type: 'session.update', session: realtimeSessionConfig(this.prefs, true) });
+      await logEvent('settings.listening', listeningModeLabel(action.mode, !!action.allowBargeIn));
+      return `Listening mode set to ${listeningModeLabel(action.mode, !!action.allowBargeIn)}.`;
+    }
+
     return 'Done.';
   }
 
@@ -937,7 +1004,22 @@ export class RealtimeSession {
     return measureAsync('realtime.reconnect', async () => {
       this.publish({ speechStatus: `restarting realtime: ${reason}`, mode: 'recovering' });
       await this.teardownPeer(false);
-      await this.connect();
+      try {
+        await this.connect();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Reconnect failed.';
+        await logEvent('realtime.reconnect.error', `${reason}: ${message}`);
+        if (reason.startsWith('voice:')) {
+          this.prefs = await savePreferences({ realtimeVoice: this.lastGoodVoice } as Partial<Preferences>);
+          this.publish({ speechStatus: `voice reverted: ${this.lastGoodVoice}`, error: message });
+          await this.connect().catch((secondError) => {
+            const fallbackMessage = secondError instanceof Error ? secondError.message : 'Fallback reconnect failed.';
+            this.publish({ mode: 'recovering', speechStatus: 'realtime reconnect failed', error: fallbackMessage });
+          });
+          return;
+        }
+        this.publish({ mode: 'recovering', speechStatus: 'realtime reconnect failed', error: message });
+      }
     }, { reason });
   }
 

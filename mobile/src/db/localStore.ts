@@ -21,12 +21,22 @@ export type Preferences = {
   realtimeVoice?: string | null;
   personalityPrompt?: string | null;
   activeSession?: {
-    kind: 'language' | 'imagination' | 'advice' | 'general';
+    kind: 'language' | 'imagination' | 'advice' | 'focus' | 'bedtime' | 'breathing' | 'music' | 'general';
     label: string;
     targetLanguage?: string | null;
     theme?: string | null;
     startedAt: string;
   } | null;
+  /**
+   * strict: require AGA/Angel wake unless AGA is waiting for a short answer.
+   * answer_window: same as strict, with a longer answer window after direct questions.
+   * handsfree: process natural speech during the active realtime session.
+   */
+  realtimeListenMode?: 'strict' | 'answer_window' | 'handsfree';
+  /** Whether speech detected while AGA is speaking can interrupt her response. */
+  allowBargeIn?: boolean;
+  /** Whether background media ducks while AGA speaks. */
+  mediaDuckingEnabled?: boolean;
 };
 
 export type Reminder = {
@@ -59,10 +69,13 @@ const DEFAULT_PREFS: Preferences = {
   realtimeVoice: process.env.EXPO_PUBLIC_AGA_REALTIME_VOICE || process.env.EXPO_PUBLIC_OPENAI_REALTIME_VOICE || 'marin',
   personalityPrompt: null,
   activeSession: null,
+  realtimeListenMode: 'strict',
+  allowBargeIn: false,
+  mediaDuckingEnabled: true,
 };
 
-const STORAGE_KEY = 'aga.mobile.localStore.v18';
-const LEGACY_KEYS = ['aga.mobile.localStore.v11'];
+const STORAGE_KEY = 'aga.mobile.localStore.v20';
+const LEGACY_KEYS = ['aga.mobile.localStore.v18', 'aga.mobile.localStore.v11'];
 const SQLITE_DB = 'aga-local-kv.db';
 
 let store: StoreShape = {
