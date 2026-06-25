@@ -3,6 +3,7 @@ import { loadPreferences, initializeLocalStore, listMessages, listPendingReminde
 import { detectWake, removeWakePhrase, normalizeSpeech } from './text';
 import { measureAsync, measureMark } from '../observability/measure';
 import { RealtimeSession, type RealtimeSnapshot } from '../realtime/RealtimeSession';
+import { GeminiLiveSession } from '../gemini/GeminiLiveSession';
 
 const DEFAULT_WAKE_IDLE_MS = 45_000;
 const DEFAULT_MEDIA_IDLE_MS = 5 * 60_000;
@@ -22,6 +23,25 @@ function envFlag(name: string, fallback: boolean) {
   return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
 }
 
+function selectedVoiceEngine() {
+  const raw = (
+    env('EXPO_PUBLIC_AGA_VOICE_ENGINE') ||
+    env('EXPO_PUBLIC_AGA_BRAIN_PROVIDER') ||
+    env('EXPO_PUBLIC_AGA_PROVIDER') ||
+    env('EXPO_PUBLIC_AGA_ENGINE') ||
+    ''
+  ).trim().toLowerCase();
+  if (raw.includes('gemini')) return 'gemini';
+  if (raw.includes('openai') || raw.includes('realtime')) return 'openai';
+  // Cost-safe default: if Gemini is configured and OpenAI is not, use Gemini.
+  if ((env('EXPO_PUBLIC_GEMINI_API_KEY') || env('EXPO_PUBLIC_GOOGLE_API_KEY')) && !env('EXPO_PUBLIC_OPENAI_API_KEY')) return 'gemini';
+  return 'openai';
+}
+
+function isGeminiEngine() {
+  return selectedVoiceEngine() === 'gemini';
+}
+
 type Listener = (snapshot: RealtimeSnapshot) => void;
 
 /**
@@ -36,7 +56,7 @@ type Listener = (snapshot: RealtimeSnapshot) => void;
 export class WakeRealtimeController {
   private listeners = new Set<Listener>();
   private wakeLoop: NativeSpeechLoop | null = null;
-  private realtime: RealtimeSession | null = null;
+  private realtime: RealtimeSession | GeminiLiveSession | null = null;
   private realtimeUnsubscribe: (() => void) | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private prefs: Preferences | null = null;
@@ -292,9 +312,11 @@ export class WakeRealtimeController {
       }
 
       await this.stopWakeScout('wake_accepted');
-      this.publish({ mode: 'awake', interim: '', speechStatus: 'connecting realtime', error: null });
+      this.publish({ mode: 'awake', interim: '', speechStatus: isGeminiEngine() ? 'connecting gemini live' : 'connecting realtime', error: null });
 
-      const session = new RealtimeSession();
+      const session = isGeminiEngine()
+        ? new GeminiLiveSession({ onTurnDone: () => { void this.sleepRealtime('gemini_turn_done'); } })
+        : new RealtimeSession();
       this.realtime = session;
       this.realtimeUnsubscribe = session.subscribe((next) => {
         this.publish({ ...next, speechStatus: next.speechStatus || 'realtime active' });
@@ -311,7 +333,7 @@ export class WakeRealtimeController {
         this.realtimeUnsubscribe?.();
         this.realtimeUnsubscribe = null;
         await session.stop().catch(() => undefined);
-        this.publish({ mode: 'recovering', speechStatus: 'realtime start failed; returning to wake scout', error: message });
+        this.publish({ mode: 'recovering', speechStatus: `${selectedVoiceEngine()} start failed; returning to wake scout`, error: message });
         await logEvent('realtime.start.error', message).catch(() => undefined);
         if (this.started) await this.startWakeScout('realtime_start_failed');
       }

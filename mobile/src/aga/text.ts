@@ -46,20 +46,26 @@ function levenshteinDistance(a: string, b: string) {
   return dp[cols - 1] ?? 99;
 }
 
+function envFlag(name: string, fallback: boolean) {
+  const raw = (process.env?.[name] ?? '').trim().toLowerCase();
+  if (!raw) return fallback;
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+}
+
 function fuzzyWakeFromShortUtterance(text: string): { woke: boolean; match: string; index: number } {
   const normalized = normalizeSpeech(text).toLowerCase();
   if (!normalized) return { woke: false, match: '', index: -1 };
   const compact = compactSpeech(normalized);
 
   // Web/Android STT often turns “hey AGA” into things like “hey agar”,
-  // “hey a guy”, “hey egg a”, “hey ay gee ay”, or just “hey ag…”.
-  // This fallback only applies to short wake-sized utterances so normal room
-  // speech does not randomly summon the assistant.
+  // “hey a guy”, “hey egg a”, “hey ay gee ay”, “hey Google”, or just
+  // “hey ag…”. This fallback only applies to short wake-sized utterances so
+  // normal room speech does not randomly summon the assistant.
   const words = normalized.split(/\s+/).filter(Boolean);
   const shortWakeSized = words.length <= 5 && normalized.length <= 42;
   if (!shortWakeSized) return { woke: false, match: '', index: -1 };
 
-  if (/^(?:hey|hi|ok|okay|yo)?(?:aga|agga|agha|aiga|ayga|agar|agaur|egga|eggah|aguy|agay|aijay)$/i.test(compact)) {
+  if (/^(?:hey|hi|ok|okay|yo)?(?:aga|agga|agha|aiga|ayga|agar|agaur|egga|eggah|aguy|agay|aijay|aegis|aggy|aggie|aria|aya|eva|ava|google|gugel|gemini)$/i.test(compact)) {
     return { woke: true, match: normalized, index: 0 };
   }
   if (/^(?:hey|hi|ok|okay|yo)?a(?:g|gee|ji|je|jay)a$/i.test(compact)) {
@@ -72,8 +78,19 @@ function fuzzyWakeFromShortUtterance(text: string): { woke: boolean; match: stri
   const startIndex = /^(hey|hi|ok|okay|yo)$/i.test(words[0] || '') ? 1 : 0;
   const candidate = words.slice(startIndex, startIndex + 3).join('');
   const cleanedCandidate = candidate.replace(/[^a-z0-9]+/gi, '');
-  if (cleanedCandidate && (levenshteinDistance(cleanedCandidate, 'aga') <= 1 || /^(a?g+a?|a+g+a+|e+g+a+|a+guy)$/i.test(cleanedCandidate))) {
+  if (cleanedCandidate && (
+    levenshteinDistance(cleanedCandidate, 'aga') <= 2 ||
+    /^(a?g+a?|a+g+a+|e+g+a+|a+guy|a+gay|google|gugel|gemini|angel|anger|aggie|aggy|aria|eva|ava)$/i.test(cleanedCandidate)
+  )) {
     return { woke: true, match: words.slice(0, startIndex + 3).join(' '), index: 0 };
+  }
+
+  // Developer/web recovery: many browser STT engines aggressively autocorrect
+  // “hey AGA” to an unrelated assistant name. In web harness/dev this makes the
+  // app feel deaf. Accept any very short “hey/hi/ok …” wake-sized phrase unless
+  // explicitly disabled. APK production can set EXPO_PUBLIC_AGA_WAKE_ACCEPT_SHORT_HEY=0.
+  if (envFlag('EXPO_PUBLIC_AGA_WAKE_ACCEPT_SHORT_HEY', true) && startIndex === 1 && words.length <= 3) {
+    return { woke: true, match: words.join(' '), index: 0 };
   }
 
   return { woke: false, match: '', index: -1 };
