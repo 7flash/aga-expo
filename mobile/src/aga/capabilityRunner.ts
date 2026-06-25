@@ -12,11 +12,17 @@ import {
   addMemory,
   addReminder,
   clearReminders,
+  getForgetConfirmation,
   listPendingReminders,
+  loadPreferences,
   logEvent,
+  requestForgetConfirmation,
+  resetAgaData,
   savePreferences,
   searchMemories,
+  startNewConversationSession,
   type Preferences,
+  type ResetScope,
 } from '../db/localStore';
 import {
   cancelAllNotifications,
@@ -68,6 +74,24 @@ function normalizeListenMode(value: unknown): 'strict' | 'answer_window' | 'hand
   if (raw === 'handsfree' || raw === 'hands-free' || raw === 'conversation') return 'handsfree';
   if (raw === 'answer_window' || raw === 'answer-window' || raw === 'question' || raw === 'question_window') return 'answer_window';
   return 'strict';
+}
+
+function normalizeResetScope(value: unknown): ResetScope {
+  const raw = String(value ?? 'everything').toLowerCase();
+  if (raw === 'session' || raw === 'context' || raw === 'conversation') return 'session';
+  if (raw === 'personalization' || raw === 'memory' || raw === 'memories' || raw === 'profile') return 'personalization';
+  return 'everything';
+}
+
+function confirmedForget(value: unknown) {
+  const clean = String(value ?? '').toLowerCase();
+  return /\byes\b/.test(clean) && /\bforget\b/.test(clean);
+}
+
+function resetWarning(scope: ResetScope) {
+  if (scope === 'session') return 'I can start a fresh session now. Permanent memories, reminders, voice, personality, and server settings will stay.';
+  if (scope === 'personalization') return 'This will forget your saved memories, evolving profile, custom personality, and current skill, but keep reminders and technical settings.';
+  return 'This will forget personal memories, profile, custom personality, reminders, event logs, and the current transcript. API keys, server config, wake phrase, and device settings will stay.';
 }
 
 export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
@@ -180,6 +204,65 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
     recall: async ({ query }) => {
       const found = await searchMemories(query ? String(query) : undefined, 6);
       return found.length ? found.map((memory) => memory.text).join('; ') : 'No memories yet.';
+    },
+    start_new_conversation_session: async ({ reason, endActiveSkill }) => {
+      const shouldEndSkill = endActiveSkill !== false;
+      const conversation = await startNewConversationSession(String(reason || 'user_requested'), {
+        clearTranscript: true,
+        endActiveSession: shouldEndSkill,
+      });
+      const prefs = await loadPreferences();
+      ctx.setPrefs(prefs);
+      ctx.publish({ messages: [], activeChoiceMenu: null, sessionLabel: prefs.activeSession?.label ?? null, speechStatus: 'fresh session started' });
+      ctx.updateRealtimeSession();
+      ctx.requestReconnect(`new_session:${conversation.id}`);
+      await logEvent('conversation.new_session', `${conversation.id} reason=${reason || 'user_requested'}`);
+      return shouldEndSkill
+        ? 'Fresh session started. I kept permanent memories, reminders, voice, personality, and server settings.'
+        : 'Fresh conversation context started. I kept the active skill and all permanent settings.';
+    },
+    forget_user_data: async ({ scope, confirmation }) => {
+      const cleanScope = normalizeResetScope(scope);
+      if (cleanScope === 'session') {
+        const conversation = await startNewConversationSession('forget_session_tool', { clearTranscript: true, endActiveSession: true });
+        const prefs = await loadPreferences();
+        ctx.setPrefs(prefs);
+        ctx.publish({ messages: [], activeChoiceMenu: null, sessionLabel: null, speechStatus: 'fresh session started' });
+        ctx.updateRealtimeSession();
+        ctx.requestReconnect(`forget_session:${conversation.id}`);
+        await logEvent('conversation.forget_session', conversation.id);
+        return 'Done. I cleared only this conversation session. Permanent memories and settings remain.';
+      }
+
+      const pending = await getForgetConfirmation(cleanScope);
+      const ok = !!pending && confirmedForget(confirmation);
+      if (!ok) {
+        await requestForgetConfirmation(cleanScope);
+        return `${resetWarning(cleanScope)} To confirm, say: AGA yes forget everything.`;
+      }
+
+      if (cleanScope === 'everything') {
+        await cancelAllNotifications().catch(() => undefined);
+      }
+      const result = await resetAgaData(cleanScope);
+      const prefs = await loadPreferences();
+      ctx.setPrefs(prefs);
+      const patch: CapabilityPatch = {
+        messages: [],
+        activeChoiceMenu: null,
+        sessionLabel: null,
+        activeMedia: null,
+        mediaCommand: 'stop',
+        speechStatus: cleanScope === 'everything' ? 'everything forgotten' : 'personalization reset',
+      };
+      if (cleanScope === 'everything') patch.reminders = [];
+      ctx.publish(patch);
+      ctx.updateRealtimeSession();
+      ctx.requestReconnect(`forget:${cleanScope}`);
+      await logEvent('conversation.forget_confirmed', `${cleanScope} ${(result as any).conversation?.id ?? ''}`);
+      return cleanScope === 'everything'
+        ? 'I forgot everything personal and started clean. Technical device settings stayed.'
+        : 'I forgot saved personalization and started clean. Reminders and technical device settings stayed.';
     },
     set_reminder: async ({ text, when_iso }) => {
       const dueAt = String(when_iso ?? new Date(Date.now() + 60_000).toISOString());

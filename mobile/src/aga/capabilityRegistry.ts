@@ -56,6 +56,24 @@ export const BUILTIN_CAPABILITY_TOOLS: readonly RealtimeToolDefinition[] = [
   },
   {
     type: 'function',
+    name: 'start_new_conversation_session',
+    description: 'Start a fresh ephemeral conversation session. This clears only the current transcript/session context; durable memories, reminders, voice, server config, and personality settings stay.',
+    parameters: schema({
+      reason: { type: 'string', description: 'Short reason, for example user_requested, wake_reactivation, or reset_context.' },
+      endActiveSkill: { type: 'boolean', description: 'Whether to end any active guided skill overlay. Default true for a truly fresh session.' },
+    }),
+  },
+  {
+    type: 'function',
+    name: 'forget_user_data',
+    description: 'Reset AGA data. Use scope=session for fresh context only. Use scope=personalization to forget memories/profile/personality. Use scope=everything only after the user confirms by saying yes forget everything.',
+    parameters: schema({
+      scope: { type: 'string', enum: ['session', 'personalization', 'everything'] },
+      confirmation: { type: 'string', description: 'For destructive scopes, include the user spoken confirmation. Must contain yes and forget.' },
+    }, ['scope']),
+  },
+  {
+    type: 'function',
     name: 'set_reminder',
     description: 'Schedule a reminder. when_iso must be an absolute ISO-8601 timestamp; resolve relative time before calling.',
     parameters: schema({ text: { type: 'string' }, when_iso: { type: 'string' } }, ['text', 'when_iso']),
@@ -211,11 +229,22 @@ export function getRealtimeCapabilityToolDefinitions() {
 export function buildTurnContextBlock(prefs: Preferences | null) {
   const now = new Date();
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local';
+  const currentConversation = (prefs as any)?.currentConversation;
+  const profile = (prefs as any)?.userProfile;
+  const profileLines = profile && typeof profile === 'object' ? [
+    Array.isArray((profile as any).goals) && (profile as any).goals.length ? `Known goals: ${(profile as any).goals.slice(-4).join('; ')}` : '',
+    Array.isArray((profile as any).effectiveTechniques) && (profile as any).effectiveTechniques.length ? `Helpful techniques: ${(profile as any).effectiveTechniques.slice(-4).join('; ')}` : '',
+    (profile as any).communicationStyle ? `Preferred communication style: ${(profile as any).communicationStyle}` : '',
+  ].filter(Boolean) : [];
   const parts = [
     `Device time now: ${now.toISOString()} (${timeZone}).`,
+    currentConversation ? `Fresh conversation session: ${(currentConversation as any).id}, started ${(currentConversation as any).startedAt}, generation ${(currentConversation as any).generation}.` : 'No conversation session id yet; treat this activation as fresh.',
+    'Conversation policy: every wake/duplex activation is fresh ephemeral context. Do not rely on old transcript unless durable memories/profile are provided. For durable facts call remember/update_user_profile/reflect_session.',
+    'If the user says start over, new session, or reset context, call start_new_conversation_session. If the user says forget everything, call forget_user_data and require voice confirmation before destructive wipe.',
     'Use get_time for time/date questions instead of guessing.',
     'Use get_weather for weather questions instead of guessing.',
     'Use get_user_profile before deep coaching, hypnosis, conflict navigation, or habit advice. Use update_user_profile/reflect_session after meaningful guidance.',
+    ...profileLines,
   ];
   const lat = (prefs as any)?.homeLatitude;
   const lon = (prefs as any)?.homeLongitude;

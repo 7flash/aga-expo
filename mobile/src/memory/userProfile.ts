@@ -55,6 +55,15 @@ export async function saveUserProfile(profile: UserProfile) {
   return next;
 }
 
+export async function clearUserProfile() {
+  await savePreferences({ userProfile: undefined } as any);
+  await logEvent('profile.clear', 'user requested profile reset');
+}
+
+export function profileFromPrefs(prefs: unknown): UserProfile {
+  return normalizeProfile((prefs as any)?.userProfile);
+}
+
 export async function updateUserProfileFromSignal(input: {
   note?: string;
   goal?: string;

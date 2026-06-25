@@ -8,6 +8,7 @@ import {
   loadPreferences,
   logEvent,
   savePreferences,
+  startNewConversationSession,
   type Preferences,
   type Reminder,
 } from '../db/localStore';
@@ -67,6 +68,13 @@ type Listener = (snapshot: RealtimeSnapshot) => void;
 
 function env(name: string) {
   return process.env?.[name] ?? '';
+}
+
+function envFlag(name: string, fallback: boolean) {
+  const raw = env(name);
+  if (raw === '1' || raw === 'true') return true;
+  if (raw === '0' || raw === 'false') return false;
+  return fallback;
 }
 
 function isWebRtcAvailable() {
@@ -196,6 +204,9 @@ function realtimeSessionConfig(prefs: Preferences | null, forUpdate = false) {
     'Use tools for any media, reminder, memory, weather, time, persona, translation, or settings action. Do not tell the user to click or tap.',
     'When asked for YouTube or music, call play_youtube. For pause, resume, or stop playback, call media_control. Background music may keep playing while you speak; do not pause music unless the user asks.',
     'Resolve relative reminder times to absolute ISO-8601 timestamps before calling set_reminder. Use get_time for current time/date and get_weather for weather.',
+    'Memory/session boundary: this Realtime connection is fresh ephemeral context. Save only durable facts with remember/update_user_profile/reflect_session. Do not assume old chat transcript unless provided in tools/profile.',
+    'If the user says start over, new session, clean slate, or reset context, call start_new_conversation_session with endActiveSkill true. This does not delete durable memory.',
+    'If the user says forget everything, call forget_user_data. For scope everything or personalization, require the spoken confirmation “yes forget everything” before wiping personal data.',
     translate ? `Live translation is ON. Translate non-command user phrases into ${translate}.` : '',
     prefs?.personalityPrompt ? `Custom personality overlay: ${prefs.personalityPrompt}` : '',
     remoteConfigPromptBlock(),
@@ -303,6 +314,12 @@ export class RealtimeSession {
       await this.applyRemoteConfig('start');
       this.stopRemotePoller = startRemoteConfigPoller((config) => this.onRemoteConfig(config));
       this.prefs = await loadPreferences();
+      if (envFlag('EXPO_PUBLIC_AGA_FRESH_CONTEXT_PER_WAKE', true)) {
+        const endActiveSession = envFlag('EXPO_PUBLIC_AGA_END_SKILL_ON_NEW_WAKE', true);
+        await startNewConversationSession('realtime_activation', { clearTranscript: true, endActiveSession });
+        this.prefs = await loadPreferences();
+        await logEvent('conversation.session.start', `${this.prefs.currentConversation?.id ?? 'unknown'} endSkill=${endActiveSession}`);
+      }
       this.publish({
         sessionLabel: this.prefs.activeSession?.label ?? null,
         listeningMode: listeningModeLabel(realtimeListenMode(this.prefs), allowBargeIn(this.prefs)),

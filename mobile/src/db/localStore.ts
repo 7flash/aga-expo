@@ -53,6 +53,21 @@ export type Preferences = {
   homeLongitude?: number | null;
   homeLabel?: string | null;
   temperatureUnit?: 'celsius' | 'fahrenheit';
+  /** Current ephemeral conversation/duplex activation. Durable memory lives separately. */
+  currentConversation?: {
+    id: string;
+    startedAt: string;
+    reason: string;
+    generation: number;
+  } | null;
+  /** Pending destructive reset confirmation. Voice-only safety gate. */
+  forgetConfirmation?: {
+    scope: 'session' | 'personalization' | 'everything';
+    requestedAt: string;
+    expiresAt: string;
+  } | null;
+  /** Durable evolving profile. Kept here until the relational store migration lands. */
+  userProfile?: unknown;
 };
 
 export type Reminder = {
@@ -63,6 +78,8 @@ export type Reminder = {
   createdAt: string;
   notificationId?: string | null;
 };
+
+export type ResetScope = 'session' | 'personalization' | 'everything';
 
 type StoreShape = {
   preferences: Preferences;
@@ -98,6 +115,9 @@ const DEFAULT_PREFS: Preferences = {
   homeLongitude: process.env.EXPO_PUBLIC_AGA_HOME_LONGITUDE ? Number(process.env.EXPO_PUBLIC_AGA_HOME_LONGITUDE) : null,
   homeLabel: process.env.EXPO_PUBLIC_AGA_HOME_LABEL || null,
   temperatureUnit: (process.env.EXPO_PUBLIC_AGA_TEMPERATURE_UNIT as any) || 'celsius',
+  currentConversation: null,
+  forgetConfirmation: null,
+  userProfile: undefined,
 };
 
 const STORAGE_KEY = 'aga.mobile.localStore.v20';
@@ -127,6 +147,46 @@ function storage(): MaybeStorage | null {
 
 function isoNow() {
   return new Date().toISOString();
+}
+
+function newConversationId() {
+  return `aga-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function nextConversation(reason: string) {
+  const previousGeneration = store.preferences.currentConversation?.generation ?? 0;
+  return {
+    id: newConversationId(),
+    startedAt: isoNow(),
+    reason: String(reason || 'new_session'),
+    generation: previousGeneration + 1,
+  };
+}
+
+function preserveTechnicalPrefs(prefs: Preferences): Partial<Preferences> {
+  return {
+    wakePhrase: prefs.wakePhrase || DEFAULT_PREFS.wakePhrase,
+    voiceLocale: prefs.voiceLocale || DEFAULT_PREFS.voiceLocale,
+    openaiApiKey: prefs.openaiApiKey || DEFAULT_PREFS.openaiApiKey,
+    geminiApiKey: prefs.geminiApiKey || DEFAULT_PREFS.geminiApiKey,
+    brainMode: prefs.brainMode || DEFAULT_PREFS.brainMode,
+    translateTarget: null,
+    showDiagnostics: !!prefs.showDiagnostics,
+    proactiveReminders: prefs.proactiveReminders !== false,
+    realtimeListenMode: prefs.realtimeListenMode || DEFAULT_PREFS.realtimeListenMode,
+    allowBargeIn: !!prefs.allowBargeIn,
+    mediaDuckingEnabled: prefs.mediaDuckingEnabled !== false,
+    remoteConfigRevision: prefs.remoteConfigRevision ?? null,
+    remoteConfigUrl: prefs.remoteConfigUrl ?? DEFAULT_PREFS.remoteConfigUrl ?? null,
+    remoteConfigPollMs: prefs.remoteConfigPollMs ?? DEFAULT_PREFS.remoteConfigPollMs ?? null,
+    deviceLabel: prefs.deviceLabel ?? DEFAULT_PREFS.deviceLabel ?? null,
+    serverLabels: prefs.serverLabels ?? {},
+    serverImages: prefs.serverImages ?? {},
+    homeLatitude: prefs.homeLatitude ?? null,
+    homeLongitude: prefs.homeLongitude ?? null,
+    homeLabel: prefs.homeLabel ?? null,
+    temperatureUnit: prefs.temperatureUnit || DEFAULT_PREFS.temperatureUnit,
+  };
 }
 
 function parseStore(raw: string | null | undefined): StoreShape | null {
@@ -338,6 +398,91 @@ export async function clearMessages() {
   persist('clear_messages');
 }
 
+export async function startNewConversationSession(
+  reason = 'manual',
+  options: { clearTranscript?: boolean; endActiveSession?: boolean } = {},
+) {
+  ensureRead();
+  store.preferences = {
+    ...store.preferences,
+    currentConversation: nextConversation(reason),
+    forgetConfirmation: null,
+    activeSession: options.endActiveSession ? null : store.preferences.activeSession ?? null,
+  };
+  if (options.clearTranscript !== false) store.messages = [];
+  persistNow('conversation_session');
+  return { ...store.preferences.currentConversation! };
+}
+
+export async function requestForgetConfirmation(scope: ResetScope = 'everything', ttlMs = 60_000) {
+  ensureRead();
+  const requestedAt = isoNow();
+  const expiresAt = new Date(Date.now() + ttlMs).toISOString();
+  store.preferences = {
+    ...store.preferences,
+    forgetConfirmation: { scope, requestedAt, expiresAt },
+  };
+  persistNow('forget_confirmation');
+  return { ...store.preferences.forgetConfirmation! };
+}
+
+export async function getForgetConfirmation(scope?: ResetScope) {
+  ensureRead();
+  const pending = store.preferences.forgetConfirmation ?? null;
+  if (!pending) return null;
+  if (pending.expiresAt <= isoNow()) {
+    store.preferences = { ...store.preferences, forgetConfirmation: null };
+    persistNow('forget_confirmation_expired');
+    return null;
+  }
+  if (scope && pending.scope !== scope) return null;
+  return { ...pending };
+}
+
+export async function clearForgetConfirmation() {
+  ensureRead();
+  store.preferences = { ...store.preferences, forgetConfirmation: null };
+  persistNow('forget_confirmation_clear');
+}
+
+export async function resetAgaData(scope: ResetScope = 'everything') {
+  ensureRead();
+  const cleanScope: ResetScope = scope === 'session' || scope === 'personalization' || scope === 'everything' ? scope : 'everything';
+
+  if (cleanScope === 'session') {
+    const conversation = await startNewConversationSession('forget_session', { clearTranscript: true, endActiveSession: true });
+    return { scope: cleanScope, conversation, messages: store.messages.length, memories: store.memories.length, reminders: store.reminders.length };
+  }
+
+  const preserved = preserveTechnicalPrefs(store.preferences);
+  const nextPrefs: Preferences = {
+    ...DEFAULT_PREFS,
+    ...preserved,
+    persona: DEFAULT_PREFS.persona,
+    realtimeVoice: DEFAULT_PREFS.realtimeVoice,
+    personalityPrompt: null,
+    activeSession: null,
+    currentConversation: nextConversation(`forget_${cleanScope}`),
+    forgetConfirmation: null,
+    userProfile: undefined,
+  } as Preferences;
+
+  store.preferences = nextPrefs;
+  store.messages = [];
+  store.memories = [];
+  store.events = [];
+  if (cleanScope === 'everything') store.reminders = [];
+  persistNow(`forget_${cleanScope}`);
+
+  return {
+    scope: cleanScope,
+    conversation: store.preferences.currentConversation,
+    messages: store.messages.length,
+    memories: store.memories.length,
+    reminders: store.reminders.length,
+  };
+}
+
 export async function addMemory(text: string) {
   ensureRead();
   const clean = String(text ?? '').trim();
@@ -426,5 +571,7 @@ export async function getDiagnostics() {
     lastPersistenceError,
     persistPending: !!persistTimer,
     persistDirtyReason,
+    currentConversation: store.preferences.currentConversation ?? null,
+    forgetConfirmationPending: !!store.preferences.forgetConfirmation,
   } as any;
 }

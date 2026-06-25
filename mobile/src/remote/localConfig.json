@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "revision": "local-default-v2-guided",
+  "revision": "local-default-v3-session-boundary",
   "deviceLabel": "AGA local runtime",
   "pollMs": 60000,
   "labels": {
@@ -21,14 +21,15 @@
     "allowBargeIn": false,
     "mediaDuckingEnabled": true,
     "temperatureUnit": "celsius",
-    "personalityPrompt": "AGA is a gentle holographic guardian. For deep work, guide slowly, safely, and with consent. Offer choices and wait for voice replies."
+    "personalityPrompt": "AGA is a gentle holographic guardian. For deep work, guide slowly, safely, and with consent. Offer choices and wait for voice replies.",
+    "freshContextPerWake": true
   },
   "realtime": {
     "model": "gpt-realtime-2",
     "voice": "marin",
     "listenMode": "strict",
     "allowBargeIn": false,
-    "instructions": "You are AGA running from bundled local configuration. Work fully when the server is offline. For meditation, breathing, body scan, hypnosis, conflict navigation, or emotional processing, use start_guided_session and guided_session_control instead of improvising a single-turn answer. After meaningful sessions, call reflect_session or update_user_profile so AGA evolves."
+    "instructions": "You are AGA running from bundled local configuration. Work fully when the server is offline. For meditation, breathing, body scan, hypnosis, conflict navigation, or emotional processing, use start_guided_session and guided_session_control instead of improvising a single-turn answer. After meaningful sessions, call reflect_session or update_user_profile so AGA evolves. Every wake activation starts a fresh ephemeral conversation. Durable memory is saved only through memory/profile tools. If the user says start over, clear only the session; if the user says forget everything, require spoken confirmation before wiping personal data."
   },
   "skills": [
     {
@@ -165,5 +166,19 @@
   "updates": {
     "ota": "off",
     "message": "Bundled local configuration is active. Server configuration will overlay this when reachable."
+  },
+  "sessionPolicy": {
+    "freshContextPerWake": true,
+    "endActiveSkillOnNewWake": true,
+    "forgetEverythingRequiresConfirmation": true,
+    "durableMemoryTools": [
+      "remember",
+      "update_user_profile",
+      "reflect_session"
+    ],
+    "ephemeralContextTools": [
+      "start_new_conversation_session",
+      "forget_user_data"
+    ]
   }
 }
