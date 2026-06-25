@@ -1,16 +1,17 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { CognitiveEngine, type AgaBrainSnapshot } from './CognitiveEngine';
+import { useEffect, useMemo, useRef, useState } from "react";
+import { CognitiveEngine, type AgaBrainSnapshot } from "./CognitiveEngine";
 
 const INITIAL_SNAPSHOT: AgaBrainSnapshot = {
   ready: false,
-  mode: 'sleeping',
-  interim: '',
+  mode: "sleeping",
+  interim: "",
   messages: [],
   reminders: [],
   activeMedia: null,
   mediaCommand: null,
-  speechStatus: 'starting',
+  speechStatus: "starting",
   error: null,
+  lastMeasure: undefined,
 };
 
 export function useAgaBrain() {
@@ -29,11 +30,14 @@ export function useAgaBrain() {
     };
   }, []);
 
-  return useMemo(() => ({
-    ...snapshot,
-    replay: (text: string) => engineRef.current?.replay(text),
-    closeMedia: () => engineRef.current?.closeMedia(),
-    onMediaEvent: (event: string) => engineRef.current?.onMediaEvent(event),
-    rearmMic: () => engineRef.current?.rearmMic(),
-  }), [snapshot]);
+  return useMemo(
+    () => ({
+      ...snapshot,
+      replay: (text: string) => engineRef.current?.replay(text),
+      closeMedia: () => engineRef.current?.closeMedia(),
+      onMediaEvent: (event: string) => engineRef.current?.onMediaEvent(event),
+      rearmMic: () => engineRef.current?.rearmMic(),
+    }),
+    [snapshot],
+  );
 }
