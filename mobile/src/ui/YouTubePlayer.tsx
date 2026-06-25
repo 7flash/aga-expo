@@ -153,7 +153,7 @@ export function YouTubePlayer({
   }, [onEvent]);
 
   useEffect(() => {
-    Animated.spring(slide, { toValue: 1, useNativeDriver: true, damping: 18, stiffness: 130 }).start();
+    Animated.spring(slide, { toValue: 1, useNativeDriver: Platform.OS !== 'web', damping: 18, stiffness: 130 }).start();
   }, [slide]);
 
   useEffect(() => {

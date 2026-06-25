@@ -1,4 +1,4 @@
-declare function require(name: string): any;
+import { openAgaKvDatabase, type AgaKvDatabase } from './sqliteLoader';
 
 type MaybeStorage = {
   getItem?: (key: string) => string | null;
@@ -6,7 +6,7 @@ type MaybeStorage = {
   removeItem?: (key: string) => void;
 };
 
-type SQLiteDatabase = any;
+type SQLiteDatabase = AgaKvDatabase;
 
 export type Preferences = {
   wakePhrase: string;
@@ -209,25 +209,10 @@ function serializeStore() {
   return JSON.stringify(store);
 }
 
-async function importSQLite() {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    return require('expo-sqlite');
-  } catch {
-    return null;
-  }
-}
-
 async function openSqlite(): Promise<SQLiteDatabase | null> {
   if (sqliteDbPromise) return sqliteDbPromise;
   sqliteDbPromise = (async () => {
-    const SQLite = await importSQLite();
-    if (!SQLite) return null;
-    const anySQLite = SQLite as any;
-    let db: SQLiteDatabase | null = null;
-    if (typeof anySQLite.openDatabaseAsync === 'function') db = await anySQLite.openDatabaseAsync(SQLITE_DB);
-    else if (typeof anySQLite.openDatabaseSync === 'function') db = anySQLite.openDatabaseSync(SQLITE_DB);
-    else if (typeof anySQLite.openDatabase === 'function') db = anySQLite.openDatabase(SQLITE_DB);
+    const db = await openAgaKvDatabase(SQLITE_DB);
     if (!db) return null;
     await sqlExec(db, 'CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL, updatedAt TEXT NOT NULL);');
     sqliteAvailable = true;
@@ -400,13 +385,17 @@ export async function clearMessages() {
 
 export async function startNewConversationSession(
   reason = 'manual',
-  options: { clearTranscript?: boolean; endActiveSession?: boolean } = {},
+  options: { clearTranscript?: boolean; endActiveSession?: boolean; clearTranslate?: boolean } = {},
 ) {
   ensureRead();
   store.preferences = {
     ...store.preferences,
     currentConversation: nextConversation(reason),
     forgetConfirmation: null,
+    // Translation is a live/session behavior, not a permanent preference.
+    // Clearing it prevents an old language-learning/translation run from making
+    // the next fresh wake answer in the wrong language.
+    translateTarget: options.clearTranslate === false ? store.preferences.translateTarget : null,
     activeSession: options.endActiveSession ? null : store.preferences.activeSession ?? null,
   };
   if (options.clearTranscript !== false) store.messages = [];

@@ -68,8 +68,8 @@ export function youtubeSearchPlayerUrl(query: string) {
 }
 
 type PlayerHtmlInput =
-  | { videoId: string; query?: never; title?: string }
-  | { videoId?: never; query: string; title?: string };
+  | { videoId: string; query?: never; title?: string; fallbackVideoIds?: string[] }
+  | { videoId?: never; query: string; title?: string; fallbackVideoIds?: string[] };
 
 export function youtubePlayerHtml(input: PlayerHtmlInput) {
   const hasVideo = !!input.videoId;
@@ -77,6 +77,7 @@ export function youtubePlayerHtml(input: PlayerHtmlInput) {
   const query = input.query?.trim() ?? '';
   const title = input.title?.trim() || query || 'YouTube';
   const fallbackUrl = hasVideo ? youtubeVideoPlayerUrl(safeId) : youtubeSearchPlayerUrl(query);
+  const fallbackVideoIds = Array.from(new Set((input.fallbackVideoIds ?? fallbackIdsFor(safeId || '')).filter((id) => /^[a-zA-Z0-9_-]{11}$/.test(id)))).slice(0, 4);
 
   return `<!doctype html>
 <html>
@@ -95,9 +96,27 @@ body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:whit
 <script>
 var player;
 var pendingVolume=null;
+var hasPlayed=false;
 var fallbackUrl=${jsString(fallbackUrl)};
 var mode=${jsString(hasVideo ? 'video' : 'search')};
+var primaryVideoId=${jsString(safeId)};
+var fallbackVideoIds=${JSON.stringify(fallbackVideoIds)};
+var fallbackIndex=0;
 function tell(type,payload){try{window.ReactNativeWebView&&window.ReactNativeWebView.postMessage(JSON.stringify(Object.assign({type:type},payload||{})));}catch(e){}}
+function tryVideoFallback(reason){
+  try{
+    while(fallbackIndex<fallbackVideoIds.length && fallbackVideoIds[fallbackIndex]===primaryVideoId) fallbackIndex++;
+    if(!player || !player.loadVideoById || fallbackIndex>=fallbackVideoIds.length) return false;
+    var next=fallbackVideoIds[fallbackIndex++];
+    primaryVideoId=next;
+    hasPlayed=false;
+    tell('player.fallback',{reason:reason,videoId:next});
+    player.loadVideoById(next);
+    if(pendingVolume!==null && player.setVolume) player.setVolume(pendingVolume);
+    setTimeout(function(){try{if(player && !hasPlayed) player.playVideo();}catch(e){}}, 450);
+    return true;
+  }catch(e){return false;}
+}
 function makeFallback(){
   var el=document.getElementById('player');
   el.innerHTML='<iframe class="fallback-frame" src="'+fallbackUrl+'" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen frameborder="0"></iframe>';
@@ -111,13 +130,14 @@ function onYouTubeIframeAPIReady(){
       playerVars:{autoplay:1,playsinline:1,controls:1,rel:0,modestbranding:1,enablejsapi:1},
       events:{
         onReady:function(e){try{if(pendingVolume!==null)e.target.setVolume(pendingVolume); e.target.playVideo();}catch(err){} tell('player.ready')},
-        onStateChange:function(e){if(e.data===0)tell('player.ended'); if(e.data===1)tell('player.playing'); if(e.data===2)tell('player.paused'); if(e.data===3)tell('player.buffering');},
-        onError:function(e){tell('player.error',{code:e&&e.data}); makeFallback();}
+        onStateChange:function(e){if(e.data===0)tell('player.ended'); if(e.data===1){hasPlayed=true; tell('player.playing');} if(e.data===2)tell('player.paused'); if(e.data===3)tell('player.buffering');},
+        onError:function(e){tell('player.error',{code:e&&e.data}); if(!tryVideoFallback('error')) makeFallback();}
       }
     };
     if(mode==='video') config.videoId=${jsString(safeId)};
     else config.playerVars=Object.assign(config.playerVars,{listType:'search',list:${jsString(query)}});
     player=new YT.Player('player',config);
+    setTimeout(function(){ if(player && !hasPlayed) tryVideoFallback('no_playback_watchdog'); }, 6500);
   } catch(e) {
     tell('player.error',{message:String(e)});
     makeFallback();
@@ -203,28 +223,58 @@ async function searchYouTubeDataApi(query: string): Promise<YouTubeResult | null
 }
 
 
-function presetId(kind: 'music' | 'lofi' | 'ambient' | 'sleep') {
-  const specific = {
-    music: env('EXPO_PUBLIC_AGA_DEFAULT_MUSIC_VIDEO_ID'),
-    lofi: env('EXPO_PUBLIC_AGA_LOFI_VIDEO_ID'),
-    ambient: env('EXPO_PUBLIC_AGA_AMBIENT_VIDEO_ID'),
-    sleep: env('EXPO_PUBLIC_AGA_SLEEP_MUSIC_VIDEO_ID'),
-  }[kind];
-  const fallback = env('EXPO_PUBLIC_AGA_DEFAULT_MUSIC_VIDEO_ID') || 'jfKfPfyJRdk';
-  const id = specific || fallback;
-  return /^[a-zA-Z0-9_-]{11}$/.test(id) ? id : 'jfKfPfyJRdk';
+
+const KNOWN_BAD_YOUTUBE_IDS = new Set([
+  // 24/7/live IDs or IDs seen returning “live stream recording is not available”.
+  'jfKfPfyJRdk',
+  '2OEL4P1Rz04',
+  '5qap5aO4i9A',
+]);
+
+const SAFE_MUSIC_PRESETS: Record<'music' | 'lofi' | 'ambient' | 'sleep', { env: string; fallback: string; title: string; alternates: string[] }> = {
+  // Broad music intent must never use live streams. One broken embed makes the
+  // whole voice product feel broken, so use stable normal videos first.
+  music: { env: 'EXPO_PUBLIC_AGA_DEFAULT_MUSIC_VIDEO_ID', fallback: 'GMrwWG1KjdU', title: 'calm music', alternates: ['CFGLoQIhmow', 'lTRiuFIWV54', 'n61ULEU7CO0'] },
+  ambient: { env: 'EXPO_PUBLIC_AGA_AMBIENT_VIDEO_ID', fallback: 'GMrwWG1KjdU', title: 'calm ambient music', alternates: ['CFGLoQIhmow', 'lTRiuFIWV54', 'n61ULEU7CO0'] },
+  sleep: { env: 'EXPO_PUBLIC_AGA_SLEEP_MUSIC_VIDEO_ID', fallback: 'GMrwWG1KjdU', title: 'soft sleep music', alternates: ['CFGLoQIhmow', 'lTRiuFIWV54', 'n61ULEU7CO0'] },
+  lofi: { env: 'EXPO_PUBLIC_AGA_LOFI_VIDEO_ID', fallback: 'CFGLoQIhmow', title: 'lofi focus music', alternates: ['lTRiuFIWV54', 'n61ULEU7CO0', 'GMrwWG1KjdU'] },
+};
+
+function isUsablePresetId(id: string) {
+  return /^[a-zA-Z0-9_-]{11}$/.test(id) && !KNOWN_BAD_YOUTUBE_IDS.has(id);
 }
 
-function classifyMusicPreset(query: string): { kind: 'music' | 'lofi' | 'ambient' | 'sleep'; title: string } | null {
+function presetId(kind: 'music' | 'lofi' | 'ambient' | 'sleep') {
+  const preset = SAFE_MUSIC_PRESETS[kind];
+  const configured = env(preset.env) || env('EXPO_PUBLIC_AGA_DEFAULT_MUSIC_VIDEO_ID') || '';
+  const id = isUsablePresetId(configured) ? configured : preset.fallback;
+  return safeYouTubeVideoId(id);
+}
+
+function fallbackIdsFor(videoId: string, kind?: 'music' | 'lofi' | 'ambient' | 'sleep') {
+  const candidates = [
+    ...(kind ? SAFE_MUSIC_PRESETS[kind].alternates : []),
+    SAFE_MUSIC_PRESETS.ambient.fallback,
+    SAFE_MUSIC_PRESETS.sleep.fallback,
+    SAFE_MUSIC_PRESETS.music.fallback,
+    SAFE_MUSIC_PRESETS.lofi.fallback,
+  ];
+  return Array.from(new Set(candidates))
+    .filter((id) => isUsablePresetId(id) && id !== videoId)
+    .slice(0, 4);
+}
+
+function classifyBroadMusicPreset(query: string): { kind: 'music' | 'lofi' | 'ambient' | 'sleep'; title: string } | null {
   const lower = query.toLowerCase().trim();
   // Realtime often expands “play music” into user-language searches such as
   // “спокойная космическая музыка ambient”. Search-list embeds are unreliable
   // and often show “This video is unavailable”, so broad music intent should be
   // resolved to known embeddable presets unless a YouTube API/backend is set.
-  const hasMusicWord = /\b(music|song|songs|lofi|lo-fi|chill|beats|ambient|soundscape|meditation|relax|relaxing|sleep|study|focus|calm|cosmic|space)\b/i.test(lower)
-    || /(музык|песн|спокойн|космическ|эмбиент|амбиент|фон|фонов|релакс|успокаива|сон|медитац)/i.test(lower)
-    || /(musique|música|musik|音楽|音乐)/i.test(lower);
-  if (!hasMusicWord) return null;
+  const broadMusicIntent = /^(?:play|put on|start|some|background|calm|soft|quiet|relaxing|ambient|lofi|lo-fi|sleep|study|focus|meditation|music|songs?|soundscape|youtube music|calm music|play music)\b/i.test(lower)
+    || /\b(background music|calm music|soft music|relaxing music|ambient music|sleep music|study music|focus music|lofi music|lo-fi music|music companion)\b/i.test(lower)
+    || /(спокойн|космическ|эмбиент|амбиент|фон|фонов|релакс|успокаива|сон|медитац)/i.test(lower)
+    || /^(?:music|musik|música|musique|音楽|音乐)$/i.test(lower);
+  if (!broadMusicIntent) return null;
   if (/\b(lofi|lo-fi|study|focus|beats)\b/i.test(lower)) return { kind: 'lofi', title: 'lofi focus music' };
   if (/\b(ambient|cosmic|space|soundscape|meditation|calm|relax|relaxing)\b/i.test(lower) || /(спокойн|космическ|эмбиент|амбиент|медитац|релакс|успокаива)/i.test(lower)) {
     return { kind: 'ambient', title: 'calm ambient music' };
@@ -247,7 +297,7 @@ function genericPreset(query: string): YouTubeResult | null {
     };
   }
 
-  const preset = classifyMusicPreset(query);
+  const preset = classifyBroadMusicPreset(query);
   if (!preset) return null;
   const id = presetId(preset.kind);
   return {
@@ -255,7 +305,7 @@ function genericPreset(query: string): YouTubeResult | null {
     title: preset.title,
     thumbnailUrl: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
     url: `https://www.youtube.com/watch?v=${id}`,
-    embedHtml: youtubePlayerHtml({ videoId: id, title: preset.title }),
+    embedHtml: youtubePlayerHtml({ videoId: id, title: preset.title, fallbackVideoIds: fallbackIdsFor(id, preset.kind) }),
     playerUrl: youtubeVideoPlayerUrl(id),
     source: 'preset',
   };
@@ -280,14 +330,22 @@ export async function searchYouTube(query: string): Promise<YouTubeResult> {
   const clean = query.trim();
   if (!clean) throw new Error('YouTube search query is empty.');
 
-  const preset = genericPreset(clean);
-  if (preset) return preset;
+  const explicitId = extractYouTubeVideoId(clean);
+  if (explicitId) return genericPreset(explicitId)!;
+
+  // Broad music intent should be deterministic. Let explicit URLs/IDs and exact
+  // searches use API/server, but plain “play music/calm music” uses local safe
+  // presets immediately so the model cannot expand it into a broken search.
+  const broadPreset = genericPreset(clean);
+  if (broadPreset && broadPreset.source === 'preset') return broadPreset;
 
   const api = await searchYouTubeDataApi(clean).catch(() => null);
-  if (api?.videoId) return api;
+  if (api?.videoId && !KNOWN_BAD_YOUTUBE_IDS.has(api.videoId)) return api;
 
   const remote = await searchRemoteYouTube(clean).catch(() => null);
-  if (remote?.videoId) return remote;
+  if (remote?.videoId && !KNOWN_BAD_YOUTUBE_IDS.has(remote.videoId)) return remote;
+
+  if (broadPreset) return broadPreset;
 
   // Never scrape youtube.com/results in the client. Web blocks it with CORS and
   // mobile WebView scraping is fragile. Fall back to an embeddable search player.

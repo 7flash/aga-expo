@@ -406,6 +406,19 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
       ctx.setMode(value ? 'translating' : 'listening');
       return value ? `Translating to ${value}.` : 'Translation off.';
     },
+    set_ui_language: async ({ locale, label }) => {
+      const cleanLocale = String(locale || 'en-US');
+      const cleanLabel = String(label || cleanLocale);
+      await setPrefs({
+        voiceLocale: cleanLocale,
+        translateTarget: null,
+        activeSession: null,
+      } as Partial<Preferences>);
+      ctx.publish({ sessionLabel: null, activeChoiceMenu: null, speechStatus: `language set: ${cleanLabel}` });
+      ctx.updateRealtimeSession();
+      await logEvent('settings.language', `${cleanLabel} ${cleanLocale}`);
+      return `Okay. I will answer in ${cleanLabel} unless you speak another language or ask for translation.`;
+    },
     show_settings_menu: async ({ category }) => {
       const menu = buildChoiceMenu(String(category ?? 'main'));
       ctx.publish({ activeChoiceMenu: menu });

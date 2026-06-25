@@ -212,41 +212,113 @@ function realtimeSessionConfig(prefs: Preferences | null, forUpdate = false) {
     remoteConfigPromptBlock(),
     buildTurnContextBlock(prefs),
     sessionInstructions(prefs),
+    'Language policy: answer in the language of the user’s latest spoken command in this fresh activation. Do not choose Indonesian, Russian, or any previous-session language just because of device locale, stored memories, old transcripts, or server config. If the latest user command is English, answer in English. If it is Indonesian, Russian, Spanish, or another language, mirror that language unless translation mode is explicitly on.',
+    'For wake-only greetings where the user only says AGA/Hey AGA, use short neutral English by default unless the next user phrase is in another language.',
     'When the user asks for settings, a different voice, a new personality, skills, language learning, an imagination game, or a new session, call show_settings_menu with the best category.',
     'When choices are visible and the user answers with a number or letter, call choose_option with that spoken choice. Never ask the user to tap or click.',
+    'Long guided-session policy: do not deliver a whole 5-10 minute meditation or hypnosis script as one giant response. Give one short spoken segment, invite the next breath or answer, then wait. Use guided_session_control/start_guided_session tools for structured sessions.',
     `Current listening mode: ${listeningModeLabel(realtimeListenMode(prefs), allowBargeIn(prefs))}.`,
     'Hot-mic policy: in wake-word mode, unless AGA has just asked a question or a choice menu is visible, only respond to user speech that begins with “AGA”, “Hey AGA”, “OK AGA”, or “Angel”. Ignore background laughter, side conversations, music lyrics, and room noise silently.',
     'If background music is playing, keep listening with echo cancellation and speak over it briefly. Do not stop music unless the user explicitly asks.',
     'If the user says be less sensitive, change listening sensitivity, stop interrupting, or listen hands-free, call show_settings_menu with category listening.',
   ].filter(Boolean).join('\n');
 
-  const audio: Record<string, unknown> = {
-    output: { voice: realtimeVoice(prefs) },
-  };
+  const audio: Record<string, unknown> = {};
 
-  // Keep the initial SDP payload conservative. After the data channel opens,
-  // apply the stricter hot-mic/VAD policy through session.update. The GA field
-  // for VAD is session.audio.input.turn_detection, not session.turn_detection.
+  // GA Realtime requires session.type even on session.update. Also, voice is
+  // locked after the model has produced audio in a session, so update events
+  // intentionally do NOT include audio.output.voice. Voice changes persist,
+  // then reconnect, and the new session receives the new voice at creation.
   if (forUpdate) {
     audio.input = { turn_detection: realtimeTurnDetectionForUpdate(prefs) };
+  } else {
+    audio.output = { voice: realtimeVoice(prefs) };
   }
 
-  const config: Record<string, unknown> = {
+  return {
+    type: 'realtime',
+    model: REALTIME_MODEL,
+    output_modalities: ['audio'],
     audio,
     instructions,
     tools: [...TOOLS, ...getRemoteToolDefinitions()],
     tool_choice: 'auto',
   };
-
-  if (!forUpdate) {
-    config.type = 'realtime';
-    config.model = REALTIME_MODEL;
-  }
-
-  return config;
 }
 
 const TOOLS = BUILTIN_CAPABILITY_TOOLS;
+
+type LocalControlIntent = { tool: string; args?: Record<string, unknown>; userVisible?: boolean } | null;
+
+function normalizeControlText(text: string) {
+  return String(text ?? '').trim().toLowerCase().replace(/[“”]/g, '"').replace(/[’]/g, "'");
+}
+
+function detectLanguageRequest(text: string): { locale: string; label: string } | null {
+  const clean = normalizeControlText(text);
+  if (/\b(stop|quit|disable)\s+(russian|indonesian|spanish|translation|translate)\b/.test(clean)) return { locale: 'en-US', label: 'English' };
+  if (/\b(speak|use|switch to|change language to|talk in|answer in)\s+english\b/.test(clean)) return { locale: 'en-US', label: 'English' };
+  if (/\b(speak|use|switch to|change language to|talk in|answer in)\s+russian\b/.test(clean)) return { locale: 'ru-RU', label: 'Russian' };
+  if (/\b(speak|use|switch to|change language to|talk in|answer in)\s+indonesian\b/.test(clean)) return { locale: 'id-ID', label: 'Indonesian' };
+  if (/\b(speak|use|switch to|change language to|talk in|answer in)\s+spanish\b/.test(clean)) return { locale: 'es-ES', label: 'Spanish' };
+  return null;
+}
+
+function localControlIntent(text: string): LocalControlIntent {
+  const clean = normalizeControlText(stripWakePrefix(text) || text);
+  if (!clean) return null;
+
+  if (/\b(yes\s+forget\s+everything|confirm\s+forget\s+everything)\b/.test(clean)) {
+    return { tool: 'forget_user_data', args: { scope: 'everything', confirmation: 'yes forget everything' } };
+  }
+  if (/\b(forget\s+everything|wipe\s+everything|reset\s+all\s+personal)\b/.test(clean)) {
+    return { tool: 'forget_user_data', args: { scope: 'everything' } };
+  }
+  if (/\b(start\s+over|new\s+session|fresh\s+session|reset\s+context|clear\s+context|clean\s+slate)\b/.test(clean)) {
+    return { tool: 'start_new_conversation_session', args: { reason: 'local_voice_command', endActiveSkill: true } };
+  }
+
+  const language = detectLanguageRequest(clean);
+  if (language) {
+    return { tool: 'set_ui_language', args: { locale: language.locale, label: language.label } };
+  }
+
+  if (/\b(change|switch|choose|set|open|show)\b.*\bvoice\b|\bvoice\s+(menu|settings|options)\b/.test(clean)) {
+    return { tool: 'show_settings_menu', args: { category: 'voice' } };
+  }
+  if (/\b(change|switch|choose|set|open|show)\b.*\b(personality|persona)\b|\bpersonality\s+(menu|settings|options)\b/.test(clean)) {
+    return { tool: 'show_settings_menu', args: { category: 'personality' } };
+  }
+  if (/\b(change|set|open|show)\b.*\b(listening|sensitivity|interruptions?)\b|\b(stop\s+interrupting|be\s+less\s+sensitive|listen\s+hands\s*free)\b/.test(clean)) {
+    return { tool: 'show_settings_menu', args: { category: 'listening' } };
+  }
+  if (/\b(choose|open|show|start|pick)\b.*\b(skill|skills|session|sessions)\b|\bskill\s+menu\b/.test(clean)) {
+    return { tool: 'show_settings_menu', args: { category: 'skills' } };
+  }
+  if (/\b(open|show)\b.*\b(menu|settings|options)\b|^menu$|^settings$|^options$/.test(clean)) {
+    return { tool: 'show_settings_menu', args: { category: 'main' } };
+  }
+
+  if (/\b(close|stop|dismiss)\b.*\b(video|youtube|music|song|player)\b/.test(clean)) {
+    return { tool: 'media_control', args: { command: 'stop' } };
+  }
+  if (/\b(pause|hold)\b.*\b(video|youtube|music|song|player)?\b/.test(clean)) {
+    return { tool: 'media_control', args: { command: 'pause' } };
+  }
+  if (/\b(resume|continue|play)\b.*\b(video|youtube|music|song|player)?\b/.test(clean) && !/\b(play|put on|start)\b.*\b(music|youtube|song|ambient|lofi|lo-fi|meditation music)\b/.test(clean)) {
+    return { tool: 'media_control', args: { command: 'resume' } };
+  }
+  if (/\b(play|put on|start)\b.*\b(music|youtube|song|ambient|lofi|lo-fi|calm|meditation music|relaxing)\b|^music$|^calm music$/.test(clean)) {
+    return { tool: 'play_youtube', args: { query: clean || 'calm music' } };
+  }
+
+  if (/\b(body\s+scan)\b/.test(clean)) return { tool: 'start_guided_session', args: { kind: 'body_scan', goal: 'body scan' } };
+  if (/\b(hypnosis|self\s+hypnosis|hypnotic)\b/.test(clean)) return { tool: 'start_guided_session', args: { kind: 'self_hypnosis', goal: 'safe self-hypnosis' } };
+  if (/\b(resolve|process|help).*\b(conflict|argument|fight|tension)\b/.test(clean)) return { tool: 'start_guided_session', args: { kind: 'conflict_navigation', goal: clean } };
+  if (/\b(meditation|meditate|breathing|breathwork|calm me|nervous system)\b/.test(clean)) return { tool: 'start_guided_session', args: { kind: 'breathing', goal: clean } };
+
+  return null;
+}
 
 export function shouldUseRealtimeSession() {
   if (env('EXPO_PUBLIC_AGA_REALTIME_ENABLED') === '0') return false;
@@ -266,6 +338,10 @@ export class RealtimeSession {
   private prefs: Preferences | null = null;
   private assistantBuffer = '';
   private pendingSends: unknown[] = [];
+  private responseInProgress = false;
+  private responseCreateInFlight = false;
+  private pendingResponseCreateReason: string | null = null;
+  private completedToolCalls = new Set<string>();
   private connected = false;
   private waitingForResponseUntil = 0;
   private pendingReconnectReason: string | null = null;
@@ -488,6 +564,25 @@ export class RealtimeSession {
     if (pending.length) measureMark('realtime.flushPending', { count: pending.length });
   }
 
+  private requestResponse(reason: string) {
+    if (this.responseInProgress || this.responseCreateInFlight) {
+      this.pendingResponseCreateReason = reason;
+      measureMark('realtime.response.queued', { reason });
+      return;
+    }
+    this.responseCreateInFlight = true;
+    measureMark('realtime.response.create', { reason });
+    this.send({ type: 'response.create' });
+  }
+
+  private drainPendingResponse(reason: string) {
+    if (!this.pendingResponseCreateReason) return;
+    const pendingReason = this.pendingResponseCreateReason;
+    this.pendingResponseCreateReason = null;
+    measureMark('realtime.response.drain', { reason, pendingReason });
+    this.requestResponse(pendingReason);
+  }
+
   isConnected() {
     return this.connected && this.dc?.readyState === 'open';
   }
@@ -545,11 +640,17 @@ export class RealtimeSession {
             this.publish({ interim: '' });
             break;
           }
+          if (await this.maybeHandleLocalControl(text, rawText)) {
+            this.publish({ interim: '' });
+            break;
+          }
         }
         this.publish({ interim: '' });
         break;
       }
       case 'response.created':
+        this.responseInProgress = true;
+        this.responseCreateInFlight = false;
         this.assistantBuffer = '';
         this.setMode('thinking');
         break;
@@ -582,9 +683,15 @@ export class RealtimeSession {
         }
         break;
       case 'response.done':
+        this.responseInProgress = false;
+        this.responseCreateInFlight = false;
         // If media is active, return to media mode after AGA finishes speaking so
         // the player volume unducks. Music keeps playing underneath the voice.
         this.setMode(this.snapshot.activeMedia ? 'media' : 'listening');
+        if (this.pendingResponseCreateReason) {
+          this.drainPendingResponse('response.done');
+          break;
+        }
         if (this.pendingReconnectReason) {
           const reason = this.pendingReconnectReason;
           this.pendingReconnectReason = null;
@@ -593,6 +700,15 @@ export class RealtimeSession {
         break;
       case 'error': {
         const message = String(event.error?.message ?? 'realtime error');
+        if (/active response|response is finished|in progress/i.test(message)) {
+          this.pendingResponseCreateReason = this.pendingResponseCreateReason || 'server_active_response';
+          this.responseInProgress = true;
+          this.responseCreateInFlight = false;
+          this.publish({ error: null, speechStatus: 'waiting for current response to finish' });
+          await logEvent('realtime.response.queued_error', message);
+          break;
+        }
+        this.responseCreateInFlight = false;
         this.publish({ error: message, speechStatus: 'realtime error' });
         await logEvent('realtime.error', message);
         break;
@@ -625,6 +741,25 @@ export class RealtimeSession {
     });
   }
 
+  private async maybeHandleLocalControl(text: string, rawText = text) {
+    const intent = localControlIntent(rawText) || localControlIntent(text);
+    if (!intent) return false;
+    const runner = this.capabilityRunner();
+    let output = '';
+    try {
+      output = await runner.run(intent.tool, intent.args ?? {});
+    } catch (error) {
+      output = error instanceof Error ? error.message : 'That control failed.';
+    }
+    if (output) {
+      await addMessage('assistant', output);
+      await logEvent('realtime.local_control', `${intent.tool}: ${output.slice(0, 220)}`);
+      await this.refresh();
+    }
+    this.publish({ interim: '', error: null, speechStatus: 'local control applied' });
+    return true;
+  }
+
   private async maybeHandleChoiceTranscript(text: string) {
     const menu = this.snapshot.activeChoiceMenu;
     if (!menu) return false;
@@ -641,12 +776,21 @@ export class RealtimeSession {
         content: [{ type: 'input_text', text: `The user selected from the visible menu. Local result: ${output}. Confirm briefly and continue in the new mode.` }],
       },
     });
-    this.send({ type: 'response.create' });
+    this.requestResponse('choice');
     return true;
   }
 
   private async runTool(callId: string, name: string, rawArgs: unknown) {
     return measureAsync('realtime.tool', async () => {
+      const callKey = String(callId || '');
+      if (callKey && this.completedToolCalls.has(callKey)) {
+        measureMark('realtime.tool.duplicate_ignored', { name, callId: callKey });
+        return;
+      }
+      if (callKey) {
+        this.completedToolCalls.add(callKey);
+        if (this.completedToolCalls.size > 80) this.completedToolCalls = new Set(Array.from(this.completedToolCalls).slice(-40));
+      }
       const args = parseJsonArgs(rawArgs);
       let output = `Unknown tool: ${name}`;
       try { output = await this.capabilityRunner().run(name, args); }
@@ -655,7 +799,7 @@ export class RealtimeSession {
         type: 'conversation.item.create',
         item: { type: 'function_call_output', call_id: callId, output },
       });
-      this.send({ type: 'response.create' });
+      this.requestResponse(`tool:${name}`);
     }, { name });
   }
 
@@ -697,14 +841,18 @@ export class RealtimeSession {
     this.publish({ messages, reminders });
   }
 
-  replay(text: string) {
+  async replay(text: string) {
     const clean = String(text ?? '').trim();
     if (!clean) return;
+    await addMessage('user', clean);
+    await this.refresh();
+    if (await this.maybeHandleChoiceTranscript(clean)) return;
+    if (await this.maybeHandleLocalControl(clean)) return;
     this.send({
       type: 'conversation.item.create',
       item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: clean }] },
     });
-    this.send({ type: 'response.create' });
+    this.requestResponse('user_replay');
   }
 
   rearmMic() {
@@ -753,6 +901,10 @@ export class RealtimeSession {
     this.meterTimer = null;
     this.analysers = [];
     this.connected = false;
+    this.responseInProgress = false;
+    this.responseCreateInFlight = false;
+    this.pendingResponseCreateReason = null;
+    this.completedToolCalls.clear();
     if (clearPending) this.pendingSends = [];
     try { this.dc?.close?.(); } catch { /* ignore */ }
     try { this.pc?.close?.(); } catch { /* ignore */ }

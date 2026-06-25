@@ -240,6 +240,7 @@ export function buildTurnContextBlock(prefs: Preferences | null) {
     `Device time now: ${now.toISOString()} (${timeZone}).`,
     currentConversation ? `Fresh conversation session: ${(currentConversation as any).id}, started ${(currentConversation as any).startedAt}, generation ${(currentConversation as any).generation}.` : 'No conversation session id yet; treat this activation as fresh.',
     'Conversation policy: every wake/duplex activation is fresh ephemeral context. Do not rely on old transcript unless durable memories/profile are provided. For durable facts call remember/update_user_profile/reflect_session.',
+    'Language policy: mirror the language of the latest user utterance in this activation. Ignore browser/device locale and stale memories when choosing reply language. Default wake-only greetings to English.',
     'If the user says start over, new session, or reset context, call start_new_conversation_session. If the user says forget everything, call forget_user_data and require voice confirmation before destructive wipe.',
     'Use get_time for time/date questions instead of guessing.',
     'Use get_weather for weather questions instead of guessing.',
