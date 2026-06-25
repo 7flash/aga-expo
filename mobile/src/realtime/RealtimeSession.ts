@@ -14,6 +14,7 @@ import {
 } from '../db/localStore';
 import { configureNotificationHandler } from '../notifications/localNotifications';
 import type { YouTubeResult } from '../media/youtube';
+import type { AmbientResult } from '../media/ambient';
 import { measureAsync, measureMark } from '../observability/measure';
 import { findChoice, normalizeChoiceKey, type ChoiceMenu } from '../aga/choiceMenus';
 import { BUILTIN_CAPABILITY_TOOLS, buildTurnContextBlock } from '../aga/capabilityRegistry';
@@ -39,6 +40,7 @@ const REALTIME_CALLS_URL = 'https://api.openai.com/v1/realtime/calls';
 
 type ActiveMedia =
   | (YouTubeResult & { type: 'youtube'; state: 'loading' | 'playing' | 'paused' | 'stopped' })
+  | AmbientResult
   | null;
 
 export type RealtimeSnapshot = {
@@ -115,6 +117,29 @@ function allowBargeIn(prefs: Preferences | null) {
   return process.env.EXPO_PUBLIC_AGA_ALLOW_BARGE_IN === '1';
 }
 
+function realtimeAutoResponse() {
+  // Default false: validate transcript/local controls before creating a model
+  // response. This prevents stale-language monologues and menus being delayed
+  // by server-side automatic VAD responses.
+  return process.env.EXPO_PUBLIC_AGA_REALTIME_AUTO_RESPONSE === '1';
+}
+
+function inputTranscriptionConfig(prefs: Preferences | null) {
+  if (process.env.EXPO_PUBLIC_AGA_REALTIME_INPUT_TRANSCRIPTION === '0') return null;
+  const config: Record<string, unknown> = {
+    model: process.env.EXPO_PUBLIC_AGA_REALTIME_TRANSCRIBE_MODEL || 'gpt-4o-mini-transcribe',
+  };
+  const language = process.env.EXPO_PUBLIC_AGA_TRANSCRIPTION_LANGUAGE;
+  if (language) config.language = language;
+  const prompt = process.env.EXPO_PUBLIC_AGA_TRANSCRIPTION_PROMPT;
+  if (prompt) config.prompt = prompt;
+  // Do not force prefs.voiceLocale here by default; users may ask one command
+  // in English and the next in another language. The model language policy
+  // should mirror the latest utterance unless translation is explicitly on.
+  void prefs;
+  return config;
+}
+
 function listeningModeLabel(mode: RealtimeListenMode, bargeIn: boolean) {
   const label = mode === 'handsfree' ? 'hands-free' : mode === 'answer_window' ? 'question-window' : 'wake-word';
   return `${label}${bargeIn ? ' + interruption' : ''}`;
@@ -153,14 +178,14 @@ function realtimeTurnDetectionForUpdate(prefs: Preferences | null) {
       threshold: Number(process.env.EXPO_PUBLIC_AGA_VAD_THRESHOLD || 0.72),
       prefix_padding_ms: Number(process.env.EXPO_PUBLIC_AGA_VAD_PREFIX_MS || 250),
       silence_duration_ms: Number(process.env.EXPO_PUBLIC_AGA_VAD_SILENCE_MS || 650),
-      create_response: true,
+      create_response: realtimeAutoResponse(),
       interrupt_response: allowBargeIn(prefs),
     };
   }
   return {
     type: 'semantic_vad',
     eagerness: process.env.EXPO_PUBLIC_AGA_SEMANTIC_VAD_EAGERNESS || 'low',
-    create_response: true,
+    create_response: realtimeAutoResponse(),
     interrupt_response: allowBargeIn(prefs),
   };
 }
@@ -224,14 +249,18 @@ function realtimeSessionConfig(prefs: Preferences | null, forUpdate = false) {
   ].filter(Boolean).join('\n');
 
   const audio: Record<string, unknown> = {};
+  const transcription = inputTranscriptionConfig(prefs);
+  const input: Record<string, unknown> = {
+    turn_detection: realtimeTurnDetectionForUpdate(prefs),
+  };
+  if (transcription) input.transcription = transcription;
+  audio.input = input;
 
   // GA Realtime requires session.type even on session.update. Also, voice is
   // locked after the model has produced audio in a session, so update events
   // intentionally do NOT include audio.output.voice. Voice changes persist,
   // then reconnect, and the new session receives the new voice at creation.
-  if (forUpdate) {
-    audio.input = { turn_detection: realtimeTurnDetectionForUpdate(prefs) };
-  } else {
+  if (!forUpdate) {
     audio.output = { voice: realtimeVoice(prefs) };
   }
 
@@ -257,7 +286,7 @@ function normalizeControlText(text: string) {
 function detectLanguageRequest(text: string): { locale: string; label: string } | null {
   const clean = normalizeControlText(text);
   if (/\b(stop|quit|disable)\s+(russian|indonesian|spanish|translation|translate)\b/.test(clean)) return { locale: 'en-US', label: 'English' };
-  if (/\b(speak|use|switch to|change language to|talk in|answer in)\s+english\b/.test(clean)) return { locale: 'en-US', label: 'English' };
+  if (/\b(speak|use|switch to|change language to|talk in|answer in)\s+english\b|\bin english(?: please)?\b/.test(clean)) return { locale: 'en-US', label: 'English' };
   if (/\b(speak|use|switch to|change language to|talk in|answer in)\s+russian\b/.test(clean)) return { locale: 'ru-RU', label: 'Russian' };
   if (/\b(speak|use|switch to|change language to|talk in|answer in)\s+indonesian\b/.test(clean)) return { locale: 'id-ID', label: 'Indonesian' };
   if (/\b(speak|use|switch to|change language to|talk in|answer in)\s+spanish\b/.test(clean)) return { locale: 'es-ES', label: 'Spanish' };
@@ -341,6 +370,7 @@ export class RealtimeSession {
   private responseInProgress = false;
   private responseCreateInFlight = false;
   private pendingResponseCreateReason: string | null = null;
+  private pendingLocalConfirmation: { text: string; reason: string } | null = null;
   private completedToolCalls = new Set<string>();
   private connected = false;
   private waitingForResponseUntil = 0;
@@ -575,7 +605,39 @@ export class RealtimeSession {
     this.send({ type: 'response.create' });
   }
 
+  private requestLocalConfirmation(text: string, reason: string) {
+    const clean = String(text || '').trim();
+    if (!clean) return;
+    if (this.responseInProgress || this.responseCreateInFlight) {
+      this.pendingLocalConfirmation = { text: clean, reason };
+      measureMark('realtime.local_confirmation.queued', { reason });
+      return;
+    }
+    this.responseCreateInFlight = true;
+    measureMark('realtime.local_confirmation.create', { reason });
+    this.send({
+      type: 'response.create',
+      response: {
+        conversation: 'none',
+        output_modalities: ['audio'],
+        metadata: { aga: 'local_control', reason },
+        instructions: [
+          'You are AGA. The device already executed a local control. Do not call tools.',
+          'Say a short confirmation only. Use the same language as the user’s latest command; if unclear, use English.',
+          `Confirmation: ${clean}`,
+        ].join(' '),
+      },
+    });
+  }
+
   private drainPendingResponse(reason: string) {
+    if (this.pendingLocalConfirmation) {
+      const pending = this.pendingLocalConfirmation;
+      this.pendingLocalConfirmation = null;
+      measureMark('realtime.local_confirmation.drain', { reason, pendingReason: pending.reason });
+      this.requestLocalConfirmation(pending.text, pending.reason);
+      return;
+    }
     if (!this.pendingResponseCreateReason) return;
     const pendingReason = this.pendingResponseCreateReason;
     this.pendingResponseCreateReason = null;
@@ -624,6 +686,12 @@ export class RealtimeSession {
         this.publish({ interim: '' });
         this.setMode('listening');
         break;
+      case 'conversation.item.input_audio_transcription.delta':
+      case 'conversation.item.input_audio_transcription.partial': {
+        const delta = String(event.delta ?? event.transcript ?? '').trim();
+        if (delta) this.publish({ interim: delta });
+        break;
+      }
       case 'conversation.item.input_audio_transcription.completed':
       case 'conversation.item.input_audio_transcription.done': {
         const rawText = String(event.transcript ?? '').trim();
@@ -644,6 +712,10 @@ export class RealtimeSession {
             this.publish({ interim: '' });
             break;
           }
+          // With turn_detection.create_response=false, Realtime will commit and
+          // transcribe the user's turn but will not answer until the client
+          // explicitly approves it. This is the core anti-stale-context gate.
+          this.requestResponse('validated_audio_transcript');
         }
         this.publish({ interim: '' });
         break;
@@ -688,7 +760,7 @@ export class RealtimeSession {
         // If media is active, return to media mode after AGA finishes speaking so
         // the player volume unducks. Music keeps playing underneath the voice.
         this.setMode(this.snapshot.activeMedia ? 'media' : 'listening');
-        if (this.pendingResponseCreateReason) {
+        if (this.pendingLocalConfirmation || this.pendingResponseCreateReason) {
           this.drainPendingResponse('response.done');
           break;
         }
@@ -752,10 +824,10 @@ export class RealtimeSession {
       output = error instanceof Error ? error.message : 'That control failed.';
     }
     if (output) {
-      await addMessage('assistant', output);
       await logEvent('realtime.local_control', `${intent.tool}: ${output.slice(0, 220)}`);
-      await this.refresh();
+      this.requestLocalConfirmation(output, intent.tool);
     }
+    await this.refresh();
     this.publish({ interim: '', error: null, speechStatus: 'local control applied' });
     return true;
   }

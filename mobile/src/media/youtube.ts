@@ -229,15 +229,19 @@ const KNOWN_BAD_YOUTUBE_IDS = new Set([
   'jfKfPfyJRdk',
   '2OEL4P1Rz04',
   '5qap5aO4i9A',
+  'GMrwWG1KjdU',
+  'CFGLoQIhmow',
+  'lTRiuFIWV54',
+  'n61ULEU7CO0',
 ]);
 
 const SAFE_MUSIC_PRESETS: Record<'music' | 'lofi' | 'ambient' | 'sleep', { env: string; fallback: string; title: string; alternates: string[] }> = {
   // Broad music intent must never use live streams. One broken embed makes the
   // whole voice product feel broken, so use stable normal videos first.
-  music: { env: 'EXPO_PUBLIC_AGA_DEFAULT_MUSIC_VIDEO_ID', fallback: 'GMrwWG1KjdU', title: 'calm music', alternates: ['CFGLoQIhmow', 'lTRiuFIWV54', 'n61ULEU7CO0'] },
-  ambient: { env: 'EXPO_PUBLIC_AGA_AMBIENT_VIDEO_ID', fallback: 'GMrwWG1KjdU', title: 'calm ambient music', alternates: ['CFGLoQIhmow', 'lTRiuFIWV54', 'n61ULEU7CO0'] },
-  sleep: { env: 'EXPO_PUBLIC_AGA_SLEEP_MUSIC_VIDEO_ID', fallback: 'GMrwWG1KjdU', title: 'soft sleep music', alternates: ['CFGLoQIhmow', 'lTRiuFIWV54', 'n61ULEU7CO0'] },
-  lofi: { env: 'EXPO_PUBLIC_AGA_LOFI_VIDEO_ID', fallback: 'CFGLoQIhmow', title: 'lofi focus music', alternates: ['lTRiuFIWV54', 'n61ULEU7CO0', 'GMrwWG1KjdU'] },
+  music: { env: 'EXPO_PUBLIC_AGA_DEFAULT_MUSIC_VIDEO_ID', fallback: 'MNBq0pP3jHA', title: 'calm music', alternates: ['UfcAVejslrU', '1ZYbU82GVz4', 'zJ7hUvU-d2Q'] },
+  ambient: { env: 'EXPO_PUBLIC_AGA_AMBIENT_VIDEO_ID', fallback: 'MNBq0pP3jHA', title: 'calm ambient music', alternates: ['UfcAVejslrU', '1ZYbU82GVz4', 'zJ7hUvU-d2Q'] },
+  sleep: { env: 'EXPO_PUBLIC_AGA_SLEEP_MUSIC_VIDEO_ID', fallback: 'MNBq0pP3jHA', title: 'soft sleep music', alternates: ['UfcAVejslrU', '1ZYbU82GVz4', 'zJ7hUvU-d2Q'] },
+  lofi: { env: 'EXPO_PUBLIC_AGA_LOFI_VIDEO_ID', fallback: 'UfcAVejslrU', title: 'lofi focus music', alternates: ['MNBq0pP3jHA', '1ZYbU82GVz4', 'zJ7hUvU-d2Q'] },
 };
 
 function isUsablePresetId(id: string) {

@@ -30,6 +30,7 @@ import {
   scheduleAgaReminderNotification,
 } from '../notifications/localNotifications';
 import { searchYouTube } from '../media/youtube';
+import { resolveLocalAmbient } from '../media/ambient';
 import { buildGuidedSessionInstructions, findGuidedSession, guidedSessionOpening } from '../sessions/guidedSessions';
 import { getUserProfile, profilePromptBlock, updateUserProfileFromSignal } from '../memory/userProfile';
 import {
@@ -288,15 +289,31 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
       await ctx.refresh();
       return 'All reminders cleared.';
     },
-    play_youtube: async ({ query }) => {
+    play_youtube: async ({ query, forceYouTube }) => {
       const q = String(query ?? 'music').trim() || 'music';
+      const explicitYouTube = /(?:youtube\.com|youtu\.be|watch\?v=|youtube video|on youtube|search youtube)/i.test(q);
+
+      // Broad background music is a local ambient capability by default. YouTube
+      // embed availability is not deterministic without a server/Data API check;
+      // a broken iframe is worse than a simple local soundscape.
+      if (!forceYouTube && !explicitYouTube) {
+        const ambient = resolveLocalAmbient(q);
+        if (ambient) {
+          ctx.publish({ activeMedia: { ...ambient, state: 'playing' }, mediaCommand: null });
+          ctx.setMode('media');
+          await logEvent('ambient.play', `${ambient.kind}: ${q}`);
+          await ctx.refresh();
+          return `Playing ${ambient.title}. This is generated locally, so it keeps working even when YouTube embeds fail.`;
+        }
+      }
+
       ctx.publish({ activeMedia: { type: 'youtube', videoId: '', title: q, url: '', thumbnailUrl: null, query: q, state: 'loading' } });
       ctx.setMode('media');
       const result = await searchYouTube(q);
       ctx.publish({ activeMedia: { ...result, type: 'youtube', state: 'playing' }, mediaCommand: null });
       await logEvent('youtube.play', `${result.title} ${result.url}`);
       await ctx.refresh();
-      return `Playing ${result.title}. I can still speak over the music; say pause, resume, or close video any time.`;
+      return `Opening ${result.title}. If YouTube blocks this embed, ask for local ambient music instead.`;
     },
     media_control: async ({ command }) => {
       const cmd = String(command ?? '') as 'pause' | 'resume' | 'stop';

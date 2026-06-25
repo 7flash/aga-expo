@@ -93,8 +93,11 @@ export const BUILTIN_CAPABILITY_TOOLS: readonly RealtimeToolDefinition[] = [
   {
     type: 'function',
     name: 'play_youtube',
-    description: 'Search YouTube or use safe presets and start playback of the best match.',
-    parameters: schema({ query: { type: 'string' } }, ['query']),
+    description: 'Play background media. For broad music/ambient requests, use generated local ambient audio. Use YouTube only for explicit YouTube URLs/searches or when forceYouTube is true.',
+    parameters: schema({
+      query: { type: 'string' },
+      forceYouTube: { type: 'boolean', description: 'Only true when the user explicitly wants YouTube instead of local ambient.' },
+    }, ['query']),
   },
   {
     type: 'function',
