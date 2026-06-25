@@ -49,6 +49,10 @@ export type Preferences = {
   deviceLabel?: string | null;
   serverLabels?: Record<string, string>;
   serverImages?: Record<string, string>;
+  homeLatitude?: number | null;
+  homeLongitude?: number | null;
+  homeLabel?: string | null;
+  temperatureUnit?: 'celsius' | 'fahrenheit';
 };
 
 export type Reminder = {
@@ -90,6 +94,10 @@ const DEFAULT_PREFS: Preferences = {
   deviceLabel: process.env.EXPO_PUBLIC_AGA_DEVICE_LABEL || null,
   serverLabels: {},
   serverImages: {},
+  homeLatitude: process.env.EXPO_PUBLIC_AGA_HOME_LATITUDE ? Number(process.env.EXPO_PUBLIC_AGA_HOME_LATITUDE) : null,
+  homeLongitude: process.env.EXPO_PUBLIC_AGA_HOME_LONGITUDE ? Number(process.env.EXPO_PUBLIC_AGA_HOME_LONGITUDE) : null,
+  homeLabel: process.env.EXPO_PUBLIC_AGA_HOME_LABEL || null,
+  temperatureUnit: (process.env.EXPO_PUBLIC_AGA_TEMPERATURE_UNIT as any) || 'celsius',
 };
 
 const STORAGE_KEY = 'aga.mobile.localStore.v20';
@@ -108,6 +116,9 @@ let sqliteDbPromise: Promise<SQLiteDatabase | null> | null = null;
 let sqliteAvailable = false;
 let lastPersistenceError: string | null = null;
 let storageBackend: 'memory' | 'web-storage' | 'sqlite' = 'memory';
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+let persistDirtyReason = '';
+const PERSIST_DEBOUNCE_MS = Number(process.env.EXPO_PUBLIC_AGA_STORE_DEBOUNCE_MS || 250);
 
 function storage(): MaybeStorage | null {
   const root: any = globalThis as any;
@@ -246,9 +257,34 @@ async function persistSqlite() {
   }
 }
 
-function persist() {
+function persistNow(reason = 'immediate') {
+  persistDirtyReason = reason;
+  if (persistTimer) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
   persistWebStorage();
   void persistSqlite();
+}
+
+function persist(reason = 'change') {
+  persistDirtyReason = reason;
+  if (persistTimer) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    persistWebStorage();
+    void persistSqlite();
+  }, PERSIST_DEBOUNCE_MS);
+}
+
+export async function flushLocalStore(reason = 'flush') {
+  persistDirtyReason = reason;
+  if (persistTimer) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
+  persistWebStorage();
+  await persistSqlite();
 }
 
 function ensureRead() {
@@ -265,7 +301,7 @@ export async function initializeLocalStore() {
     if (!webLoaded && !sqliteLoaded) store.preferences = { ...DEFAULT_PREFS, ...store.preferences };
   }
   store.preferences = { ...DEFAULT_PREFS, ...store.preferences };
-  persist();
+  persist('initialize');
   return { sqliteAvailable, fallback: sqliteAvailable ? 'sqlite-kv' : storage() ? 'web-storage' : 'memory' };
 }
 
@@ -278,7 +314,7 @@ export async function loadPreferences(): Promise<Preferences> {
 export async function savePreferences(input: Partial<Preferences>) {
   ensureRead();
   store.preferences = { ...store.preferences, ...input };
-  persist();
+  persistNow('preferences');
   return { ...store.preferences };
 }
 
@@ -288,7 +324,7 @@ export async function addMessage(role: 'user' | 'assistant' | string, content: s
   if (!clean) return;
   store.messages.push({ role, content: clean, createdAt: isoNow() });
   store.messages = store.messages.slice(-160);
-  persist();
+  persist('message');
 }
 
 export async function listMessages(limit = 20) {
@@ -299,7 +335,7 @@ export async function listMessages(limit = 20) {
 export async function clearMessages() {
   ensureRead();
   store.messages = [];
-  persist();
+  persist('clear_messages');
 }
 
 export async function addMemory(text: string) {
@@ -308,7 +344,7 @@ export async function addMemory(text: string) {
   if (!clean) return;
   store.memories.push({ text: clean, createdAt: isoNow() });
   store.memories = store.memories.slice(-300);
-  persist();
+  persist('memory');
 }
 
 export async function searchMemories(query?: string, limit = 8) {
@@ -332,7 +368,7 @@ export async function addReminder(text: string, dueAt: string, notificationId?: 
   };
   store.reminders.push(reminder);
   store.reminders.sort((a, b) => a.dueAt.localeCompare(b.dueAt));
-  persist();
+  persistNow('reminder');
   return reminder;
 }
 
@@ -351,7 +387,7 @@ export async function drainDueReminders(now = new Date()) {
   if (due.length) {
     const dueIds = new Set(due.map((reminder) => reminder.id));
     store.reminders = store.reminders.map((reminder) => dueIds.has(reminder.id) ? { ...reminder, delivered: 1 } : reminder);
-    persist();
+    persistNow('drain_reminders');
   }
   return due;
 }
@@ -359,21 +395,21 @@ export async function drainDueReminders(now = new Date()) {
 export async function clearReminders() {
   ensureRead();
   store.reminders = [];
-  persist();
+  persistNow('clear_reminders');
 }
 
 export async function logEvent(label: string, detail = '') {
   ensureRead();
   store.events.push({ label: String(label), detail: String(detail ?? ''), createdAt: isoNow() });
   store.events = store.events.slice(-700);
-  persist();
+  persist('event');
 }
 
 export async function compactEventLogIfIdle() {
   ensureRead();
   if (store.events.length > 300) {
     store.events = store.events.slice(-300);
-    persist();
+    persist('compact_event_log');
   }
 }
 
@@ -388,5 +424,7 @@ export async function getDiagnostics() {
     sqliteAvailable,
     storageBackend,
     lastPersistenceError,
-  };
+    persistPending: !!persistTimer,
+    persistDirtyReason,
+  } as any;
 }

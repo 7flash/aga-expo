@@ -24,6 +24,7 @@ import {
 import { searchYouTube, type YouTubeResult } from '../media/youtube';
 import { measureAsync, measureMark } from '../observability/measure';
 import { buildChoiceMenu, findChoice, normalizeChoiceKey, type ChoiceMenu, type ChoiceOption, type ChoiceAction, type SessionKind } from '../aga/choiceMenus';
+import { BUILTIN_CAPABILITY_TOOLS, buildTurnContextBlock, runGetTimeCapability, runGetWeatherCapability } from '../aga/capabilityRegistry';
 import {
   executeRemoteTool,
   fetchAndApplyRemoteConfig,
@@ -203,12 +204,13 @@ function realtimeSessionConfig(prefs: Preferences | null, forUpdate = false) {
   const instructions = [
     persona.system,
     'You are AGA, a cute holographic guardian angel in a touch-free speaker. Talk naturally, briefly, and warmly.',
-    'Use tools for any media, reminder, memory, persona, translation, or settings action. Do not tell the user to click or tap.',
+    'Use tools for any media, reminder, memory, weather, time, persona, translation, or settings action. Do not tell the user to click or tap.',
     'When asked for YouTube or music, call play_youtube. For pause, resume, or stop playback, call media_control. Background music may keep playing while you speak; do not pause music unless the user asks.',
-    'Resolve relative reminder times to absolute ISO-8601 timestamps before calling set_reminder.',
+    'Resolve relative reminder times to absolute ISO-8601 timestamps before calling set_reminder. Use get_time for current time/date and get_weather for weather.',
     translate ? `Live translation is ON. Translate non-command user phrases into ${translate}.` : '',
     prefs?.personalityPrompt ? `Custom personality overlay: ${prefs.personalityPrompt}` : '',
     remoteConfigPromptBlock(),
+    buildTurnContextBlock(prefs),
     sessionInstructions(prefs),
     'When the user asks for settings, a different voice, a new personality, skills, language learning, an imagination game, or a new session, call show_settings_menu with the best category.',
     'When choices are visible and the user answers with a number or letter, call choose_option with that spoken choice. Never ask the user to tap or click.',
@@ -244,137 +246,7 @@ function realtimeSessionConfig(prefs: Preferences | null, forUpdate = false) {
   return config;
 }
 
-const TOOLS = [
-  {
-    type: 'function',
-    name: 'remember',
-    description: 'Persist a durable fact about the user for future sessions.',
-    parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
-  },
-  {
-    type: 'function',
-    name: 'recall',
-    description: 'Search saved memories. Omit query to list recent memories.',
-    parameters: { type: 'object', properties: { query: { type: 'string' } } },
-  },
-  {
-    type: 'function',
-    name: 'set_reminder',
-    description: 'Schedule a reminder. when_iso is an absolute ISO-8601 timestamp.',
-    parameters: {
-      type: 'object',
-      properties: { text: { type: 'string' }, when_iso: { type: 'string' } },
-      required: ['text', 'when_iso'],
-    },
-  },
-  {
-    type: 'function',
-    name: 'list_reminders',
-    description: 'List pending reminders.',
-    parameters: { type: 'object', properties: {} },
-  },
-  {
-    type: 'function',
-    name: 'clear_reminders',
-    description: 'Delete all reminders and cancel their notifications.',
-    parameters: { type: 'object', properties: {} },
-  },
-  {
-    type: 'function',
-    name: 'play_youtube',
-    description: 'Search YouTube and start playback of the best match.',
-    parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
-  },
-  {
-    type: 'function',
-    name: 'media_control',
-    description: 'Control current playback.',
-    parameters: {
-      type: 'object',
-      properties: { command: { type: 'string', enum: ['pause', 'resume', 'stop'] } },
-      required: ['command'],
-    },
-  },
-  {
-    type: 'function',
-    name: 'set_listening_mode',
-    description: 'Change hot-mic sensitivity: strict wake-word mode, question-window mode, hands-free mode, and whether interruption is allowed.',
-    parameters: {
-      type: 'object',
-      properties: {
-        mode: { type: 'string', enum: ['strict', 'answer_window', 'handsfree'] },
-        allow_barge_in: { type: 'boolean' },
-      },
-      required: ['mode'],
-    },
-  },
-  {
-    type: 'function',
-    name: 'set_persona',
-    description: 'Switch voice persona: warm, calm, bright, coach, whisper.',
-    parameters: { type: 'object', properties: { persona: { type: 'string' } }, required: ['persona'] },
-  },
-  {
-    type: 'function',
-    name: 'set_translate',
-    description: 'Turn live phrase translation on (target language) or off (null).',
-    parameters: { type: 'object', properties: { target: { type: ['string', 'null'] } }, required: ['target'] },
-  },
-  {
-    type: 'function',
-    name: 'show_settings_menu',
-    description: 'Show a spoken-choice settings/session menu. Use this for changing voice, personality, listening sensitivity, language learning, imagination games, or session modes.',
-    parameters: {
-      type: 'object',
-      properties: { category: { type: 'string', enum: ['main', 'voice', 'personality', 'session', 'language', 'imagination', 'skills', 'listening', 'sensitivity'] } },
-    },
-  },
-  {
-    type: 'function',
-    name: 'choose_option',
-    description: 'Choose an option from the currently visible AGA menu by number or letter.',
-    parameters: { type: 'object', properties: { choice: { type: 'string' } }, required: ['choice'] },
-  },
-  {
-    type: 'function',
-    name: 'set_voice',
-    description: 'Change the realtime voice directly.',
-    parameters: { type: 'object', properties: { voice: { type: 'string' } }, required: ['voice'] },
-  },
-  {
-    type: 'function',
-    name: 'regenerate_personality',
-    description: 'Generate or select a fresh custom personality overlay for AGA.',
-    parameters: { type: 'object', properties: { style: { type: 'string' } } },
-  },
-  {
-    type: 'function',
-    name: 'start_session',
-    description: 'Start a special AGA session, such as language learning, imagination game, calm advice, focus coaching, bedtime story, or general guardian mode.',
-    parameters: {
-      type: 'object',
-      properties: {
-        kind: { type: 'string', enum: ['language', 'imagination', 'advice', 'focus', 'bedtime', 'breathing', 'music', 'general'] },
-        label: { type: 'string' },
-        targetLanguage: { type: 'string' },
-        theme: { type: 'string' },
-      },
-      required: ['kind'],
-    },
-  },
-  {
-    type: 'function',
-    name: 'refresh_remote_config',
-    description: 'Pull the latest server-controlled settings, skills, labels, images, and tools now.',
-    parameters: { type: 'object', properties: {} },
-  },
-  {
-    type: 'function',
-    name: 'end_session',
-    description: 'End the current special session and return to normal guardian mode.',
-    parameters: { type: 'object', properties: {} },
-  },
-] as const;
+const TOOLS = BUILTIN_CAPABILITY_TOOLS;
 
 export function shouldUseRealtimeSession() {
   if (env('EXPO_PUBLIC_AGA_REALTIME_ENABLED') === '0') return false;
@@ -726,6 +598,8 @@ export class RealtimeSession {
 
   private toolHandlers(): Record<string, ToolHandler> {
     const handlers: Record<string, ToolHandler> = {
+      get_time: async (args) => runGetTimeCapability(args),
+      get_weather: async (args) => runGetWeatherCapability(args, this.prefs),
       remember: async ({ text }) => {
         await addMemory(String(text ?? ''));
         await logEvent('memory.add', String(text ?? ''));
