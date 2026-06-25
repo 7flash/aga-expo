@@ -90,7 +90,7 @@ type StoreShape = {
 };
 
 const DEFAULT_PREFS: Preferences = {
-  wakePhrase: 'hey aga',
+  wakePhrase: process.env.EXPO_PUBLIC_AGA_WAKE_PHRASE || 'aga',
   persona: 'warm',
   voiceLocale: 'en-US',
   openaiApiKey: process.env.EXPO_PUBLIC_OPENAI_API_KEY ?? '',

@@ -16,6 +16,12 @@ function numberEnv(name: string, fallback: number) {
   return Number.isFinite(raw) && raw > 0 ? raw : fallback;
 }
 
+function envFlag(name: string, fallback: boolean) {
+  const raw = env(name).trim().toLowerCase();
+  if (!raw) return fallback;
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+}
+
 type Listener = (snapshot: RealtimeSnapshot) => void;
 
 /**
@@ -35,6 +41,9 @@ export class WakeRealtimeController {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private prefs: Preferences | null = null;
   private started = false;
+  private wakeActivationInFlight = false;
+  private lastWakeFingerprint = '';
+  private wakeRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
   private snapshot: RealtimeSnapshot = {
     ready: false,
@@ -79,7 +88,8 @@ export class WakeRealtimeController {
   }
 
   private async startWakeScout(reason: string) {
-    if (this.wakeLoop || this.realtime) return;
+    if (this.wakeLoop || this.realtime || !this.started) return;
+    this.prefs = await loadPreferences().catch(() => this.prefs);
     const locale = this.prefs?.voiceLocale || 'en-US';
     this.publish({
       ready: true,
@@ -87,17 +97,26 @@ export class WakeRealtimeController {
       interim: '',
       audioLevel: 0,
       activeChoiceMenu: null,
-      speechStatus: 'wake scout: listening for AGA',
+      speechStatus: 'wake scout: listening for AGA / hey AGA',
       error: null,
     });
     const loop = new NativeSpeechLoop(
       {
         onPartial: (text) => {
           // Local scout hears background speech, but does not execute anything until wake.
-          this.publish({ interim: normalizeSpeech(text).slice(0, 120), speechStatus: 'wake scout: hearing' });
+          const clean = normalizeSpeech(text);
+          this.publish({ interim: clean.slice(0, 120), speechStatus: 'wake scout: hearing' });
           measureMark('wakeScout.partial', { chars: text.length });
+
+          // Some Android/Web speech engines are slow to emit final results while
+          // the room stays noisy. Wake on a partial phrase so “hey AGA” actually
+          // summons her instead of waiting forever for silence.
+          if (envFlag('EXPO_PUBLIC_AGA_WAKE_ON_PARTIAL', true)) {
+            const wake = detectWake(clean, this.prefs?.wakePhrase || 'aga');
+            if (wake.woke) void this.handleWakeFinal(clean, 'partial');
+          }
         },
-        onFinal: (text) => void this.handleWakeFinal(text),
+        onFinal: (text) => void this.handleWakeFinal(text, 'final'),
         onError: async (message) => {
           this.publish({ speechStatus: `wake scout error: ${message}`, error: message });
           await logEvent('wake.error', message);
@@ -109,9 +128,19 @@ export class WakeRealtimeController {
     this.wakeLoop = loop;
     await loop.start({ watchdogEnabled: true }).catch(async (error: unknown) => {
       const message = error instanceof Error ? error.message : String(error || 'wake scout failed');
+      this.wakeLoop = null;
       this.publish({ speechStatus: 'wake scout failed', error: message });
       await logEvent('wake.start.error', message);
+      this.scheduleWakeRetry('start_error');
     });
+    const diagnostics = typeof (loop as any).getDiagnostics === 'function' ? (loop as any).getDiagnostics() : null;
+    if (diagnostics?.available === false || diagnostics?.provider === 'none') {
+      this.wakeLoop = null;
+      const message = diagnostics?.lastError || 'Speech recognition is not available in this runtime.';
+      this.publish({ speechStatus: `wake scout unavailable: ${message}`, error: null });
+      await logEvent('wake.unavailable', message).catch(() => undefined);
+      return;
+    }
     measureMark('wakeScout.started', { reason, locale });
   }
 
@@ -124,21 +153,48 @@ export class WakeRealtimeController {
     measureMark('wakeScout.stopped', { reason });
   }
 
-  private async handleWakeFinal(raw: string) {
+  private scheduleWakeRetry(reason: string) {
+    if (!this.started || this.wakeRetryTimer || this.realtime) return;
+    const delay = numberEnv('EXPO_PUBLIC_AGA_WAKE_RETRY_MS', 2500);
+    this.wakeRetryTimer = setTimeout(() => {
+      this.wakeRetryTimer = null;
+      void this.startWakeScout(`retry_${reason}`);
+    }, delay);
+    measureMark('wakeScout.retry.arm', { reason, delay });
+  }
+
+  private async handleWakeFinal(raw: string, source: 'partial' | 'final' = 'final') {
     const text = normalizeSpeech(raw);
-    if (!text) return;
-    const prefs = this.prefs ?? await loadPreferences();
+    if (!text || this.wakeActivationInFlight) return;
+    const prefs = await loadPreferences().catch(() => this.prefs) ?? this.prefs;
     this.prefs = prefs;
-    const wake = detectWake(text, prefs.wakePhrase);
-    measureMark('wakeScout.final', { woke: wake.woke, kind: wake.kind, chars: text.length });
+    const wakePhrase = prefs?.wakePhrase || 'aga';
+    const wake = detectWake(text, wakePhrase);
+    measureMark('wakeScout.final', { woke: wake.woke, kind: wake.kind, source, chars: text.length });
     if (!wake.woke) {
-      this.publish({ interim: '', speechStatus: 'wake scout: waiting for AGA' });
+      if (source === 'final') this.publish({ interim: '', speechStatus: 'wake scout: waiting for AGA / hey AGA' });
       return;
     }
 
-    const command = removeWakePhrase(text, prefs.wakePhrase).trim();
-    await logEvent('wake.accepted', `${wake.kind}: ${text.slice(0, 180)}`);
-    await this.activateRealtime(command || 'The user said AGA. Greet them briefly and ask what they need.');
+    const fingerprint = `${wake.kind}:${wake.match.toLowerCase()}:${Math.floor(Date.now() / 1500)}`;
+    if (fingerprint === this.lastWakeFingerprint) return;
+    this.lastWakeFingerprint = fingerprint;
+    this.wakeActivationInFlight = true;
+
+    try {
+      const command = removeWakePhrase(text, wakePhrase).trim();
+      this.publish({ interim: '', speechStatus: 'wake detected — connecting' });
+      await logEvent('wake.accepted', `${source}/${wake.kind}: ${text.slice(0, 180)}`);
+      await this.activateRealtime(command || 'The user said AGA. Greet them briefly and ask what they need.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error || 'wake activation failed');
+      this.publish({ mode: 'recovering', speechStatus: 'wake activation failed; rearming mic', error: message });
+      await logEvent('wake.activate.error', message).catch(() => undefined);
+      await this.sleepRealtime('wake_activate_error').catch(() => undefined);
+      if (this.started) await this.startWakeScout('wake_activate_error').catch(() => undefined);
+    } finally {
+      setTimeout(() => { this.wakeActivationInFlight = false; }, 1000);
+    }
   }
 
   private armIdleTimer(snapshot: RealtimeSnapshot) {
@@ -177,9 +233,20 @@ export class WakeRealtimeController {
         this.armIdleTimer(next);
       });
 
-      await session.start();
-      session.replay(initialText);
-      this.armIdleTimer(this.snapshot);
+      try {
+        await session.start();
+        session.replay(initialText);
+        this.armIdleTimer(this.snapshot);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error || 'Realtime start failed');
+        this.realtime = null;
+        this.realtimeUnsubscribe?.();
+        this.realtimeUnsubscribe = null;
+        await session.stop().catch(() => undefined);
+        this.publish({ mode: 'recovering', speechStatus: 'realtime start failed; returning to wake scout', error: message });
+        await logEvent('realtime.start.error', message).catch(() => undefined);
+        if (this.started) await this.startWakeScout('realtime_start_failed');
+      }
     });
   }
 
@@ -229,6 +296,8 @@ export class WakeRealtimeController {
     this.started = false;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
+    if (this.wakeRetryTimer) clearTimeout(this.wakeRetryTimer);
+    this.wakeRetryTimer = null;
     await this.stopWakeScout('stop');
     await this.sleepRealtime('stop').catch(() => undefined);
   }

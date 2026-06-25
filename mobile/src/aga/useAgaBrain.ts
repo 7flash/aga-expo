@@ -21,6 +21,16 @@ const INITIAL_SNAPSHOT: AgaBrainSnapshot = {
   sessionLabel: null,
 };
 
+
+function env(name: string) {
+  return process.env?.[name] ?? '';
+}
+
+function wantsRealtimeWakeRuntime() {
+  if (env('EXPO_PUBLIC_AGA_REALTIME_ENABLED') === '0') return false;
+  return !!(env('EXPO_PUBLIC_OPENAI_API_KEY') || env('EXPO_PUBLIC_AGA_REALTIME_TOKEN_URL') || env('EXPO_PUBLIC_AGA_REALTIME_SDP_URL'));
+}
+
 type BrainLike = {
   start(): Promise<void> | void;
   stop(): Promise<void> | void;
@@ -49,7 +59,11 @@ export function useAgaBrain() {
   const [snapshot, setSnapshot] = useState<AgaBrainSnapshot>(INITIAL_SNAPSHOT);
 
   useEffect(() => {
-    const useRealtime = shouldUseRealtimeSession();
+    // The product runtime should still boot the local wake scout even when
+    // WebRTC feature detection is late or missing at module-load time.
+    // RealtimeSession itself will report a transport error if duplex cannot
+    // start, but the mic should not silently fall back to a mismatched local brain.
+    const useRealtime = shouldUseRealtimeSession() || wantsRealtimeWakeRuntime();
     const directRealtime = process.env.EXPO_PUBLIC_AGA_REALTIME_DIRECT === '1';
     const engine: BrainLike = useRealtime
       ? (directRealtime ? new RealtimeSession() : new WakeRealtimeController())
