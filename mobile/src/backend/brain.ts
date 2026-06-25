@@ -1,6 +1,5 @@
-import { MODEL_IDS, PROVIDER_ENDPOINTS } from './modelIds';
-import type { Preferences } from '../db/localStore';
 import { getPersona } from '../aga/personas';
+import type { Preferences } from '../db/localStore';
 
 type BrainInput = {
   text: string;
@@ -9,89 +8,93 @@ type BrainInput = {
   memories: Array<{ text: string }>;
 };
 
-function buildPrompt({ text, prefs, history, memories }: BrainInput) {
-  const persona = getPersona(prefs.persona);
-  const memoryBlock = memories.length
-    ? `Known memory:\n${memories.map((m) => `- ${m.text}`).join('\n')}`
-    : 'Known memory: none yet.';
-  const recent = history.slice(-10).map((m) => `${m.role}: ${m.content}`).join('\n');
-  return `${persona.system}\n\n${memoryBlock}\n\nRecent conversation:\n${recent}\n\nUser: ${text}\nAGA:`;
+function env(name: string) {
+  return process.env?.[name] ?? '';
+}
+
+function buildPrompt(input: BrainInput) {
+  const persona = getPersona(input.prefs.persona);
+  const memories = input.memories.length
+    ? input.memories.map((memory) => `- ${memory.text}`).join('\n')
+    : 'none';
+  const history = input.history.slice(-12).map((message) => `${message.role}: ${message.content}`).join('\n');
+  return `${persona.systemPrompt}\n\nKnown memories:\n${memories}\n\nRecent conversation:\n${history || 'none'}\n\nUser: ${input.text}\nAGA:`;
+}
+
+function fallbackReply(text: string) {
+  const lower = text.toLowerCase();
+  if (/\b(advice|help|what should i do)\b/.test(lower)) {
+    return 'I am here. Take one calm breath, name the next small step, and I will help you move through it.';
+  }
+  if (/\b(are you there|can you hear|where are you|hello|hi)\b/.test(lower)) {
+    return 'I am here, listening and ready to help.';
+  }
+  return `I heard you. My local brain is running, but the cloud brain is not connected yet. You said: ${text}`;
 }
 
 function extractOpenAIText(data: any) {
-  if (typeof data?.output_text === 'string') return data.output_text.trim();
+  if (typeof data?.output_text === 'string' && data.output_text.trim()) return data.output_text.trim();
   const text = data?.output
     ?.flatMap((item: any) => item?.content ?? [])
-    ?.map((content: any) => content?.text ?? '')
+    ?.map((content: any) => content?.text ?? content?.transcript ?? '')
     ?.join('\n')
     ?.trim();
-  return text || 'I could not generate a reply.';
+  return text || '';
 }
 
 async function askOpenAI(input: BrainInput) {
-  const apiKey = input.prefs.openaiApiKey || process.env.EXPO_PUBLIC_OPENAI_API_KEY;
-  if (!apiKey) throw new Error('OpenAI key is not set.');
-  const response = await fetch(PROVIDER_ENDPOINTS.openaiResponses, {
+  const apiKey = input.prefs.openaiApiKey || env('EXPO_PUBLIC_OPENAI_API_KEY');
+  if (!apiKey) return fallbackReply(input.text);
+  const model = env('EXPO_PUBLIC_OPENAI_MODEL') || 'gpt-5.5';
+  const response = await fetch('https://api.openai.com/v1/responses', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
     body: JSON.stringify({
-      model: MODEL_IDS.openaiChat,
+      model,
+      instructions: getPersona(input.prefs.persona).systemPrompt,
       input: buildPrompt(input),
-      instructions: getPersona(input.prefs.persona).system,
     }),
   });
-  const data = await response.json();
+  const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data?.error?.message || 'OpenAI request failed.');
-  return extractOpenAIText(data);
-}
-
-function extractGeminiText(data: any) {
-  const blockReason = data?.promptFeedback?.blockReason;
-  if (blockReason) {
-    throw new Error(`Gemini blocked this request: ${blockReason}.`);
-  }
-
-  const candidate = data?.candidates?.[0];
-  const finishReason = candidate?.finishReason;
-  if (finishReason && !['STOP', 'MAX_TOKENS'].includes(finishReason)) {
-    throw new Error(`Gemini could not answer because finishReason=${finishReason}.`);
-  }
-
-  const text = candidate?.content?.parts
-    ?.map((part: any) => (typeof part?.text === 'string' ? part.text : ''))
-    ?.join('\n')
-    ?.trim();
-
-  return text || 'I could not generate a reply.';
+  return extractOpenAIText(data) || fallbackReply(input.text);
 }
 
 async function askGemini(input: BrainInput) {
-  const apiKey = input.prefs.geminiApiKey || process.env.EXPO_PUBLIC_GEMINI_API_KEY;
-  if (!apiKey) throw new Error('Gemini key is not set.');
-  const url = `${PROVIDER_ENDPOINTS.geminiGenerateContentBase}/${MODEL_IDS.geminiText}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const apiKey = input.prefs.geminiApiKey || env('EXPO_PUBLIC_GEMINI_API_KEY');
+  if (!apiKey) return fallbackReply(input.text);
+  const model = env('EXPO_PUBLIC_GEMINI_MODEL') || 'gemini-2.5-flash';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: buildPrompt(input) }] }] }),
   });
-  const data = await response.json();
+  const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data?.error?.message || 'Gemini request failed.');
-  return extractGeminiText(data);
+  return data?.candidates?.[0]?.content?.parts?.map((part: any) => part?.text ?? '').join('\n').trim() || fallbackReply(input.text);
 }
-
 
 export async function askBrain(input: BrainInput) {
   try {
     if (input.prefs.brainMode === 'gemini') return await askGemini(input);
-    if (input.prefs.brainMode === 'openai') return await askOpenAI(input);
-    throw new Error('offline mode');
+    if (input.prefs.brainMode === 'offline') return fallbackReply(input.text);
+    return await askOpenAI(input);
   } catch (error) {
     const reason = error instanceof Error ? error.message : 'cloud brain unavailable';
-    return `My local voice is working, but my cloud brain is not connected right now. ${reason}`;
+    return `I am here, but my cloud brain hit a glitch: ${reason}`;
   }
 }
 
 export async function translatePhrase(text: string, target: string, prefs: Preferences) {
-  const prompt = `Translate this phrase to ${target}. Return only the translation.\n\n${text}`;
-  return askBrain({ text: prompt, prefs, history: [], memories: [] });
+  const reply = await askBrain({
+    text: `Translate this phrase to ${target}. Return only the translation.\n\n${text}`,
+    prefs,
+    history: [],
+    memories: [],
+  });
+  return reply.trim() || text;
 }

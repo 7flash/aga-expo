@@ -44,6 +44,7 @@ export class RealtimeEngine {
     return realtimeEnabled() && Boolean(
       this.options.clientSecret ||
       process.env.EXPO_PUBLIC_AGA_REALTIME_CLIENT_SECRET ||
+      process.env.EXPO_PUBLIC_OPENAI_API_KEY ||
       process.env.EXPO_PUBLIC_AGA_REALTIME_SESSION_URL
     );
   }
@@ -58,7 +59,7 @@ export class RealtimeEngine {
       const session = this.options.clientSecret
         ? null
         : await createRealtimeSession();
-      const secret = this.options.clientSecret || session?.clientSecret || process.env.EXPO_PUBLIC_AGA_REALTIME_CLIENT_SECRET || '';
+      const secret = this.options.clientSecret || session?.clientSecret || process.env.EXPO_PUBLIC_AGA_REALTIME_CLIENT_SECRET || process.env.EXPO_PUBLIC_OPENAI_API_KEY || '';
       const model = this.options.model || session?.model || defaultModel();
       if (!secret) {
         this.options.onEvent({ type: 'status', status: 'realtime session unavailable; using local turn engine' });
