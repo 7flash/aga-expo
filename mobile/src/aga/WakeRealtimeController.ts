@@ -71,6 +71,8 @@ export class WakeRealtimeController {
   private postWakeTimer: ReturnType<typeof setTimeout> | null = null;
   private capabilities: ReturnType<typeof createCapabilityRunner> | null = null;
   private shortAudioTurn: ShortReasoningAudioTurn | null = null;
+  private shortAudioReason: string | null = null;
+  private resolvingPostWake = false;
 
   private snapshot: RealtimeSnapshot = {
     ready: false,
@@ -256,13 +258,22 @@ export class WakeRealtimeController {
 
   private async handleWake(text: string, source: string) {
     await logEvent('wake.accepted', `${source}:${text || 'keyword_only'}`).catch(() => undefined);
+    this.resolvingPostWake = false;
     this.publish({ interim: '', heardText: 'keyword detected: aga', speechStatus: 'wake detected — opening command ear', mode: 'awake' } as any);
     if (envFlag('EXPO_PUBLIC_AGA_POST_WAKE_TTS_ACK', true)) {
       void speakShortReply(postWakeReply(), 'warm').catch(() => undefined);
     }
+
+    // Start buffering immediately after wake. Sherpa KWS may not emit unknown text,
+    // so waiting until "no match" would lose the user's actual utterance.
+    await this.startBufferedShortAudio(`post_wake:${source}`).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error || 'short buffer unavailable');
+      this.publish({ error: message, speechStatus: 'short request buffer unavailable' } as any);
+    });
+
     const commandWindowOpened = await this.openPostWakeCommandWindow(source);
     if (!commandWindowOpened) {
-      await this.captureShortUtteranceAndReason('no_post_wake_command_engine');
+      await this.finishBufferedShortAudio('no_post_wake_command_engine');
     }
   }
 
@@ -298,6 +309,7 @@ export class WakeRealtimeController {
   }
 
   private async applyChoiceText(text: string) {
+    await this.cancelShortAudioTurn('choice_selected').catch(() => undefined);
     const runner = this.ensureCapabilities();
     const result = await runner.chooseFromText(text).catch((error: unknown) => error instanceof Error ? error.message : String(error || 'choice failed'));
     if (!result) return false;
@@ -364,8 +376,8 @@ export class WakeRealtimeController {
     await this.startWakeScout('short_reasoning_done').catch(() => undefined);
   }
 
-  private async captureShortUtteranceAndReason(reason: string) {
-    await this.cancelShortAudioTurn('replace_short_audio').catch(() => undefined);
+  private async startBufferedShortAudio(reason: string) {
+    await this.cancelShortAudioTurn(`replace_buffer:${reason}`).catch(() => undefined);
     const runner = this.ensureCapabilities();
     const turn = new ShortReasoningAudioTurn({
       getPrefs: () => this.prefs,
@@ -373,36 +385,48 @@ export class WakeRealtimeController {
       publish: (patch) => this.publish(patch as any),
     });
     this.shortAudioTurn = turn;
-    try {
-      await turn.start();
-      const ms = numberEnv('EXPO_PUBLIC_AGA_SHORT_UTTERANCE_CAPTURE_MS', 6500);
-      setTimeout(() => {
-        if (this.shortAudioTurn === turn) {
-          void turn.stopAndAnswer()
-            .catch((error: unknown) => {
-              const message = error instanceof Error ? error.message : String(error || 'short utterance failed');
-              this.publish({ error: message, speechStatus: 'short utterance failed' } as any);
-              return speakShortReply('I did not catch that clearly. Please say AGA and try again.', 'warm').catch(() => undefined);
-            })
-            .finally(() => {
-              if (this.shortAudioTurn === turn) this.shortAudioTurn = null;
-              void this.refresh();
-              void this.startWakeScout(`short_utterance_done:${reason}`);
-            });
-        }
-      }, ms);
-    } catch (error) {
-      this.shortAudioTurn = null;
-      const message = error instanceof Error ? error.message : String(error || 'short capture unavailable');
-      this.publish({ error: message, speechStatus: 'short capture unavailable' } as any);
-      await logEvent('short_utterance.capture_error', message).catch(() => undefined);
-      await this.startWakeScout(`short_capture_failed:${reason}`).catch(() => undefined);
+    this.shortAudioReason = reason;
+    await turn.start();
+    await logEvent('short_utterance.buffer_start', reason).catch(() => undefined);
+  }
+
+  private async finishBufferedShortAudio(reason: string) {
+    if (this.resolvingPostWake) return;
+    this.resolvingPostWake = true;
+    await this.stopPostWakeCommandWindow(`finish_short_audio:${reason}`).catch(() => undefined);
+    const turn = this.shortAudioTurn;
+    this.shortAudioTurn = null;
+    const startedBecause = this.shortAudioReason;
+    this.shortAudioReason = null;
+    if (!turn) {
+      await this.startWakeScout(`no_short_audio:${reason}`).catch(() => undefined);
+      this.resolvingPostWake = false;
+      return;
     }
+    try {
+      await logEvent('short_utterance.buffer_finish', `${reason}; started=${startedBecause || 'unknown'}`).catch(() => undefined);
+      await turn.stopAndAnswer();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error || 'short utterance failed');
+      this.publish({ error: message, speechStatus: 'short utterance failed' } as any);
+      await speakShortReply('I did not catch that clearly. Please say AGA and try again.', 'warm').catch(() => undefined);
+    } finally {
+      this.resolvingPostWake = false;
+      void this.refresh();
+      void this.startWakeScout(`short_utterance_done:${reason}`);
+    }
+  }
+
+  private async captureShortUtteranceAndReason(reason: string) {
+    // Compatibility path: this now finishes the buffered post-wake recording
+    // instead of starting a new recording after the user's words are already gone.
+    await this.finishBufferedShortAudio(reason);
   }
 
   private async cancelShortAudioTurn(reason: string) {
     const turn = this.shortAudioTurn;
     this.shortAudioTurn = null;
+    this.shortAudioReason = null;
     if (turn) await turn.cancel().catch(() => undefined);
     if (turn) await logEvent('short_utterance.cancel', reason).catch(() => undefined);
   }
@@ -458,7 +482,7 @@ export class WakeRealtimeController {
       onError: (message) => this.publish({ error: message, speechStatus: 'post-wake command error' } as any),
       onResult: (result) => {
         if (result.type === 'control') {
-          void this.handleKeywordControl(result.command);
+          void this.cancelShortAudioTurn('post_wake_control').finally(() => this.handleKeywordControl(result.command));
           return;
         }
         if (result.type === 'choice' && result.choice) {
@@ -470,7 +494,7 @@ export class WakeRealtimeController {
           return;
         }
         if (result.type === 'no_match') {
-          void this.captureShortUtteranceAndReason(result.reason);
+          void this.finishBufferedShortAudio(result.reason);
         }
       },
     });
@@ -482,7 +506,7 @@ export class WakeRealtimeController {
       const prompt = spokenChoicePrompt((this.snapshot as any).activeChoiceMenu);
       this.publish({ mode: 'listening', speechStatus: (this.snapshot as any).activeChoiceMenu ? prompt : 'post-wake command window open', voiceCapability: { ...(this.snapshot as any).voiceCapability, postWakeCommand: diagnostics } } as any);
       this.postWakeTimer = setTimeout(() => {
-        void this.stopPostWakeCommandWindow('timeout').then(() => this.captureShortUtteranceAndReason('post_wake_timeout'));
+        void this.finishBufferedShortAudio('post_wake_timeout');
       }, postWakeWindowMs());
       await logEvent('post_wake_command.start', source).catch(() => undefined);
       return true;

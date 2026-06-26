@@ -92,7 +92,10 @@ class DevPostWakeCommandEngine {
       mode: 'menu',
       provider: 'dev_keyword',
       keywords: postWakeKeywords(this.callbacks.getChoices?.() || []),
-      timeoutMs: postWakeWindowMs(),
+      // The controller owns the post-wake timeout because it also owns the
+      // buffered utterance recorder. Letting both layers timeout creates
+      // duplicate STT requests.
+      timeoutMs: 0,
       allowTextFallback: true,
     });
     root().__AGA_CHOOSE = (choice: string | number) => root().__AGA_SAY?.(`choose ${choice}`);
@@ -162,7 +165,10 @@ class SherpaPostWakeCommandEngine {
       mode: 'menu',
       provider: this.provider,
       keywords: postWakeKeywords(this.callbacks.getChoices?.() || []),
-      timeoutMs: postWakeWindowMs(),
+      // The controller owns the post-wake timeout because it also owns the
+      // buffered utterance recorder. Letting both layers timeout creates
+      // duplicate STT requests.
+      timeoutMs: 0,
       allowTextFallback: true,
     });
     this.callbacks.onStatus?.(`${this.provider} post-wake command window listening. ${choicePromptHint(this.callbacks.getChoices?.() || [])}`);
