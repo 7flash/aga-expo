@@ -30,6 +30,7 @@ import {
 } from '../remote/config';
 import { emitObservation, setObservabilityConfigGetter } from '../remote/observability';
 import { maybeApplyOtaUpdate, nativeUpdateMessage } from '../updates/updateManager';
+import { agaEngineDiagnostics, isOpenAiRealtimeBlocked } from '../aga/engine';
 
 const REALTIME_MODEL =
   process.env.EXPO_PUBLIC_AGA_REALTIME_MODEL ||
@@ -419,6 +420,14 @@ export class RealtimeSession {
 
   async start() {
     return measureAsync('realtime.start', async () => {
+      if (isOpenAiRealtimeBlocked()) {
+        const info = agaEngineDiagnostics();
+        const message = `OpenAI Realtime blocked by engine selector: ${JSON.stringify(info)}`;
+        this.publish({ ready: true, mode: 'offline', speechStatus: `OpenAI realtime blocked; selected engine is ${info.engine}`, error: null, voiceSummary: JSON.stringify(info), voiceCapability: info });
+        await logEvent('openai.realtime.blocked', message).catch(() => undefined);
+        measureMark('openai.realtime.blocked', info);
+        return;
+      }
       configureNotificationHandler();
       setObservabilityConfigGetter(getRemoteConfig);
       await initializeLocalStore();

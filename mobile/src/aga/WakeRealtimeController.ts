@@ -4,6 +4,7 @@ import { detectWake, removeWakePhrase, normalizeSpeech } from './text';
 import { measureAsync, measureMark } from '../observability/measure';
 import { RealtimeSession, type RealtimeSnapshot } from '../realtime/RealtimeSession';
 import { GeminiLiveSession } from '../gemini/GeminiLiveSession';
+import { agaEngineDiagnostics, getAgaEngine } from './engine';
 
 const DEFAULT_WAKE_IDLE_MS = 45_000;
 const DEFAULT_MEDIA_IDLE_MS = 5 * 60_000;
@@ -24,22 +25,7 @@ function envFlag(name: string, fallback: boolean) {
 }
 
 function selectedVoiceEngine() {
-  const raw = (
-    env('EXPO_PUBLIC_AGA_VOICE_ENGINE') ||
-    env('EXPO_PUBLIC_AGA_BRAIN_PROVIDER') ||
-    env('EXPO_PUBLIC_AGA_PROVIDER') ||
-    env('EXPO_PUBLIC_AGA_ENGINE') ||
-    ''
-  ).trim().toLowerCase();
-  if (raw.includes('gemini')) return 'gemini';
-  if (raw.includes('openai') || raw.includes('realtime')) return 'openai';
-  // Cost-safe default: if Gemini is configured and OpenAI is not, use Gemini.
-  if ((env('EXPO_PUBLIC_GEMINI_API_KEY') || env('EXPO_PUBLIC_GOOGLE_API_KEY')) && !env('EXPO_PUBLIC_OPENAI_API_KEY')) return 'gemini';
-  return 'openai';
-}
-
-function isGeminiEngine() {
-  return selectedVoiceEngine() === 'gemini';
+  return getAgaEngine();
 }
 
 type Listener = (snapshot: RealtimeSnapshot) => void;
@@ -101,6 +87,10 @@ export class WakeRealtimeController {
       this.started = true;
       await initializeLocalStore();
       this.prefs = await loadPreferences();
+      const engineInfo = agaEngineDiagnostics();
+      this.publish({ speechStatus: `wake scout booting → ${engineInfo.engine}`, voiceSummary: JSON.stringify(engineInfo), voiceCapability: engineInfo });
+      await logEvent('engine.selected', JSON.stringify(engineInfo)).catch(() => undefined);
+      measureMark('engine.selected', engineInfo);
       if (envFlag('EXPO_PUBLIC_AGA_CLEAR_TRANSIENT_ON_BOOT', true)) {
         await startNewConversationSession('app_boot', { clearTranscript: true, endActiveSession: true }).catch(() => undefined);
         await logEvent('conversation.session.boot_reset', 'cleared transient transcript/session/language on app start').catch(() => undefined);
@@ -311,10 +301,27 @@ export class WakeRealtimeController {
         return;
       }
 
-      await this.stopWakeScout('wake_accepted');
-      this.publish({ mode: 'awake', interim: '', speechStatus: isGeminiEngine() ? 'connecting gemini live' : 'connecting realtime', error: null });
+      if (envFlag('EXPO_PUBLIC_AGA_FRESH_CONTEXT_PER_WAKE', true)) {
+        await startNewConversationSession('wake_activation', {
+          clearTranscript: true,
+          endActiveSession: envFlag('EXPO_PUBLIC_AGA_END_SKILL_ON_NEW_WAKE', true),
+        }).catch(() => undefined);
+        this.prefs = await loadPreferences().catch(() => this.prefs);
+        await this.refresh().catch(() => undefined);
+      }
 
-      const session = isGeminiEngine()
+      await this.stopWakeScout('wake_accepted');
+      const selectedEngine = selectedVoiceEngine();
+      this.publish({
+        mode: 'awake',
+        interim: '',
+        speechStatus: selectedEngine === 'gemini' ? 'connecting gemini text turn engine' : selectedEngine === 'openai' ? 'connecting OpenAI realtime' : 'starting local engine',
+        error: null,
+        voiceSummary: JSON.stringify(agaEngineDiagnostics()),
+        voiceCapability: agaEngineDiagnostics(),
+      });
+
+      const session = selectedEngine === 'gemini'
         ? new GeminiLiveSession({ onTurnDone: () => { void this.sleepRealtime('gemini_turn_done'); } })
         : new RealtimeSession();
       this.realtime = session;
@@ -333,7 +340,7 @@ export class WakeRealtimeController {
         this.realtimeUnsubscribe?.();
         this.realtimeUnsubscribe = null;
         await session.stop().catch(() => undefined);
-        this.publish({ mode: 'recovering', speechStatus: `${selectedVoiceEngine()} start failed; returning to wake scout`, error: message });
+        this.publish({ mode: 'recovering', speechStatus: `${selectedVoiceEngine()} engine start failed; returning to wake scout`, error: message });
         await logEvent('realtime.start.error', message).catch(() => undefined);
         if (this.started) await this.startWakeScout('realtime_start_failed');
       }

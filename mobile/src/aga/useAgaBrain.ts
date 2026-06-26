@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CognitiveEngine, type AgaBrainSnapshot } from './CognitiveEngine';
 import { RealtimeSession, type RealtimeSnapshot } from '../realtime/RealtimeSession';
 import { WakeRealtimeController } from './WakeRealtimeController';
+import { agaEngineDiagnostics, getAgaEngine, isLocalEngine, shouldUseDirectOpenAiRealtime } from './engine';
 
 const INITIAL_SNAPSHOT: AgaBrainSnapshot = {
   ready: false,
@@ -29,12 +30,11 @@ function env(name: string) {
 function wantsWakeRuntime() {
   const runtime = env('EXPO_PUBLIC_AGA_RUNTIME').trim().toLowerCase();
   if (runtime === 'offline' || runtime === 'local' || runtime === 'cognitive') return false;
+  if (isLocalEngine()) return false;
   if (env('EXPO_PUBLIC_AGA_WAKE_SCOUT_ENABLED') === '0') return false;
 
-  // Wake scouting must not depend on OpenAI/WebRTC being configured.
-  // The local wake scout is the product shell; Realtime is only the engine
-  // that starts after wake. If a config/key is missing, the UI should still
-  // show mic activity and a useful error after wake instead of appearing dead.
+  // Wake scouting is the product shell. The selected post-wake engine can be
+  // Gemini, OpenAI, or a fallback; but the mic scout itself must still boot.
   return true;
 }
 
@@ -70,11 +70,20 @@ export function useAgaBrain() {
     // WebRTC feature detection is late or missing at module-load time.
     // RealtimeSession itself will report a transport error if duplex cannot
     // start, but the mic should not silently fall back to a mismatched local brain.
+    const selectedEngine = getAgaEngine();
     const useWakeRuntime = wantsWakeRuntime();
-    const directRealtime = process.env.EXPO_PUBLIC_AGA_REALTIME_DIRECT === '1';
+    const directRealtime = shouldUseDirectOpenAiRealtime();
+    // Critical: EXPO_PUBLIC_AGA_ENGINE=gemini must override old lab flags like
+    // EXPO_PUBLIC_AGA_REALTIME_DIRECT=1. Direct Realtime is OpenAI-only.
     const engine: BrainLike = useWakeRuntime
       ? (directRealtime ? new RealtimeSession() : new WakeRealtimeController())
       : new CognitiveEngine();
+    try { console.info?.('[aga:engine]', agaEngineDiagnostics()); } catch { /* ignore */ }
+    setSnapshot((prev) => ({
+      ...prev,
+      speechStatus: useWakeRuntime ? `starting wake scout → ${selectedEngine}` : 'starting local cognitive engine',
+      voiceSummary: JSON.stringify(agaEngineDiagnostics()),
+    }));
     engineRef.current = engine;
     const unsubscribe = engine.subscribe((next: any) => {
       setSnapshot(useWakeRuntime ? normalizeRealtimeSnapshot(next) : next);
