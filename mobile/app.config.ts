@@ -33,8 +33,8 @@ const config: ExpoConfig = {
   extra: {
     assistantWebUrl: process.env.EXPO_PUBLIC_ASSISTANT_WEB_URL ?? 'http://localhost:3000',
     wakeWord: process.env.EXPO_PUBLIC_AGA_WAKE_WORD ?? 'aga',
-    displayMode: process.env.EXPO_PUBLIC_AGA_DISPLAY_MODE ?? 'tactile_hologram',
-    visualEngine: process.env.EXPO_PUBLIC_AGA_VISUAL_ENGINE ?? 'tactile_gl',
+    displayMode: process.env.EXPO_PUBLIC_AGA_DISPLAY_MODE ?? 'tactile_relic',
+    visualEngine: process.env.EXPO_PUBLIC_AGA_VISUAL_ENGINE ?? 'relic_gl',
     pureDisplay: process.env.EXPO_PUBLIC_AGA_PURE_DISPLAY ?? '1',
     edgeWake: process.env.EXPO_PUBLIC_AGA_EDGE_WAKE ?? 'optional_native',
   },

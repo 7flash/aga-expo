@@ -1,7 +1,7 @@
 import React from 'react';
 import type { AgaMode } from '../aga/turn';
 import { AgaAvatarZen } from '../ui/AgaAvatarZen';
-import { TactileHologramAngel } from './TactileHologramAngel';
+import { TactileRelicAngel } from './TactileRelicAngel';
 
 type Props = {
   mode: AgaMode;
@@ -9,41 +9,37 @@ type Props = {
   compact?: boolean;
   size?: number;
   wear?: number;
+  interactionPulse?: number;
 };
 
-function displayMode() {
-  return String(process.env?.EXPO_PUBLIC_AGA_DISPLAY_MODE ?? '').trim().toLowerCase();
-}
-
-function visualEngine() {
-  return String(process.env?.EXPO_PUBLIC_AGA_VISUAL_ENGINE ?? '').trim().toLowerCase();
+function env(name: string) {
+  return String(process.env?.[name] ?? '').trim().toLowerCase();
 }
 
 function envFlag(name: string, fallback = false) {
-  const raw = String(process.env?.[name] ?? '').trim().toLowerCase();
+  const raw = env(name);
   if (!raw) return fallback;
   return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
 }
 
 /**
- * Single avatar surface.
+ * Single avatar surface selector.
  *
- * Tactile hologram builds use a GPU shader that keeps breathing/halo/neural
- * motion off the JS thread. The SVG Zen avatar remains the compatibility
- * fallback for web harnesses, old APKs, or builds without expo-gl.
+ * `tactile_relic` is the behind-glass production aesthetic: GPU-driven,
+ * physical/mechanical, worn, neuromorphic, and display-only. The older SVG Zen
+ * avatar and the earlier hologram shader remain compatibility fallbacks.
  */
 export function AngelVisual(props: Props) {
-  const mode = displayMode();
-  const engine = visualEngine();
-  const tactile = mode === 'tactile_hologram' || engine === 'tactile_gl' || engine === 'gl';
-  if (tactile && !envFlag('EXPO_PUBLIC_AGA_FORCE_SVG_AVATAR', false)) {
-    return (
-      <TactileHologramAngel
-        {...props}
-        mirror={envFlag('EXPO_PUBLIC_AGA_HOLOGRAM_MIRROR', false)}
-        lowPower={envFlag('EXPO_PUBLIC_AGA_LOW_POWER_VISUALS', false)}
-      />
-    );
+  const displayMode = env('EXPO_PUBLIC_AGA_DISPLAY_MODE');
+  const engine = env('EXPO_PUBLIC_AGA_VISUAL_ENGINE');
+  const forceSvg = envFlag('EXPO_PUBLIC_AGA_FORCE_SVG_AVATAR', false);
+  const mirror = envFlag('EXPO_PUBLIC_AGA_HOLOGRAM_MIRROR', false);
+  const lowPower = envFlag('EXPO_PUBLIC_AGA_LOW_POWER_VISUALS', false);
+
+  if (!forceSvg && (displayMode === 'tactile_relic' || engine === 'tactile_relic' || engine === 'relic_gl')) {
+    return <TactileRelicAngel {...props} mirror={mirror} lowPower={lowPower} />;
   }
+
+
   return <AgaAvatarZen {...props} />;
 }
