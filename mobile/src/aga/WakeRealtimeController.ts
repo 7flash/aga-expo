@@ -43,6 +43,19 @@ function canUseWakelessGeminiDuplex() {
   return duplexish && envFlag('EXPO_PUBLIC_AGA_GEMINI_WAKELESS_DUPLEX', true);
 }
 
+function followupWindowMs() {
+  return numberEnv('EXPO_PUBLIC_AGA_WAKE_FOLLOWUP_WINDOW_MS', 15000);
+}
+
+function naturalFollowupLooksActionable(text: string) {
+  const clean = normalizeSpeech(text);
+  if (!clean || clean.length < 4) return false;
+  // Avoid turning room noise / one-word fillers into cloud turns, but accept
+  // natural commands right after AGA has said, “What do you need?”
+  if (/^(uh|um|hmm|ha|haha|okay|ok|yes|no|yeah|yep|nope)$/i.test(clean)) return false;
+  return /\b(want|need|can you|could you|please|play|open|change|switch|start|stop|pause|resume|tell|show|help|remember|forget|menu|music|youtube|meditation|hypnosis|breathe|breathing|remind)\b/i.test(clean) || clean.split(/\s+/).length >= 3;
+}
+
 type Listener = (snapshot: RealtimeSnapshot) => void;
 
 type VoiceSessionLike = {
@@ -79,6 +92,8 @@ export class WakeRealtimeController {
   private wakeStatusLogAt = 0;
   private wakeEvents = { partials: 0, finals: 0, errors: 0, statuses: 0, starts: 0 };
   private lastWakeDiagnostics: any = null;
+  private followupAcceptUntil = 0;
+  private lastWakeOnlyAt = 0;
 
   private snapshot: RealtimeSnapshot = {
     ready: false,
@@ -301,6 +316,23 @@ export class WakeRealtimeController {
     const wake = detectWake(text, wakePhrase);
     measureMark('wakeScout.final', { woke: wake.woke, kind: wake.kind, match: wake.match, source, chars: text.length, text: text.slice(0, 120) });
     if (!wake.woke) {
+      const inFollowupWindow = Date.now() < this.followupAcceptUntil;
+      if (source === 'final' && inFollowupWindow && naturalFollowupLooksActionable(text)) {
+        this.wakeActivationInFlight = true;
+        try {
+          this.publish({ interim: '', speechStatus: 'follow-up heard — connecting' });
+          await logEvent('wake.followup.accepted', text.slice(0, 220)).catch(() => undefined);
+          await this.activateRealtime(text);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error || 'follow-up activation failed');
+          this.publish({ mode: 'recovering', speechStatus: 'follow-up failed; rearming mic', error: message });
+          await logEvent('wake.followup.error', message).catch(() => undefined);
+          if (this.started) await this.startWakeScout('followup_activate_error').catch(() => undefined);
+        } finally {
+          setTimeout(() => { this.wakeActivationInFlight = false; }, 1000);
+        }
+        return;
+      }
       if (source === 'final') this.publish({ speechStatus: `wake scout heard “${text.slice(0, 72)}” — waiting for AGA / hey AGA` });
       return;
     }
@@ -312,7 +344,11 @@ export class WakeRealtimeController {
 
     try {
       const command = removeWakePhrase(text, wakePhrase).trim();
-      this.publish({ interim: '', speechStatus: 'wake detected — connecting' });
+      if (!command) {
+        this.lastWakeOnlyAt = Date.now();
+        this.followupAcceptUntil = Date.now() + followupWindowMs();
+      }
+      this.publish({ interim: '', speechStatus: command ? 'wake detected — connecting' : `wake detected — listening for request (${Math.round(followupWindowMs() / 1000)}s)` });
       await logEvent('wake.accepted', `${source}/${wake.kind}: ${text.slice(0, 180)}`);
       await this.activateRealtime(command || 'The user said AGA. Greet them briefly and ask what they need.');
     } catch (error) {
@@ -424,6 +460,10 @@ export class WakeRealtimeController {
       await logEvent('realtime.sleep', reason);
       await this.refresh();
       if (this.started) await this.startWakeScout(reason);
+      if (Date.now() < this.followupAcceptUntil) {
+        const left = Math.max(1, Math.ceil((this.followupAcceptUntil - Date.now()) / 1000));
+        this.publish({ speechStatus: `wake scout listening for your request (${left}s)`, mode: 'listening' });
+      }
     }, { reason });
   }
 

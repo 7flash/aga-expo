@@ -21,6 +21,11 @@ function env(name: string) {
   return process.env?.[name] ?? '';
 }
 
+function safeNumber(value: any, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
 function numberEnv(name: string, fallback: number) {
   const raw = Number(env(name));
   return Number.isFinite(raw) && raw >= 0 ? raw : fallback;
@@ -51,12 +56,12 @@ export function readGeminiBudget(): GeminiBudget {
     if (!parsed || parsed.date !== fallback.date) return fallback;
     return {
       date: fallback.date,
-      turns: Number(parsed.turns) || 0,
-      inputChars: Number(parsed.inputChars) || 0,
-      outputChars: Number(parsed.outputChars) || 0,
-      liveTurns: Number(parsed.liveTurns) || 0,
-      liveAudioSeconds: Number(parsed.liveAudioSeconds) || 0,
-      startedAt: Number(parsed.startedAt) || null,
+      turns: safeNumber(parsed.turns),
+      inputChars: safeNumber(parsed.inputChars),
+      outputChars: safeNumber(parsed.outputChars),
+      liveTurns: safeNumber(parsed.liveTurns),
+      liveAudioSeconds: safeNumber(parsed.liveAudioSeconds),
+      startedAt: safeNumber(parsed.startedAt) || null,
     };
   } catch {
     return fallback;
@@ -64,7 +69,15 @@ export function readGeminiBudget(): GeminiBudget {
 }
 
 export function writeGeminiBudget(next: GeminiBudget) {
-  storageSet('aga.gemini.dailyBudget.v2', JSON.stringify(next));
+  storageSet('aga.gemini.dailyBudget.v2', JSON.stringify({
+    ...next,
+    turns: safeNumber(next.turns),
+    inputChars: safeNumber(next.inputChars),
+    outputChars: safeNumber(next.outputChars),
+    liveTurns: safeNumber(next.liveTurns),
+    liveAudioSeconds: safeNumber(next.liveAudioSeconds),
+    startedAt: safeNumber(next.startedAt) || null,
+  }));
 }
 
 export function geminiBudgetLimits() {
@@ -136,7 +149,21 @@ export function recordGeminiTurn(inputChars: number, outputText: string, transpo
 export function addLiveAudioSeconds(seconds: number) {
   if (!Number.isFinite(seconds) || seconds <= 0) return readGeminiBudget();
   const budget = readGeminiBudget();
-  const next = { ...budget, liveAudioSeconds: budget.liveAudioSeconds + seconds };
+  const next = { ...budget, liveAudioSeconds: safeNumber(budget.liveAudioSeconds) + seconds };
+  writeGeminiBudget(next);
+  return next;
+}
+
+export function resetGeminiBudgetForToday() {
+  const next: GeminiBudget = {
+    date: todayStamp(),
+    turns: 0,
+    inputChars: 0,
+    outputChars: 0,
+    liveTurns: 0,
+    liveAudioSeconds: 0,
+    startedAt: null,
+  };
   writeGeminiBudget(next);
   return next;
 }

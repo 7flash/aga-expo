@@ -29,6 +29,7 @@ import {
   geminiBudgetSummary,
   readGeminiBudget,
   recordGeminiTurn,
+  resetGeminiBudgetForToday,
 } from './geminiCost';
 
 function env(name: string) {
@@ -473,6 +474,12 @@ export class GeminiLiveSession {
       await this.sayLocal(this.geminiBudgetStatus(), 'gemini_cost_status');
       return true;
     }
+    if (/\b(reset|clear)\b.*\b(gemini|budget|cost)\b/i.test(text) || /\b(gemini|budget|cost)\b.*\b(reset|clear)\b/i.test(text)) {
+      resetGeminiBudgetForToday();
+      this.publish({ geminiCost: geminiBudgetSnapshot(this.currentTransportLabel()) } as any);
+      await this.sayLocal('Gemini budget display reset for today.', 'gemini_budget_reset');
+      return true;
+    }
     let output = '';
     try { output = await this.capabilityRunner().run(intent.tool, intent.args ?? {}); }
     catch (error) { output = error instanceof Error ? error.message : 'That control failed.'; }
@@ -518,7 +525,7 @@ export class GeminiLiveSession {
     // Wake-only should not spend a paid model turn. The app can acknowledge
     // locally, rearm the wake scout, and wait for the real command.
     if (isWakeOnlyPrompt(clean)) {
-      await this.sayLocal("I'm here — soft halo online. What do you need?", 'wake_only');
+      await this.sayLocal("I'm here — soft halo online. What do you need? You can just say the request now.", 'wake_only');
       return;
     }
 
