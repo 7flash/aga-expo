@@ -1,127 +1,125 @@
-import { GuidedAudioPrefetchQueue, type GuidedAudioSegment } from '../voice/guidedAudioPrefetch';
-import { logEvent } from '../db/localStore';
+import { addMemory, logEvent } from '../db/localStore';
+import { speakText, stopTts } from '../voice/tts';
+import { buildGuidedPhaseScript, guidedKindFromText, type GuidedPhase, type GuidedPhaseKind } from './guidedPhaseScripts';
+import { GuidedAudioPrefetchQueue } from './guidedAudioPrefetch';
 
-export type GuidedPhase = 'arrival' | 'induction' | 'deepening' | 'suggestion' | 'integration' | 'emergence' | 'reflection' | 'complete';
+type Listener = (state: GuidedRunnerSnapshot) => void;
 
-export type DeterministicGuidedScript = {
-  id: string;
-  label: string;
-  kind: 'breathing' | 'self_hypnosis' | 'conflict_navigation' | 'meditation' | 'body_scan' | 'bedtime' | 'focus' | 'general';
-  safety: string[];
-  segments: Array<GuidedAudioSegment & { phase: GuidedPhase; awaitUser?: boolean; grounding?: boolean }>;
-};
-
-export type DeterministicGuidedState = {
-  scriptId: string;
-  index: number;
-  phase: GuidedPhase;
+export type GuidedRunnerSnapshot = {
+  active: boolean;
+  kind: GuidedPhaseKind | null;
+  goal: string | null;
+  phaseIndex: number;
+  phaseLabel: string | null;
   paused: boolean;
-  startedAt: string;
-  updatedAt: string;
-  completedAt?: string;
+  waitingForUser: boolean;
+  startedAt: string | null;
 };
 
-type RunnerCallbacks = {
-  speak: (text: string, meta: { phase: GuidedPhase; audio?: unknown; segmentId: string }) => Promise<void> | void;
-  onPause?: (ms: number, phase: GuidedPhase) => Promise<void> | void;
-  onAwaitUser?: (phase: GuidedPhase) => Promise<void> | void;
-  onComplete?: (state: DeterministicGuidedState) => Promise<void> | void;
-  saveState?: (state: DeterministicGuidedState) => Promise<void> | void;
-};
+function delay(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}
 
-function now() { return new Date().toISOString(); }
-
-/**
- * Strict local pacing engine for trance-critical experiences.
- *
- * The cloud can author/adapt the script before the session begins, but timing,
- * pauses, grounding cues, and progression are deterministic and local.
- */
 export class DeterministicGuidedRunner {
-  private script: DeterministicGuidedScript;
-  private callbacks: RunnerCallbacks;
-  private prefetch: GuidedAudioPrefetchQueue;
-  private timer: ReturnType<typeof setTimeout> | null = null;
-  private state: DeterministicGuidedState;
+  private listeners = new Set<Listener>();
+  private phases: GuidedPhase[] = [];
+  private snapshot: GuidedRunnerSnapshot = { active: false, kind: null, goal: null, phaseIndex: 0, phaseLabel: null, paused: false, waitingForUser: false, startedAt: null };
+  private stopped = false;
+  private prefetch = new GuidedAudioPrefetchQueue();
 
-  constructor(script: DeterministicGuidedScript, callbacks: RunnerCallbacks, prefetch = new GuidedAudioPrefetchQueue()) {
-    this.script = script;
-    this.callbacks = callbacks;
-    this.prefetch = prefetch;
-    this.state = { scriptId: script.id, index: 0, phase: script.segments[0]?.phase || 'arrival', paused: false, startedAt: now(), updatedAt: now() };
+  subscribe(listener: Listener) {
+    this.listeners.add(listener);
+    listener(this.snapshot);
+    return () => this.listeners.delete(listener);
   }
 
-  getState() { return { ...this.state }; }
-
-  async start(index = 0) {
-    this.state.index = Math.max(0, Math.min(index, this.script.segments.length - 1));
-    this.state.paused = false;
-    await logEvent('guided.deterministic.start', `${this.script.id}@${this.state.index}`).catch(() => undefined);
-    await this.step();
+  private publish(patch: Partial<GuidedRunnerSnapshot>) {
+    this.snapshot = { ...this.snapshot, ...patch };
+    for (const listener of this.listeners) listener(this.snapshot);
   }
 
-  async pause() {
-    this.clearTimer();
-    this.state.paused = true;
-    this.state.updatedAt = now();
-    await this.callbacks.saveState?.(this.getState());
+  canStartFromText(text: string) {
+    return !!guidedKindFromText(text);
   }
 
-  async resume() {
-    if (!this.state.paused) return;
-    this.state.paused = false;
-    this.state.updatedAt = now();
-    await this.step();
+  async start(kindOrText: GuidedPhaseKind | string, goal?: string) {
+    const kind = (['box_breathing', 'hypnosis', 'conflict', 'meditation'].includes(kindOrText) ? kindOrText : guidedKindFromText(kindOrText)) as GuidedPhaseKind | null;
+    if (!kind) return false;
+    await this.stop('restart');
+    this.stopped = false;
+    this.phases = buildGuidedPhaseScript(kind, goal);
+    this.publish({ active: true, kind, goal: goal || null, phaseIndex: 0, phaseLabel: this.phases[0]?.label || null, paused: false, waitingForUser: false, startedAt: new Date().toISOString() });
+    await logEvent('guided.deterministic.start', `${kind}${goal ? ` goal=${goal}` : ''}`).catch(() => undefined);
+    void this.run();
+    return true;
   }
 
-  async next() {
-    this.clearTimer();
-    this.state.index += 1;
-    this.state.updatedAt = now();
-    await this.step();
-  }
-
-  async stop() {
-    this.clearTimer();
-    this.prefetch.reset();
-    this.state.completedAt = now();
-    this.state.phase = 'complete';
-    this.state.updatedAt = now();
-    await this.callbacks.saveState?.(this.getState());
-  }
-
-  private async step() {
-    if (this.state.paused) return;
-    const segment = this.script.segments[this.state.index];
-    if (!segment) {
-      this.state.phase = 'complete';
-      this.state.completedAt = now();
-      this.state.updatedAt = now();
-      await this.callbacks.saveState?.(this.getState());
-      await this.callbacks.onComplete?.(this.getState());
-      return;
+  async control(command: 'pause' | 'resume' | 'deeper' | 'skip' | 'repeat' | 'end') {
+    if (!this.snapshot.active) return 'No guided session is active.';
+    if (command === 'end') {
+      await this.stop('user_end');
+      await speakText('Session ended. Feel your feet, notice the room, and take one normal breath.', { emotion: 'guided', provider: 'auto' });
+      return 'Session ended.';
     }
-
-    this.state.phase = segment.phase;
-    this.state.updatedAt = now();
-    this.prefetch.warm(this.script.segments, this.state.index);
-    const audio = await this.prefetch.get(segment);
-    await this.callbacks.speak(segment.text, { phase: segment.phase, audio, segmentId: segment.id });
-    await this.callbacks.saveState?.(this.getState());
-
-    if (segment.awaitUser) {
-      await this.callbacks.onAwaitUser?.(segment.phase);
-      return;
+    if (command === 'pause') {
+      this.publish({ paused: true });
+      await stopTts();
+      return 'Paused.';
     }
-
-    const pause = Math.max(0, segment.pauseAfterMs || 0);
-    if (pause) await this.callbacks.onPause?.(pause, segment.phase);
-    this.clearTimer();
-    this.timer = setTimeout(() => { void this.next(); }, pause);
+    if (command === 'resume') {
+      this.publish({ paused: false, waitingForUser: false });
+      void this.run(this.snapshot.phaseIndex);
+      return 'Resuming.';
+    }
+    if (command === 'skip') {
+      this.publish({ phaseIndex: Math.min(this.phases.length - 1, this.snapshot.phaseIndex + 1), waitingForUser: false });
+      void this.run(this.snapshot.phaseIndex);
+      return 'Skipping.';
+    }
+    if (command === 'repeat') {
+      this.publish({ waitingForUser: false });
+      void this.run(this.snapshot.phaseIndex);
+      return 'Repeating.';
+    }
+    if (command === 'deeper') {
+      await speakText('Good. Slower now. Let the body be heavier, while the observing part stays clear and safe.', { emotion: 'hypnosis', provider: 'auto' });
+      return 'Going deeper.';
+    }
+    return 'Done.';
   }
 
-  private clearTimer() {
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = null;
+  async acceptUserResponse(text: string) {
+    if (!this.snapshot.waitingForUser) return false;
+    await addMemory(`Guided ${this.snapshot.kind} response: ${String(text || '').slice(0, 500)}`).catch(() => undefined);
+    this.publish({ waitingForUser: false, phaseIndex: Math.min(this.phases.length - 1, this.snapshot.phaseIndex + 1) });
+    void this.run(this.snapshot.phaseIndex);
+    return true;
+  }
+
+  async stop(reason = 'stop') {
+    this.stopped = true;
+    await stopTts().catch(() => undefined);
+    if (this.snapshot.active) await logEvent('guided.deterministic.stop', reason).catch(() => undefined);
+    this.publish({ active: false, kind: null, goal: null, paused: false, waitingForUser: false, phaseLabel: null });
+  }
+
+  private async run(startIndex = this.snapshot.phaseIndex) {
+    for (let i = startIndex; i < this.phases.length; i += 1) {
+      if (this.stopped || !this.snapshot.active) return;
+      while (this.snapshot.paused) await delay(250);
+      const phase = this.phases[i];
+      this.publish({ phaseIndex: i, phaseLabel: phase.label, waitingForUser: false });
+      this.prefetch.warm(this.phases, i + 1);
+      await this.prefetch.speak(phase);
+      if (phase.waitForUser) {
+        this.publish({ waitingForUser: true });
+        return;
+      }
+      await delay(phase.pauseMs);
+    }
+    const summary = `Completed ${this.snapshot.kind}${this.snapshot.goal ? ` for ${this.snapshot.goal}` : ''}.`;
+    await addMemory(`Guided session reflection: ${summary}`).catch(() => undefined);
+    await logEvent('guided.deterministic.complete', summary).catch(() => undefined);
+    this.publish({ active: false, kind: null, goal: null, paused: false, waitingForUser: false, phaseLabel: null });
   }
 }

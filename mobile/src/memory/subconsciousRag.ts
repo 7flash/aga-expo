@@ -1,22 +1,30 @@
-import { subconsciousContextBlock, writeSubconsciousFact, type SubconsciousFact } from './subconsciousStore';
-import { getUserProfile } from './userProfile';
+import { searchMemories, addMemory, logEvent } from '../db/localStore';
 
-function profileToFacts(profile: Awaited<ReturnType<typeof getUserProfile>>): SubconsciousFact[] {
-  const facts: SubconsciousFact[] = [];
-  for (const technique of profile.effectiveTechniques || []) facts.push({ kind: 'procedural', text: `Helpful technique: ${technique}`, source: 'reflection', weight: 0.8 });
-  for (const pattern of profile.emotionalPatterns || []) facts.push({ kind: 'affective', text: `Emotional pattern: ${pattern}`, source: 'reflection', weight: 0.75 });
-  for (const ritual of profile.rituals || []) facts.push({ kind: 'routine', text: `Ritual: ${ritual}`, source: 'routine', weight: 0.7 });
-  return facts;
+export type SubconsciousContext = {
+  query: string;
+  memories: string[];
+  promptBlock: string;
+};
+
+function keywords(text: string) {
+  return String(text || '').toLowerCase().split(/[^a-z0-9а-яё]+/i).filter((w) => w.length > 3).slice(0, 8);
 }
 
-export async function backfillSubconsciousFromProfile() {
-  const profile = await getUserProfile();
-  const facts = profileToFacts(profile);
-  for (const fact of facts) await writeSubconsciousFact(fact);
-  return facts.length;
+export async function subconsciousRecall(query: string, limit = 5): Promise<SubconsciousContext> {
+  const clean = String(query || '').trim();
+  const terms = keywords(clean);
+  const found = await searchMemories(terms.join(' ') || clean || undefined, limit).catch(() => []);
+  const memories = found.map((m: any) => String(m.text || '')).filter(Boolean).slice(0, limit);
+  const promptBlock = memories.length
+    ? ['Relevant subconscious memory. Use only if helpful:', ...memories.map((m) => `- ${m}`)].join('\n')
+    : 'No relevant subconscious memory found.';
+  return { query: clean, memories, promptBlock };
 }
 
-export async function buildWakeRagContext(initialUserText: string) {
-  const context = await subconsciousContextBlock(initialUserText, 5);
-  return context ? `${context}\nUse this only if relevant. Do not mention retrieval or memory mechanics.` : '';
+export async function consolidateObservedPattern(note: string) {
+  const clean = String(note || '').trim();
+  if (!clean) return null;
+  await addMemory(`Observed pattern: ${clean}`);
+  await logEvent('memory.subconscious.pattern', clean).catch(() => undefined);
+  return clean;
 }

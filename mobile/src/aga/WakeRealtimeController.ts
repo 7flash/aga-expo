@@ -1,68 +1,15 @@
-import { NativeSpeechLoop } from '../voice/nativeSpeech';
-import { loadPreferences, initializeLocalStore, listMessages, listPendingReminders, logEvent, startNewConversationSession, type Preferences } from '../db/localStore';
-import { detectWake, removeWakePhrase, normalizeSpeech } from './text';
+import { createWakeEngine, type WakeEngine, type WakeEngineEvent } from '../voice/wakeEngine';
+import { speakShortReply, stopSpeaking } from '../voice/speechOut';
+import { classifyTurnForVoicePath } from '../voice/liveEscalation';
+import { DeterministicGuidedRunner } from '../sessions/deterministicGuidedRunner';
+import { guidedKindFromText } from '../sessions/guidedPhaseScripts';
+import { subconsciousRecall } from '../memory/subconsciousRag';
+import { initializeLocalStore, listMessages, listPendingReminders, loadPreferences, logEvent, startNewConversationSession, type Preferences } from '../db/localStore';
+import { removeWakePhrase, normalizeSpeech } from './text';
+import { agaEngineDiagnostics, getAgaEngine } from './engine';
 import { measureAsync, measureMark } from '../observability/measure';
 import type { RealtimeSnapshot } from '../realtime/RealtimeSession';
-import { agaEngineDiagnostics, getAgaEngine } from './engine';
-
-const DEFAULT_WAKE_IDLE_MS = 45_000;
-const DEFAULT_MEDIA_IDLE_MS = 5 * 60_000;
-
-function env(name: string) {
-  return process.env?.[name] ?? '';
-}
-
-function numberEnv(name: string, fallback: number) {
-  const raw = Number(env(name));
-  return Number.isFinite(raw) && raw > 0 ? raw : fallback;
-}
-
-function envFlag(name: string, fallback: boolean) {
-  const raw = env(name).trim().toLowerCase();
-  if (!raw) return fallback;
-  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
-}
-
-function selectedVoiceEngine() {
-  return getAgaEngine();
-}
-
-function geminiTransportPreference() {
-  return (
-    env('EXPO_PUBLIC_AGA_GEMINI_TRANSPORT') ||
-    env('EXPO_PUBLIC_GEMINI_TRANSPORT') ||
-    ''
-  ).trim().toLowerCase();
-}
-
-function canUseWakelessGeminiDuplex() {
-  const engine = selectedVoiceEngine();
-  if (engine !== 'gemini') return false;
-  const transport = geminiTransportPreference();
-  const duplexish = transport === 'duplex' || transport === 'auto' || envFlag('EXPO_PUBLIC_AGA_GEMINI_DUPLEX', false);
-  return duplexish && envFlag('EXPO_PUBLIC_AGA_GEMINI_WAKELESS_DUPLEX', true);
-}
-
-function followupWindowMs() {
-  return numberEnv('EXPO_PUBLIC_AGA_WAKE_FOLLOWUP_WINDOW_MS', 15000);
-}
-
-function naturalFollowupLooksActionable(text: string) {
-  const clean = normalizeSpeech(text);
-  if (!clean || clean.length < 4) return false;
-  // Avoid turning room noise / one-word fillers into cloud turns, but accept
-  // natural commands right after AGA has said, “What do you need?”
-  if (/^(uh|um|hmm|ha|haha|okay|ok|yes|no|yeah|yep|nope)$/i.test(clean)) return false;
-  return /\b(want|need|can you|could you|please|play|open|change|switch|start|stop|pause|resume|tell|show|help|remember|forget|menu|music|youtube|meditation|hypnosis|breathe|breathing|remind)\b/i.test(clean) || clean.split(/\s+/).length >= 3;
-}
-
-
-function mediaFollowupLooksActionable(text: string) {
-  const clean = normalizeSpeech(text);
-  if (!clean || clean.length < 3) return false;
-  if (/^(uh|um|hmm|ha|haha|okay|ok|yes|no|yeah|yep|nope)$/i.test(clean)) return false;
-  return /\b(stop|pause|resume|continue|play|music|video|youtube|song|player|volume|louder|softer|quieter|mute|unmute|change|another|different|next|skip|close|dismiss|speak|talk|tell|say|explain|on top)\b/i.test(clean);
-}
+import type { AgaMode } from './turn';
 
 type Listener = (snapshot: RealtimeSnapshot) => void;
 
@@ -76,32 +23,50 @@ type VoiceSessionLike = {
   rearmMic?(): void;
 };
 
+function env(name: string) {
+  return process.env?.[name] ?? '';
+}
+
+function envFlag(name: string, fallback: boolean) {
+  const raw = env(name).trim().toLowerCase();
+  if (!raw) return fallback;
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+}
+
+function numberEnv(name: string, fallback: number) {
+  const n = Number(env(name));
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function selectedEngine() {
+  return getAgaEngine();
+}
+
+function postWakeReply() {
+  return env('EXPO_PUBLIC_AGA_POST_WAKE_REPLY') || 'Yes?';
+}
+
+function stripWake(text: string) {
+  return removeWakePhrase(normalizeSpeech(text), env('EXPO_PUBLIC_AGA_WAKE_WORD') || 'aga').trim();
+}
+
 /**
- * Product voice lifecycle:
- * 1. Always-on local wake scout listens only for “AGA” / configured wake phrase.
- * 2. After wake, start the selected post-wake engine: Gemini turn mode or OpenAI Realtime.
- * 3. Keep it open while the user is talking, choosing menus, or controlling media.
- * 4. When idle / turn complete, close the active engine and return to local wake scout.
+ * Appliance runtime controller.
  *
- * This preserves privacy/cost/battery and prevents the wake scout from billing cloud models until summoned.
+ * Always-on mic: Porcupine keyword indexes only (aga/stop/pause by default).
+ * Post-wake: short TTS for simple confirmations; deterministic runner for guided
+ * sessions; OpenAI/Gemini live session only when interaction truly needs it.
  */
 export class WakeRealtimeController {
   private listeners = new Set<Listener>();
-  private wakeLoop: NativeSpeechLoop | null = null;
+  private wakeEngine: WakeEngine | null = null;
   private realtime: VoiceSessionLike | null = null;
   private realtimeUnsubscribe: (() => void) | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private prefs: Preferences | null = null;
   private started = false;
-  private wakeActivationInFlight = false;
-  private lastWakeFingerprint = '';
-  private wakeRetryTimer: ReturnType<typeof setTimeout> | null = null;
-  private wakeHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
-  private wakeStatusLogAt = 0;
-  private wakeEvents = { partials: 0, finals: 0, errors: 0, statuses: 0, starts: 0 };
-  private lastWakeDiagnostics: any = null;
-  private followupAcceptUntil = 0;
-  private lastWakeOnlyAt = 0;
+  private guided = new DeterministicGuidedRunner();
+  private guidedUnsub: (() => void) | null = null;
 
   private snapshot: RealtimeSnapshot = {
     ready: false,
@@ -112,11 +77,11 @@ export class WakeRealtimeController {
     activeMedia: null,
     mediaCommand: null,
     audioLevel: 0,
-    speechStatus: 'starting wake scout',
+    speechStatus: 'starting Porcupine wake scout',
     error: null,
     activeChoiceMenu: null,
     sessionLabel: null,
-  };
+  } as RealtimeSnapshot;
 
   subscribe(listener: Listener) {
     this.listeners.add(listener);
@@ -125,410 +90,245 @@ export class WakeRealtimeController {
   }
 
   private publish(patch: Partial<RealtimeSnapshot>) {
-    this.snapshot = { ...this.snapshot, ...patch };
+    this.snapshot = { ...this.snapshot, ...patch } as RealtimeSnapshot;
     for (const listener of this.listeners) listener(this.snapshot);
   }
 
+  private setMode(mode: AgaMode) {
+    this.publish({ mode });
+  }
+
   async start() {
-    return measureAsync('wakeRealtime.start', async () => {
+    return measureAsync('wakeRealtime.porcupine.start', async () => {
       if (this.started) return;
       this.started = true;
       await initializeLocalStore();
       this.prefs = await loadPreferences();
-      const engineInfo = agaEngineDiagnostics();
-      this.publish({ speechStatus: `wake scout booting → ${engineInfo.engine}`, voiceSummary: JSON.stringify(engineInfo), voiceCapability: engineInfo });
-      await logEvent('engine.selected', JSON.stringify(engineInfo)).catch(() => undefined);
-      measureMark('engine.selected', engineInfo);
       if (envFlag('EXPO_PUBLIC_AGA_CLEAR_TRANSIENT_ON_BOOT', true)) {
-        await startNewConversationSession('app_boot', { clearTranscript: true, endActiveSession: true }).catch(() => undefined);
-        await logEvent('conversation.session.boot_reset', 'cleared transient transcript/session/language on app start').catch(() => undefined);
-        this.prefs = await loadPreferences();
+        await startNewConversationSession('app_boot', { clearTranscript: true, endActiveSession: false }).catch(() => undefined);
       }
       await this.refresh();
-      await this.startWakeScout('initial');
-    });
-  }
-
-  private async refresh() {
-    const [messages, reminders] = await Promise.all([listMessages(16), listPendingReminders(6)]);
-    this.publish({ messages, reminders, sessionLabel: this.prefs?.activeSession?.label ?? null });
-  }
-
-
-  private clearWakeHeartbeat() {
-    if (this.wakeHeartbeatTimer) clearInterval(this.wakeHeartbeatTimer);
-    this.wakeHeartbeatTimer = null;
-  }
-
-  private describeWakeLoop(loop: NativeSpeechLoop | null) {
-    if (!loop || typeof (loop as any).getDiagnostics !== 'function') return 'wake scout: starting';
-    const diagnostics = (loop as any).getDiagnostics?.() ?? {};
-    this.lastWakeDiagnostics = diagnostics;
-    const provider = diagnostics.provider || 'unknown';
-    const listening = diagnostics.listening ? 'listening' : diagnostics.restartPending ? 'rearming' : 'idle';
-    const permission = diagnostics.permission ? ` permission:${diagnostics.permission}` : '';
-    const lastError = diagnostics.lastError ? ` error:${String(diagnostics.lastError).slice(0, 80)}` : '';
-    const lastFinal = diagnostics.lastFinal ? ` heard:${String(diagnostics.lastFinal).slice(0, 60)}` : '';
-    return `wake scout ${provider}:${listening}${permission} p${this.wakeEvents.partials}/f${this.wakeEvents.finals}/r${diagnostics.restarts ?? 0}${lastFinal}${lastError}`;
-  }
-
-  private startWakeHeartbeat(loop: NativeSpeechLoop, reason: string) {
-    this.clearWakeHeartbeat();
-    this.wakeHeartbeatTimer = setInterval(() => {
-      if (!this.started || this.realtime || this.wakeLoop !== loop) return;
-      const summary = this.describeWakeLoop(loop);
-      this.publish({ speechStatus: summary, voiceSummary: summary, voiceCapability: this.lastWakeDiagnostics });
-      const now = Date.now();
-      if (now - this.wakeStatusLogAt > 12_000) {
-        this.wakeStatusLogAt = now;
-        void logEvent('wake.heartbeat', summary).catch(() => undefined);
-      }
-    }, numberEnv('EXPO_PUBLIC_AGA_WAKE_HEARTBEAT_MS', 2500));
-    measureMark('wakeScout.heartbeat.start', { reason });
-  }
-
-  private noteWakeStatus(status: string) {
-    this.wakeEvents.statuses += 1;
-    const summary = `wake scout: ${status}`;
-    this.publish({ speechStatus: summary });
-    const now = Date.now();
-    if (/unavailable|denied|missing|permission|error|started|listening/i.test(status) && now - this.wakeStatusLogAt > 1500) {
-      this.wakeStatusLogAt = now;
-      void logEvent('wake.status', status).catch(() => undefined);
-    }
-  }
-
-  private async startWakeScout(reason: string) {
-    if (this.wakeLoop || this.realtime || !this.started) return;
-    this.prefs = await loadPreferences().catch(() => this.prefs);
-    const locale = this.prefs?.voiceLocale || 'en-US';
-    this.publish({
-      ready: true,
-      mode: 'sleeping',
-      interim: '',
-      audioLevel: 0,
-      activeChoiceMenu: null,
-      speechStatus: 'wake scout: starting microphone',
-      error: null,
-    });
-    const loop = new NativeSpeechLoop(
-      {
-        onPartial: (text) => {
-          // Local scout hears background speech, but does not execute anything until wake.
-          const clean = normalizeSpeech(text);
-          this.wakeEvents.partials += 1;
-          this.publish({ interim: clean.slice(0, 120), speechStatus: `wake scout: hearing “${clean.slice(0, 64)}”` });
-          measureMark('wakeScout.partial', { chars: text.length, partials: this.wakeEvents.partials, text: clean.slice(0, 80) });
-
-          // Some Android/Web speech engines are slow to emit final results while
-          // the room stays noisy. Wake on a partial phrase so “hey AGA” actually
-          // summons her instead of waiting forever for silence.
-          if (envFlag('EXPO_PUBLIC_AGA_WAKE_ON_PARTIAL', true)) {
-            const wake = detectWake(clean, this.prefs?.wakePhrase || 'aga');
-            if (wake.woke) void this.handleWakeFinal(clean, 'partial');
-          }
-        },
-        onFinal: (text) => {
-          this.wakeEvents.finals += 1;
-          this.publish({ interim: normalizeSpeech(text).slice(0, 120), speechStatus: `wake scout: final “${normalizeSpeech(text).slice(0, 64)}”` });
-          void this.handleWakeFinal(text, 'final');
-        },
-        onError: async (message) => {
-          this.wakeEvents.errors += 1;
-          this.publish({ speechStatus: `wake scout error: ${message}`, error: message });
-          await logEvent('wake.error', message);
-        },
-        onStatus: (status) => this.noteWakeStatus(status),
-      },
-      locale,
-    );
-    this.wakeLoop = loop;
-    this.wakeEvents.starts += 1;
-    await logEvent('wake.starting', `reason=${reason} locale=${locale}`).catch(() => undefined);
-    await loop.start({ watchdogEnabled: true }).catch(async (error: unknown) => {
-      const message = error instanceof Error ? error.message : String(error || 'wake scout failed');
-      this.wakeLoop = null;
-      this.publish({ speechStatus: 'wake scout failed', error: message });
-      await logEvent('wake.start.error', message);
-      this.scheduleWakeRetry('start_error');
-    });
-    const diagnostics = typeof (loop as any).getDiagnostics === 'function' ? (loop as any).getDiagnostics() : null;
-    this.lastWakeDiagnostics = diagnostics;
-    this.publish({ voiceSummary: this.describeWakeLoop(loop), voiceCapability: diagnostics });
-    if (diagnostics?.available === false || diagnostics?.provider === 'none') {
-      this.wakeLoop = null;
-      const message = diagnostics?.lastError || 'Speech recognition is not available in this runtime.';
-      await logEvent('wake.unavailable', message).catch(() => undefined);
-
-      // Physical device fallback: if native/browser STT is missing but Gemini
-      // duplex is selected, do not leave AGA dead. Open Gemini Live audio as
-      // the wake/listening layer. This costs live-audio seconds, so it is
-      // guarded by Gemini budget limits and can be disabled with
-      // EXPO_PUBLIC_AGA_GEMINI_WAKELESS_DUPLEX=0.
-      if (canUseWakelessGeminiDuplex()) {
-        this.publish({
-          speechStatus: 'local wake unavailable — starting Gemini duplex listener',
-          error: envFlag('EXPO_PUBLIC_AGA_DEBUG_UI', false) ? message : null,
-          voiceCapability: diagnostics,
-        });
-        await this.activateRealtime('__AGA_DUPLEX_STANDBY__').catch((error: unknown) => {
-          const detail = error instanceof Error ? error.message : String(error || 'duplex fallback failed');
-          this.publish({ speechStatus: 'voice fallback unavailable', error: detail });
-          this.scheduleWakeRetry('duplex_fallback_failed');
-        });
-        return;
-      }
-
-      this.publish({
-        speechStatus: envFlag('EXPO_PUBLIC_AGA_DEBUG_UI', false)
-          ? `wake scout unavailable: ${message}`
-          : 'voice standby: microphone wake unavailable',
-        error: envFlag('EXPO_PUBLIC_AGA_DEBUG_UI', false) ? message : null,
-        voiceCapability: diagnostics,
-      });
-      this.scheduleWakeRetry('unavailable');
-      return;
-    }
-    this.startWakeHeartbeat(loop, reason);
-    this.publish({ speechStatus: this.describeWakeLoop(loop), voiceSummary: this.describeWakeLoop(loop), voiceCapability: diagnostics });
-    await logEvent('wake.started', this.describeWakeLoop(loop)).catch(() => undefined);
-    measureMark('wakeScout.started', { reason, locale });
-  }
-
-  private async stopWakeScout(reason: string) {
-    this.clearWakeHeartbeat();
-    const loop = this.wakeLoop;
-    this.wakeLoop = null;
-    if (!loop) return;
-    try { await loop.destroy(); }
-    catch (error) { await logEvent('wake.destroy.error', error instanceof Error ? error.message : String(error)); }
-    measureMark('wakeScout.stopped', { reason });
-  }
-
-  private scheduleWakeRetry(reason: string) {
-    if (!this.started || this.wakeRetryTimer || this.realtime) return;
-    const delay = numberEnv('EXPO_PUBLIC_AGA_WAKE_RETRY_MS', 2500);
-    this.wakeRetryTimer = setTimeout(() => {
-      this.wakeRetryTimer = null;
-      void this.startWakeScout(`retry_${reason}`);
-    }, delay);
-    measureMark('wakeScout.retry.arm', { reason, delay });
-  }
-
-  private async handleWakeFinal(raw: string, source: 'partial' | 'final' = 'final') {
-    const text = normalizeSpeech(raw);
-    if (!text || this.wakeActivationInFlight) return;
-    const prefs = await loadPreferences().catch(() => this.prefs) ?? this.prefs;
-    this.prefs = prefs;
-    const wakePhrase = prefs?.wakePhrase || 'aga';
-    const wake = detectWake(text, wakePhrase);
-    measureMark('wakeScout.final', { woke: wake.woke, kind: wake.kind, match: wake.match, source, chars: text.length, text: text.slice(0, 120) });
-    if (!wake.woke) {
-      const inFollowupWindow = Date.now() < this.followupAcceptUntil;
-      const mediaOpen = !!this.snapshot.activeMedia;
-      const mediaFollowup = mediaOpen && mediaFollowupLooksActionable(text);
-      if (source === 'final' && ((inFollowupWindow && naturalFollowupLooksActionable(text)) || mediaFollowup)) {
-        this.wakeActivationInFlight = true;
-        try {
-          this.publish({ interim: '', speechStatus: mediaFollowup ? 'media command heard — connecting' : 'follow-up heard — connecting' });
-          await logEvent(mediaFollowup ? 'wake.media_followup.accepted' : 'wake.followup.accepted', text.slice(0, 220)).catch(() => undefined);
-          await this.activateRealtime(text);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error || 'follow-up activation failed');
-          this.publish({ mode: 'recovering', speechStatus: 'follow-up failed; rearming mic', error: message });
-          await logEvent('wake.followup.error', message).catch(() => undefined);
-          if (this.started) await this.startWakeScout('followup_activate_error').catch(() => undefined);
-        } finally {
-          setTimeout(() => { this.wakeActivationInFlight = false; }, 1000);
+      const diagnostics = agaEngineDiagnostics();
+      this.publish({ ready: true, mode: 'listening', speechStatus: 'Porcupine listening for AGA / stop / pause', voiceSummary: JSON.stringify(diagnostics), voiceCapability: diagnostics } as any);
+      this.guidedUnsub = this.guided.subscribe((state) => {
+        if (!state.active) {
+          this.publish({ sessionLabel: null });
+          return;
         }
-        return;
-      }
-      if (source === 'final') {
-        this.publish({
-          speechStatus: this.snapshot.activeMedia
-            ? `media open — say pause, stop, volume, change video, or say AGA for more`
-            : `wake scout heard “${text.slice(0, 72)}” — waiting for AGA / hey AGA`,
-        });
-      }
-      return;
-    }
-
-    const fingerprint = `${wake.kind}:${wake.match.toLowerCase()}:${Math.floor(Date.now() / 1500)}`;
-    if (fingerprint === this.lastWakeFingerprint) return;
-    this.lastWakeFingerprint = fingerprint;
-    this.wakeActivationInFlight = true;
-
-    try {
-      const command = removeWakePhrase(text, wakePhrase).trim();
-      if (!command) {
-        this.lastWakeOnlyAt = Date.now();
-        this.followupAcceptUntil = Date.now() + followupWindowMs();
-      }
-      this.publish({ interim: '', speechStatus: command ? 'wake detected — connecting' : `wake detected — listening for request (${Math.round(followupWindowMs() / 1000)}s)` });
-      await logEvent('wake.accepted', `${source}/${wake.kind}: ${text.slice(0, 180)}`);
-      await this.activateRealtime(command || 'The user said AGA. Greet them briefly and ask what they need.');
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error || 'wake activation failed');
-      this.publish({ mode: 'recovering', speechStatus: 'wake activation failed; rearming mic', error: message });
-      await logEvent('wake.activate.error', message).catch(() => undefined);
-      await this.sleepRealtime('wake_activate_error').catch(() => undefined);
-      if (this.started) await this.startWakeScout('wake_activate_error').catch(() => undefined);
-    } finally {
-      setTimeout(() => { this.wakeActivationInFlight = false; }, 1000);
-    }
-  }
-
-  private armIdleTimer(snapshot: RealtimeSnapshot) {
-    if (this.idleTimer) clearTimeout(this.idleTimer);
-
-    const waitingForChoice = !!snapshot.activeChoiceMenu;
-    const mediaOpen = !!snapshot.activeMedia;
-    const busy = snapshot.mode === 'speaking' || snapshot.mode === 'thinking' || !!snapshot.interim;
-    if (waitingForChoice || busy) return;
-
-    const delay = mediaOpen
-      ? numberEnv('EXPO_PUBLIC_AGA_REALTIME_MEDIA_IDLE_MS', DEFAULT_MEDIA_IDLE_MS)
-      : numberEnv('EXPO_PUBLIC_AGA_REALTIME_IDLE_MS', DEFAULT_WAKE_IDLE_MS);
-
-    this.idleTimer = setTimeout(() => {
-      void this.sleepRealtime('idle_timeout');
-    }, delay);
-    measureMark('realtime.idleTimer.arm', { delay, mediaOpen });
-  }
-
-  private async createSelectedVoiceSession(selectedEngine: ReturnType<typeof selectedVoiceEngine>): Promise<VoiceSessionLike> {
-    // Engine firewall: when Gemini is selected, this file must not load or
-    // construct the OpenAI Realtime implementation. Dynamic imports keep the
-    // OpenAI transport out of the execution path unless selectedEngine=openai.
-    if (selectedEngine === 'gemini') {
-      const mod = await import('../gemini/GeminiLiveSession');
-      return new mod.GeminiLiveSession({
-        onTurnDone: () => {
-          // If media is open, keep the selected engine/session alive so the
-          // user can say “pause”, “louder”, “change video”, or ask AGA to
-          // speak over the music without needing a full wake cycle.
-          if (this.snapshot.activeMedia) {
-            this.publish({ mode: 'media', speechStatus: 'media active — listening for media controls' });
-            this.armIdleTimer(this.snapshot);
-            return;
-          }
-          void this.sleepRealtime('gemini_turn_done');
-        },
+        this.publish({ mode: state.waitingForUser ? 'listening' : 'speaking', sessionLabel: state.phaseLabel || state.kind, speechStatus: state.waitingForUser ? 'guided session waiting for voice response' : `guided: ${state.phaseLabel || state.kind}` });
       });
-    }
-    if (selectedEngine === 'openai') {
-      const mod = await import('../realtime/RealtimeSession');
-      return new mod.RealtimeSession();
-    }
-    throw new Error(`Unsupported wake voice engine: ${selectedEngine}`);
-  }
-
-  private async activateRealtime(initialText: string) {
-    return measureAsync('wakeRealtime.activate', async () => {
-      if (this.realtime) {
-        this.realtime.replay(initialText);
-        this.armIdleTimer(this.snapshot);
-        return;
-      }
-
-      if (envFlag('EXPO_PUBLIC_AGA_FRESH_CONTEXT_PER_WAKE', true)) {
-        await startNewConversationSession('wake_activation', {
-          clearTranscript: true,
-          endActiveSession: envFlag('EXPO_PUBLIC_AGA_END_SKILL_ON_NEW_WAKE', true),
-        }).catch(() => undefined);
-        this.prefs = await loadPreferences().catch(() => this.prefs);
-        await this.refresh().catch(() => undefined);
-      }
-
-      await this.stopWakeScout('wake_accepted');
-      const selectedEngine = selectedVoiceEngine();
-      this.publish({
-        mode: 'awake',
-        interim: '',
-        speechStatus: selectedEngine === 'gemini' ? `connecting Gemini ${geminiTransportPreference() || 'text'} engine` : selectedEngine === 'openai' ? 'connecting OpenAI realtime' : 'starting local engine',
-        error: null,
-        voiceSummary: JSON.stringify(agaEngineDiagnostics()),
-        voiceCapability: agaEngineDiagnostics(),
-      });
-
-      const session = await this.createSelectedVoiceSession(selectedEngine);
-      this.realtime = session;
-      this.realtimeUnsubscribe = session.subscribe((next) => {
-        this.publish({ ...next, speechStatus: next.speechStatus || 'realtime active' });
-        this.armIdleTimer(next);
-      });
-
-      try {
-        await session.start();
-        session.replay(initialText);
-        this.armIdleTimer(this.snapshot);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error || 'Realtime start failed');
-        this.realtime = null;
-        this.realtimeUnsubscribe?.();
-        this.realtimeUnsubscribe = null;
-        await session.stop().catch(() => undefined);
-        this.publish({ mode: 'recovering', speechStatus: `${selectedVoiceEngine()} engine start failed; returning to wake scout`, error: message });
-        await logEvent('realtime.start.error', message).catch(() => undefined);
-        if (this.started) await this.startWakeScout('realtime_start_failed');
-      }
+      await this.startWakeScout('boot');
     });
-  }
-
-  private async sleepRealtime(reason: string) {
-    return measureAsync('wakeRealtime.sleepRealtime', async () => {
-      if (this.idleTimer) clearTimeout(this.idleTimer);
-      this.idleTimer = null;
-
-      const session = this.realtime;
-      this.realtime = null;
-      this.realtimeUnsubscribe?.();
-      this.realtimeUnsubscribe = null;
-      if (session) await session.stop().catch(() => undefined);
-      await logEvent('realtime.sleep', reason);
-      await this.refresh();
-      if (this.started) await this.startWakeScout(reason);
-      if (Date.now() < this.followupAcceptUntil) {
-        const left = Math.max(1, Math.ceil((this.followupAcceptUntil - Date.now()) / 1000));
-        this.publish({ speechStatus: `wake scout listening for your request (${left}s)`, mode: 'listening' });
-      }
-    }, { reason });
-  }
-
-  replay(text: string) {
-    const clean = normalizeSpeech(text);
-    if (!clean) return;
-    if (this.realtime) {
-      this.realtime.replay(clean);
-      return;
-    }
-    void this.activateRealtime(clean);
-  }
-
-  closeMedia() {
-    this.realtime?.closeMedia();
-  }
-
-  onMediaEvent(event: string) {
-    this.realtime?.onMediaEvent(event);
-  }
-
-  rearmMic() {
-    if (this.realtime) {
-      this.publish({ speechStatus: 'realtime session is already active' });
-      return;
-    }
-    void this.stopWakeScout('manual_rearm').then(() => this.startWakeScout('manual_rearm'));
   }
 
   async stop() {
     this.started = false;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
-    if (this.wakeRetryTimer) clearTimeout(this.wakeRetryTimer);
-    this.wakeRetryTimer = null;
-    this.clearWakeHeartbeat();
-    await this.stopWakeScout('stop');
-    await this.sleepRealtime('stop').catch(() => undefined);
+    this.guidedUnsub?.();
+    this.guidedUnsub = null;
+    await this.guided.stop('controller_stop').catch(() => undefined);
+    await this.stopWakeScout('controller_stop');
+    await this.stopRealtime('controller_stop');
+    this.publish({ mode: 'sleeping', speechStatus: 'stopped' });
+  }
+
+  replay(text: string) {
+    const clean = normalizeSpeech(text);
+    if (!clean) return;
+    void this.handleTurnText(clean, 'replay');
+  }
+
+  closeMedia() {
+    this.realtime?.closeMedia?.();
+    this.publish({ activeMedia: null, mediaCommand: 'stop' });
+  }
+
+  onMediaEvent(event: string) {
+    this.realtime?.onMediaEvent?.(event);
+  }
+
+  rearmMic() {
+    void this.startWakeScout('manual_rearm');
+  }
+
+  private async refresh() {
+    const [messages, reminders] = await Promise.all([
+      listMessages(12).catch(() => []),
+      listPendingReminders(8).catch(() => []),
+    ]);
+    this.publish({ messages, reminders } as any);
+  }
+
+  private async startWakeScout(reason: string) {
+    if (!this.started || this.wakeEngine) return;
+    this.wakeEngine = createWakeEngine({ onEvent: (event) => this.onWakeEvent(event) }, env('EXPO_PUBLIC_AGA_WAKE_WORD') || 'aga');
+    try {
+      await this.wakeEngine.start();
+      this.publish({ mode: 'listening', speechStatus: `Porcupine listening (${reason})`, error: null });
+      await logEvent('wake.porcupine.start', reason).catch(() => undefined);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error || 'wake engine failed');
+      this.publish({ mode: 'recovering', speechStatus: 'wake engine failed', error: message });
+      await logEvent('wake.porcupine.error', message).catch(() => undefined);
+    }
+  }
+
+  private async stopWakeScout(reason: string) {
+    const engine = this.wakeEngine;
+    this.wakeEngine = null;
+    if (engine) await engine.stop().catch(() => undefined);
+    await logEvent('wake.porcupine.stop', reason).catch(() => undefined);
+  }
+
+  private onWakeEvent(event: WakeEngineEvent) {
+    if (event.type === 'status') {
+      this.publish({ speechStatus: event.status });
+      return;
+    }
+    if (event.type === 'error') {
+      this.publish({ error: event.message, speechStatus: 'wake error' });
+      return;
+    }
+    if (event.type === 'control') {
+      void this.handleKeywordControl(event.command);
+      return;
+    }
+    if (event.type === 'wake') {
+      const text = event.text ? stripWake(event.text) : '';
+      void this.handleWake(text, event.source);
+    }
+  }
+
+  private async handleKeywordControl(command: 'stop' | 'pause' | 'resume') {
+    measureMark('wake.keyword.control', { command });
+    if (command === 'stop') {
+      await stopSpeaking().catch(() => undefined);
+      await this.guided.stop('keyword_stop').catch(() => undefined);
+      await this.stopRealtime('keyword_stop').catch(() => undefined);
+      this.publish({ activeMedia: null, mediaCommand: 'stop', mode: 'listening', speechStatus: 'stopped by keyword' });
+      await this.startWakeScout('keyword_stop').catch(() => undefined);
+      return;
+    }
+    if (command === 'pause') {
+      await stopSpeaking().catch(() => undefined);
+      await this.guided.control('pause').catch(() => undefined);
+      this.realtime?.replay('pause');
+      this.publish({ mediaCommand: 'pause', speechStatus: 'paused by keyword' });
+    }
+  }
+
+  private async handleWake(text: string, source: string) {
+    await logEvent('wake.accepted', `${source}:${text || 'keyword_only'}`).catch(() => undefined);
+    this.publish({ interim: '', speechStatus: text ? 'wake detected — routing command' : 'wake detected — opening live ear', mode: 'awake' });
+    if (!text) {
+      if (envFlag('EXPO_PUBLIC_AGA_POST_WAKE_TTS_ACK', true)) {
+        void speakShortReply(postWakeReply(), 'warm').catch(() => undefined);
+      }
+      await this.activateLiveSession('The user said AGA. Listen for their next request and reply briefly.');
+      return;
+    }
+    await this.handleTurnText(text, 'wake');
+  }
+
+  private async handleTurnText(text: string, source: 'wake' | 'replay') {
+    if (this.guided && await this.guided.acceptUserResponse(text).catch(() => false)) return;
+    const kind = guidedKindFromText(text);
+    const route = classifyTurnForVoicePath(text);
+    if (route === 'deterministic_session' && kind) {
+      await this.stopRealtime('deterministic_guided');
+      await this.stopWakeScout('deterministic_guided');
+      await this.guided.start(kind, text);
+      await this.startWakeScout('guided_controls').catch(() => undefined);
+      return;
+    }
+    if (route === 'short_tts') {
+      await this.handleShortTextCommand(text);
+      return;
+    }
+    await this.activateLiveSession(text);
+  }
+
+  private async handleShortTextCommand(text: string) {
+    const lower = text.toLowerCase();
+    const context = await subconsciousRecall(text).catch(() => null);
+    await logEvent('turn.short_tts', `${text.slice(0, 180)} memories=${context?.memories.length || 0}`).catch(() => undefined);
+    if (/\b(status|diagnostic|are you there)\b/i.test(lower)) {
+      await speakShortReply('I am here. Wake words are local. Short replies use expressive TTS. Live sessions open only when needed.', 'warm');
+    } else if (/\b(thank you|thanks)\b/i.test(lower)) {
+      await speakShortReply('Always.', 'warm');
+    } else if (/\b(stop|quiet|cancel)\b/i.test(lower)) {
+      await this.handleKeywordControl('stop');
+    } else if (/\b(pause|hold)\b/i.test(lower)) {
+      await this.handleKeywordControl('pause');
+    } else {
+      await this.activateLiveSession(text);
+      return;
+    }
+    await this.refresh();
+    await this.startWakeScout('short_tts_done').catch(() => undefined);
+  }
+
+  private async activateLiveSession(initialText: string) {
+    if (this.realtime) {
+      this.realtime.replay(initialText);
+      this.armIdleTimer();
+      return;
+    }
+    await this.stopWakeScout('live_session');
+    if (envFlag('EXPO_PUBLIC_AGA_FRESH_CONTEXT_PER_WAKE', true)) {
+      await startNewConversationSession('wake_activation', { clearTranscript: true, endActiveSession: false }).catch(() => undefined);
+    }
+    this.publish({ mode: 'thinking', speechStatus: `${selectedEngine()} live session starting`, error: null });
+    const session = await this.createSelectedVoiceSession();
+    this.realtime = session;
+    this.realtimeUnsubscribe = session.subscribe((next) => {
+      this.publish({ ...next, speechStatus: next.speechStatus || 'live session active' });
+      this.armIdleTimer();
+    });
+    try {
+      await session.start();
+      session.replay(initialText);
+      this.armIdleTimer();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error || 'live session failed');
+      this.publish({ mode: 'recovering', speechStatus: 'live session failed; returning to Porcupine', error: message });
+      await logEvent('realtime.start.error', message).catch(() => undefined);
+      await this.stopRealtime('start_error').catch(() => undefined);
+      await this.startWakeScout('live_start_failed').catch(() => undefined);
+    }
+  }
+
+  private async createSelectedVoiceSession(): Promise<VoiceSessionLike> {
+    const engine = selectedEngine();
+    if (engine === 'gemini') {
+      const mod = await import('../gemini/GeminiLiveSession');
+      return new mod.GeminiLiveSession({ onTurnDone: () => this.armIdleTimer() } as any);
+    }
+    if (engine === 'openai') {
+      const mod = await import('../realtime/RealtimeSession');
+      return new mod.RealtimeSession({ onTurnDone: () => this.armIdleTimer() } as any);
+    }
+    const mod = await import('./LocalTransport');
+    return new mod.LocalTransport({ onTurnDone: () => this.armIdleTimer() } as any);
+  }
+
+  private async stopRealtime(reason: string) {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = null;
+    const session = this.realtime;
+    this.realtime = null;
+    this.realtimeUnsubscribe?.();
+    this.realtimeUnsubscribe = null;
+    if (session) await session.stop().catch(() => undefined);
+    await logEvent('realtime.sleep', reason).catch(() => undefined);
+    await this.refresh();
+    if (this.started) await this.startWakeScout(reason).catch(() => undefined);
+  }
+
+  private armIdleTimer() {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    const delay = this.snapshot.activeMedia ? numberEnv('EXPO_PUBLIC_AGA_REALTIME_MEDIA_IDLE_MS', 5 * 60_000) : numberEnv('EXPO_PUBLIC_AGA_REALTIME_IDLE_MS', 45_000);
+    this.idleTimer = setTimeout(() => void this.stopRealtime('idle_timeout'), delay);
   }
 }
