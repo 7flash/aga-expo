@@ -4,6 +4,8 @@ import { loadPreferences, type Preferences } from '../db/localStore';
 import { EmbossedPanel, GaugeStatus, MechanicalSwitch, RotarySelector, TactileButton } from './tactile/TactilePrimitives';
 import { tactileRelic as relic } from './tactile/tokens';
 
+const NO_POINTER_EVENTS = { pointerEvents: 'none' as const } as any;
+
 function listenDetent(mode?: string | null) {
   if (mode === 'handsfree') return 4;
   if (mode === 'answer_window') return 2;
@@ -36,8 +38,8 @@ export function AgaSettingsScreen() {
   const wear = useMemo(() => Math.min(0.62, 0.18 + (prefs?.activeSession ? 0.12 : 0) + (prefs?.showDiagnostics ? 0.06 : 0)), [prefs?.activeSession, prefs?.showDiagnostics]);
 
   return (
-    <SafeAreaView style={styles.root} pointerEvents="none">
-      <ScrollView contentContainerStyle={styles.content} pointerEvents="none">
+    <SafeAreaView style={[styles.root, NO_POINTER_EVENTS]}>
+      <ScrollView style={NO_POINTER_EVENTS as any} contentContainerStyle={styles.content}>
         <Text style={styles.kicker}>TACTILE NEURAL RELIC</Text>
         <Text style={styles.title}>Voice-only mechanical control bay</Text>
         <Text style={styles.subtitle}>This unit is behind glass. Say “AGA settings”, “AGA choose one”, “AGA change voice”, or update remote config. The controls below are rendered as tactile hardware, but they are not touch targets.</Text>

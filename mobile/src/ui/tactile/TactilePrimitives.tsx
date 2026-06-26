@@ -1,8 +1,8 @@
 import React, { memo, useEffect, useMemo, useRef } from 'react';
-import { Animated, Easing, Platform, StyleProp, StyleSheet, Text, View, ViewStyle } from 'react-native';
+import { Animated, Easing, StyleProp, StyleSheet, Text, View, ViewStyle } from 'react-native';
 import { glowForMode, materialForWear, tactileRelic as relic, type TactileMode } from './tokens';
 
-const canUseNativeDriver = Platform.OS !== 'web';
+const NO_POINTER_EVENTS = { pointerEvents: 'none' as const } as any;
 
 type Modeish = TactileMode | string;
 
@@ -18,8 +18,8 @@ function pulseLoop(value: Animated.Value, active: boolean, duration = 860) {
     return undefined;
   }
   const loop = Animated.loop(Animated.sequence([
-    Animated.timing(value, { toValue: 1, duration, easing: Easing.out(Easing.cubic), useNativeDriver: canUseNativeDriver }),
-    Animated.timing(value, { toValue: 0, duration: Math.round(duration * 1.18), easing: Easing.in(Easing.quad), useNativeDriver: canUseNativeDriver }),
+    Animated.timing(value, { toValue: 1, duration, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+    Animated.timing(value, { toValue: 0, duration: Math.round(duration * 1.18), easing: Easing.in(Easing.quad), useNativeDriver: true }),
   ]));
   loop.start();
   return loop;
@@ -38,7 +38,7 @@ export const EmbossedPanel = memo(function EmbossedPanel({ children, title, mode
   const glow = glowForMode(mode);
   const mat = materialForWear(wear);
   return (
-    <View pointerEvents="none" style={[styles.panelShell, active && { shadowColor: glow, borderColor: `${glow}66` }, style]}>
+    <View style={[styles.panelShell, NO_POINTER_EVENTS, active && { shadowColor: glow, borderColor: `${glow}66` }, style]}>
       <View style={[styles.panelPatina, { opacity: mat.patinaOpacity }]} />
       <View style={styles.panelTopLip} />
       <View style={styles.panelBevel} />
@@ -71,7 +71,7 @@ export const TactileButton = memo(function TactileButton({ label, sublabel, acti
   const mat = materialForWear(wear);
 
   useEffect(() => {
-    Animated.spring(press, { toValue: pressed ? 1 : active ? 0.18 : 0, useNativeDriver: canUseNativeDriver, ...relic.spring.press }).start();
+    Animated.spring(press, { toValue: pressed ? 1 : active ? 0.18 : 0, useNativeDriver: true, ...relic.spring.press }).start();
   }, [active, press, pressed]);
 
   useEffect(() => {
@@ -84,7 +84,7 @@ export const TactileButton = memo(function TactileButton({ label, sublabel, acti
   const ledOpacity = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.55, 1] });
 
   return (
-    <Animated.View pointerEvents="none" style={[styles.buttonBody, active && { borderColor: `${glow}aa`, shadowColor: glow }, { transform: [{ translateY }, { scale }] }, style]}>
+    <Animated.View style={[styles.buttonBody, NO_POINTER_EVENTS, active && { borderColor: `${glow}aa`, shadowColor: glow }, { transform: [{ translateY }, { scale }] }, style]}>
       <View style={[styles.buttonPatina, { opacity: mat.patinaOpacity }]} />
       <View style={styles.buttonSpecular} />
       <View style={styles.buttonBevel} />
@@ -111,12 +111,12 @@ export const MechanicalSwitch = memo(function MechanicalSwitch({ label, value, m
   const throwAnim = useRef(new Animated.Value(value ? 1 : 0)).current;
   const mat = materialForWear(wear);
   useEffect(() => {
-    Animated.spring(throwAnim, { toValue: value ? 1 : 0, useNativeDriver: canUseNativeDriver, ...relic.spring.switchThrow }).start();
+    Animated.spring(throwAnim, { toValue: value ? 1 : 0, useNativeDriver: true, ...relic.spring.switchThrow }).start();
   }, [throwAnim, value]);
   const rotate = throwAnim.interpolate({ inputRange: [0, 1], outputRange: ['-31deg', '31deg'] });
   const tx = throwAnim.interpolate({ inputRange: [0, 1], outputRange: [-15, 15] });
   return (
-    <View pointerEvents="none" style={[styles.switchWrap, value && { borderColor: `${glow}77`, shadowColor: glow }, style]}>
+    <View style={[styles.switchWrap, NO_POINTER_EVENTS, value && { borderColor: `${glow}77`, shadowColor: glow }, style]}>
       <View style={[styles.switchPatina, { opacity: mat.patinaOpacity }]} />
       <Text numberOfLines={1} style={styles.switchLabel}>{label}</Text>
       <View style={styles.switchSlot}>
@@ -140,12 +140,12 @@ export const RotarySelector = memo(function RotarySelector({ label, valueLabel, 
   const glow = glowForMode(active ? mode : 'idle');
   const turn = useRef(new Animated.Value(detent)).current;
   useEffect(() => {
-    Animated.spring(turn, { toValue: detent, useNativeDriver: canUseNativeDriver, ...relic.spring.detent }).start();
+    Animated.spring(turn, { toValue: detent, useNativeDriver: true, ...relic.spring.detent }).start();
   }, [detent, turn]);
   const rotate = turn.interpolate({ inputRange: [0, Math.max(1, detents - 1)], outputRange: ['-128deg', '128deg'] });
   const marks = useMemo(() => Array.from({ length: detents }, (_, i) => i), [detents]);
   return (
-    <View pointerEvents="none" style={[styles.rotaryWrap, active && { borderColor: `${glow}77`, shadowColor: glow }, style]}>
+    <View style={[styles.rotaryWrap, NO_POINTER_EVENTS, active && { borderColor: `${glow}77`, shadowColor: glow }, style]}>
       <Text style={styles.rotaryLabel}>{label}</Text>
       <View style={styles.rotaryFace}>
         {marks.map((m) => <View key={m} style={[styles.rotaryMark, { transform: [{ rotate: `${-132 + (264 / Math.max(1, detents - 1)) * m}deg` }, { translateY: -34 }] }]} />)}
@@ -180,7 +180,7 @@ export const NeuralTrace = memo(function NeuralTrace({ active, strength = 0.35, 
   const translateX = pulse.interpolate({ inputRange: [0, 1], outputRange: [-8, 8] });
   const rotate = direction === 'diagonal' ? '-18deg' : direction === 'diagonalUp' ? '18deg' : '0deg';
   return (
-    <Animated.View pointerEvents="none" style={[styles.traceBase, direction === 'vertical' && styles.traceVertical, { backgroundColor: glow, shadowColor: glow, opacity, transform: [{ rotate }, { translateX }, { scale }] }, style]}>
+    <Animated.View style={[styles.traceBase, NO_POINTER_EVENTS, direction === 'vertical' && styles.traceVertical, { backgroundColor: glow, shadowColor: glow, opacity, transform: [{ rotate }, { translateX }, { scale }] }, style]}>
       <View style={styles.traceCore} />
     </Animated.View>
   );
@@ -200,7 +200,7 @@ export const GaugeStatus = memo(function GaugeStatus({ label, value, mode = 'idl
   const marks = useMemo(() => Array.from({ length: 7 }, (_, i) => i), []);
   const lit = Math.round(clamp01(level) * marks.length);
   return (
-    <View pointerEvents="none" style={[styles.gauge, active && { borderColor: `${glow}66`, shadowColor: glow }, style]}>
+    <View style={[styles.gauge, NO_POINTER_EVENTS, active && { borderColor: `${glow}66`, shadowColor: glow }, style]}>
       <Text style={styles.gaugeLabel}>{label}</Text>
       <View style={styles.gaugeMarks}>{marks.map((mark) => <View key={mark} style={[styles.gaugeMark, active && mark < lit && { backgroundColor: glow, shadowColor: glow }]} />)}</View>
       {value ? <Text numberOfLines={1} style={styles.gaugeValue}>{value}</Text> : null}
@@ -219,7 +219,7 @@ type PlateProps = {
 export const MessagePlate = memo(function MessagePlate({ role = 'assistant', text, mode = 'idle', active, style }: PlateProps) {
   const glow = glowForMode(active ? mode : role === 'user' ? 'listening' : 'speaking');
   return (
-    <View pointerEvents="none" style={[styles.messagePlate, active && { borderColor: `${glow}66`, shadowColor: glow }, style]}>
+    <View style={[styles.messagePlate, NO_POINTER_EVENTS, active && { borderColor: `${glow}66`, shadowColor: glow }, style]}>
       <View style={styles.messagePlateLip} />
       <Text style={styles.messageRole}>{role}</Text>
       <Text numberOfLines={3} style={styles.messageText}>{text}</Text>
@@ -231,7 +231,7 @@ export const LedBank = memo(function LedBank({ mode = 'idle', level = 0.5 }: { m
   const glow = glowForMode(mode);
   const marks = useMemo(() => Array.from({ length: 12 }, (_, i) => i), []);
   const lit = Math.round(clamp01(level) * marks.length);
-  return <View pointerEvents="none" style={styles.ledBank}>{marks.map((m) => <View key={m} style={[styles.led, m < lit && { backgroundColor: glow, shadowColor: glow }]} />)}</View>;
+  return <View style={[styles.ledBank, NO_POINTER_EVENTS]}>{marks.map((m) => <View key={m} style={[styles.led, m < lit && { backgroundColor: glow, shadowColor: glow }]} />)}</View>;
 });
 
 const rivet = {
