@@ -77,7 +77,9 @@ export class WakeRealtimeController {
     activeMedia: null,
     mediaCommand: null,
     audioLevel: 0,
-    speechStatus: 'starting Porcupine wake scout',
+    speechStatus: 'starting wake scout',
+    heardText: '',
+    wakeProvider: '',
     error: null,
     activeChoiceMenu: null,
     sessionLabel: null,
@@ -109,7 +111,7 @@ export class WakeRealtimeController {
       }
       await this.refresh();
       const diagnostics = agaEngineDiagnostics();
-      this.publish({ ready: true, mode: 'listening', speechStatus: 'Porcupine listening for AGA / stop / pause', voiceSummary: JSON.stringify(diagnostics), voiceCapability: diagnostics } as any);
+      this.publish({ ready: true, mode: 'listening', speechStatus: 'wake engine starting', voiceSummary: JSON.stringify(diagnostics), voiceCapability: diagnostics } as any);
       this.guidedUnsub = this.guided.subscribe((state) => {
         if (!state.active) {
           this.publish({ sessionLabel: null });
@@ -165,11 +167,13 @@ export class WakeRealtimeController {
     this.wakeEngine = createWakeEngine({ onEvent: (event) => this.onWakeEvent(event) }, env('EXPO_PUBLIC_AGA_WAKE_WORD') || 'aga');
     try {
       await this.wakeEngine.start();
-      this.publish({ mode: 'listening', speechStatus: `Porcupine listening (${reason})`, error: null });
+      const wakeDiagnostics = this.wakeEngine.getDiagnostics?.() as any;
+      const provider = String(wakeDiagnostics?.provider || (wakeDiagnostics?.diagnostics?.provider) || 'wake');
+      this.publish({ mode: 'listening', speechStatus: `${provider} listening (${reason})`, error: null, wakeProvider: provider, voiceCapability: { ...(this.snapshot as any).voiceCapability, wakeProvider: provider, wakeDiagnostics } } as any);
       await logEvent('wake.porcupine.start', reason).catch(() => undefined);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error || 'wake engine failed');
-      this.publish({ mode: 'recovering', speechStatus: 'wake engine failed', error: message });
+      this.publish({ mode: 'recovering', speechStatus: 'wake engine failed', error: message, heardText: '' } as any);
       await logEvent('wake.porcupine.error', message).catch(() => undefined);
     }
   }
@@ -183,19 +187,29 @@ export class WakeRealtimeController {
 
   private onWakeEvent(event: WakeEngineEvent) {
     if (event.type === 'status') {
-      this.publish({ speechStatus: event.status });
+      this.publish({ speechStatus: event.status } as any);
       return;
     }
     if (event.type === 'error') {
-      this.publish({ error: event.message, speechStatus: 'wake error' });
+      this.publish({ error: event.message, speechStatus: 'wake error' } as any);
+      return;
+    }
+    if (event.type === 'transcript') {
+      const clean = normalizeSpeech(event.text).trim();
+      if (clean) {
+        const prefix = event.final ? 'heard' : 'hearing';
+        this.publish({ interim: clean, heardText: clean, speechStatus: `${prefix}: ${clean.slice(0, 54)}`, wakeProvider: event.source } as any);
+      }
       return;
     }
     if (event.type === 'control') {
+      this.publish({ heardText: event.command, wakeProvider: event.source } as any);
       void this.handleKeywordControl(event.command);
       return;
     }
     if (event.type === 'wake') {
       const text = event.text ? stripWake(event.text) : '';
+      this.publish({ heardText: text || event.label || 'aga', interim: text, wakeProvider: event.source } as any);
       void this.handleWake(text, event.source);
     }
   }
@@ -206,7 +220,7 @@ export class WakeRealtimeController {
       await stopSpeaking().catch(() => undefined);
       await this.guided.stop('keyword_stop').catch(() => undefined);
       await this.stopRealtime('keyword_stop').catch(() => undefined);
-      this.publish({ activeMedia: null, mediaCommand: 'stop', mode: 'listening', speechStatus: 'stopped by keyword' });
+      this.publish({ activeMedia: null, mediaCommand: 'stop', mode: 'listening', speechStatus: 'stopped by keyword', heardText: 'stop' } as any);
       await this.startWakeScout('keyword_stop').catch(() => undefined);
       return;
     }
@@ -214,13 +228,13 @@ export class WakeRealtimeController {
       await stopSpeaking().catch(() => undefined);
       await this.guided.control('pause').catch(() => undefined);
       this.realtime?.replay('pause');
-      this.publish({ mediaCommand: 'pause', speechStatus: 'paused by keyword' });
+      this.publish({ mediaCommand: 'pause', speechStatus: 'paused by keyword', heardText: 'pause' } as any);
     }
   }
 
   private async handleWake(text: string, source: string) {
     await logEvent('wake.accepted', `${source}:${text || 'keyword_only'}`).catch(() => undefined);
-    this.publish({ interim: '', speechStatus: text ? 'wake detected — routing command' : 'wake detected — opening live ear', mode: 'awake' });
+    this.publish({ interim: text, heardText: text || 'aga', speechStatus: text ? `routing: ${text.slice(0, 54)}` : 'wake detected — opening live ear', mode: 'awake' } as any);
     if (!text) {
       if (envFlag('EXPO_PUBLIC_AGA_POST_WAKE_TTS_ACK', true)) {
         void speakShortReply(postWakeReply(), 'warm').catch(() => undefined);
@@ -232,6 +246,7 @@ export class WakeRealtimeController {
   }
 
   private async handleTurnText(text: string, source: 'wake' | 'replay') {
+    this.publish({ heardText: text, interim: text, speechStatus: source === 'replay' ? `replay: ${text.slice(0, 54)}` : `heard: ${text.slice(0, 54)}` } as any);
     if (this.guided && await this.guided.acceptUserResponse(text).catch(() => false)) return;
     const kind = guidedKindFromText(text);
     const route = classifyTurnForVoicePath(text);
@@ -279,7 +294,7 @@ export class WakeRealtimeController {
     if (envFlag('EXPO_PUBLIC_AGA_FRESH_CONTEXT_PER_WAKE', true)) {
       await startNewConversationSession('wake_activation', { clearTranscript: true, endActiveSession: false }).catch(() => undefined);
     }
-    this.publish({ mode: 'thinking', speechStatus: `${selectedEngine()} live session starting`, error: null });
+    this.publish({ mode: 'thinking', speechStatus: `${selectedEngine()} live session starting`, error: null, heardText: initialText } as any);
     const session = await this.createSelectedVoiceSession();
     this.realtime = session;
     this.realtimeUnsubscribe = session.subscribe((next) => {

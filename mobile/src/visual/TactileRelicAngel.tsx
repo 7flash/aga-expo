@@ -1,10 +1,11 @@
 import React, { memo, useEffect, useMemo, useRef } from 'react';
-import { Animated, Easing, StyleSheet, View } from 'react-native';
+import { Animated, Easing, Platform, StyleSheet, View } from 'react-native';
 import type { AgaMode } from '../aga/turn';
-import { AgaAvatarZen } from '../ui/AgaAvatarZen';
 import { ANGEL_FRAGMENT_SHADER, ANGEL_VERTEX_SHADER } from './angelShader';
 
 declare function require(name: string): any;
+
+const canUseNativeDriver = Platform.OS !== 'web';
 
 type Props = {
   mode: AgaMode;
@@ -66,6 +67,44 @@ function createProgram(gl: any) {
   return program;
 }
 
+
+function FallbackRelicCore({ mode, audioLevel = 0, size = 330, wear = 0.18, interactionPulse = 0, mirror }: Props) {
+  const pulse = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const loop = Animated.loop(Animated.sequence([
+      Animated.timing(pulse, { toValue: 1, duration: 1450, easing: Easing.inOut(Easing.quad), useNativeDriver: canUseNativeDriver }),
+      Animated.timing(pulse, { toValue: 0, duration: 1450, easing: Easing.inOut(Easing.quad), useNativeDriver: canUseNativeDriver }),
+    ]));
+    loop.start();
+    return () => loop.stop();
+  }, [pulse]);
+
+  const glow = mode === 'speaking' ? '#f0ae3f' : mode === 'guided' ? '#b45cff' : mode === 'thinking' ? '#9d86ff' : '#48f0ff';
+  const stage = size * 1.28;
+  const scale = pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1 + Math.min(0.06, audioLevel * 0.08 + interactionPulse * 0.035)] });
+  const opacity = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.62, 0.94] });
+  return (
+    <View pointerEvents="none" style={[styles.root, styles.fallbackRoot, { width: stage, height: stage }, mirror && styles.mirror]}>
+      <View style={[styles.fallbackCradle, { borderColor: `${glow}44`, shadowColor: glow }]}>
+        <View style={styles.fallbackBracketTop} />
+        <View style={styles.fallbackBracketBottom} />
+        <View style={styles.fallbackCableA} />
+        <View style={styles.fallbackCableB} />
+        <View style={styles.fallbackWingLeft} />
+        <View style={styles.fallbackWingRight} />
+        <Animated.View style={[styles.fallbackHalo, { borderColor: `${glow}55`, shadowColor: glow, opacity, transform: [{ scale }] }]} />
+        <Animated.View style={[styles.fallbackCore, { backgroundColor: glow, shadowColor: glow, opacity, transform: [{ rotate: '45deg' }, { scale }] }]} />
+        <View style={[styles.fallbackOrbit, { borderColor: `${glow}33` }]} />
+        <View style={[styles.fallbackPatina, { opacity: Math.min(0.22, 0.06 + wear * 0.2) }]} />
+      </View>
+      <Animated.View style={[styles.scanPass, { transform: [{ translateY: pulse.interpolate({ inputRange: [0, 1], outputRange: [-stage * 0.2, stage * 1.1] }) }] }]} />
+      <View style={styles.horizontalScanlines} />
+      <View style={styles.chromaCyan} />
+      <View style={styles.chromaMagenta} />
+    </View>
+  );
+}
+
 export const TactileRelicAngel = memo(function TactileRelicAngel({
   mode,
   audioLevel = 0,
@@ -90,13 +129,13 @@ export const TactileRelicAngel = memo(function TactileRelicAngel({
   useEffect(() => { interactRef.current = Math.max(0, Math.min(1, Number(interactionPulse) || 0)); }, [interactionPulse]);
   useEffect(() => () => { alive.current = false; }, []);
   useEffect(() => {
-    const loop = Animated.loop(Animated.timing(scan, { toValue: 1, duration: 4200, easing: Easing.linear, useNativeDriver: true }));
+    const loop = Animated.loop(Animated.timing(scan, { toValue: 1, duration: 4200, easing: Easing.linear, useNativeDriver: canUseNativeDriver }));
     loop.start();
     return () => loop.stop();
   }, [scan]);
 
   const stage = size * (lowPower ? 1.18 : 1.55);
-  if (!GLView) return <AgaAvatarZen mode={mode} audioLevel={audioLevel} compact={compact} size={size} />;
+  if (!GLView) return <FallbackRelicCore mode={mode} audioLevel={audioLevel} size={size} wear={wear} interactionPulse={interactionPulse} mirror={mirror} />;
 
   const onContextCreate = (gl: any) => {
     let frame = 0;
@@ -197,6 +236,22 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(180,92,255,0.16)',
     transform: [{ translateX: 1 }],
   },
+  fallbackRoot: { alignItems: 'center', justifyContent: 'center' },
+  fallbackCradle: {
+    width: '72%', height: '72%', borderRadius: 999, borderWidth: 2,
+    backgroundColor: 'rgba(9,16,17,0.82)', alignItems: 'center', justifyContent: 'center',
+    shadowOpacity: 0.45, shadowRadius: 30, overflow: 'hidden',
+  },
+  fallbackBracketTop: { position: 'absolute', top: '8%', width: '42%', height: 9, borderRadius: 8, backgroundColor: '#1e2a2c', borderWidth: 1, borderColor: '#4b5b5e' },
+  fallbackBracketBottom: { position: 'absolute', bottom: '8%', width: '50%', height: 11, borderRadius: 8, backgroundColor: '#0b1112', borderWidth: 1, borderColor: '#35464a' },
+  fallbackCableA: { position: 'absolute', left: '16%', top: '52%', width: '68%', height: 4, borderRadius: 4, backgroundColor: 'rgba(72,240,255,0.34)', transform: [{ rotate: '-28deg' }] },
+  fallbackCableB: { position: 'absolute', left: '18%', top: '44%', width: '64%', height: 3, borderRadius: 4, backgroundColor: 'rgba(180,92,255,0.28)', transform: [{ rotate: '21deg' }] },
+  fallbackWingLeft: { position: 'absolute', left: '18%', width: '24%', height: '38%', borderTopLeftRadius: 80, borderBottomLeftRadius: 80, backgroundColor: 'rgba(115,129,133,0.18)', transform: [{ rotate: '20deg' }] },
+  fallbackWingRight: { position: 'absolute', right: '18%', width: '24%', height: '38%', borderTopRightRadius: 80, borderBottomRightRadius: 80, backgroundColor: 'rgba(115,129,133,0.18)', transform: [{ rotate: '-20deg' }] },
+  fallbackHalo: { position: 'absolute', width: '44%', height: '44%', borderRadius: 999, borderWidth: 1, shadowOpacity: 0.72, shadowRadius: 22 },
+  fallbackCore: { width: '12%', height: '12%', borderRadius: 7, shadowOpacity: 0.92, shadowRadius: 24 },
+  fallbackOrbit: { position: 'absolute', width: '62%', height: '36%', borderRadius: 999, borderWidth: 1, transform: [{ rotate: '-27deg' }] },
+  fallbackPatina: { ...StyleSheet.absoluteFillObject, backgroundColor: '#8d5731' },
   mirror: { transform: [{ scaleX: -1 }] },
 });
 

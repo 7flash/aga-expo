@@ -35,7 +35,7 @@ function numericListEnv(name: string, count: number, fallback: number) {
   });
 }
 
-function loadPorcupineManager(): any | null {
+export function loadPorcupineManager(): any | null {
   if (Platform.OS === 'web') return null;
   try {
     const mod = require('@picovoice/porcupine-react-native');
@@ -43,6 +43,10 @@ function loadPorcupineManager(): any | null {
   } catch {
     return null;
   }
+}
+
+export function isPorcupineWakeAvailable() {
+  return !!loadPorcupineManager();
 }
 
 export class PorcupineWakeEngine {
@@ -61,7 +65,7 @@ export class PorcupineWakeEngine {
   getDiagnostics() {
     return {
       provider: 'porcupine',
-      available: !!loadPorcupineManager(),
+      available: isPorcupineWakeAvailable(),
       started: this.started,
       keywordPaths: this.keywordPaths,
       labels: this.labels,

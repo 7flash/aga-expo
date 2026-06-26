@@ -1,6 +1,8 @@
 import React, { memo, useEffect, useMemo, useRef } from 'react';
-import { Animated, Easing, StyleProp, StyleSheet, Text, View, ViewStyle } from 'react-native';
+import { Animated, Easing, Platform, StyleProp, StyleSheet, Text, View, ViewStyle } from 'react-native';
 import { glowForMode, materialForWear, tactileRelic as relic, type TactileMode } from './tokens';
+
+const canUseNativeDriver = Platform.OS !== 'web';
 
 type Modeish = TactileMode | string;
 
@@ -16,8 +18,8 @@ function pulseLoop(value: Animated.Value, active: boolean, duration = 860) {
     return undefined;
   }
   const loop = Animated.loop(Animated.sequence([
-    Animated.timing(value, { toValue: 1, duration, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
-    Animated.timing(value, { toValue: 0, duration: Math.round(duration * 1.18), easing: Easing.in(Easing.quad), useNativeDriver: true }),
+    Animated.timing(value, { toValue: 1, duration, easing: Easing.out(Easing.cubic), useNativeDriver: canUseNativeDriver }),
+    Animated.timing(value, { toValue: 0, duration: Math.round(duration * 1.18), easing: Easing.in(Easing.quad), useNativeDriver: canUseNativeDriver }),
   ]));
   loop.start();
   return loop;
@@ -69,7 +71,7 @@ export const TactileButton = memo(function TactileButton({ label, sublabel, acti
   const mat = materialForWear(wear);
 
   useEffect(() => {
-    Animated.spring(press, { toValue: pressed ? 1 : active ? 0.18 : 0, useNativeDriver: true, ...relic.spring.press }).start();
+    Animated.spring(press, { toValue: pressed ? 1 : active ? 0.18 : 0, useNativeDriver: canUseNativeDriver, ...relic.spring.press }).start();
   }, [active, press, pressed]);
 
   useEffect(() => {
@@ -109,7 +111,7 @@ export const MechanicalSwitch = memo(function MechanicalSwitch({ label, value, m
   const throwAnim = useRef(new Animated.Value(value ? 1 : 0)).current;
   const mat = materialForWear(wear);
   useEffect(() => {
-    Animated.spring(throwAnim, { toValue: value ? 1 : 0, useNativeDriver: true, ...relic.spring.switchThrow }).start();
+    Animated.spring(throwAnim, { toValue: value ? 1 : 0, useNativeDriver: canUseNativeDriver, ...relic.spring.switchThrow }).start();
   }, [throwAnim, value]);
   const rotate = throwAnim.interpolate({ inputRange: [0, 1], outputRange: ['-31deg', '31deg'] });
   const tx = throwAnim.interpolate({ inputRange: [0, 1], outputRange: [-15, 15] });
@@ -138,7 +140,7 @@ export const RotarySelector = memo(function RotarySelector({ label, valueLabel, 
   const glow = glowForMode(active ? mode : 'idle');
   const turn = useRef(new Animated.Value(detent)).current;
   useEffect(() => {
-    Animated.spring(turn, { toValue: detent, useNativeDriver: true, ...relic.spring.detent }).start();
+    Animated.spring(turn, { toValue: detent, useNativeDriver: canUseNativeDriver, ...relic.spring.detent }).start();
   }, [detent, turn]);
   const rotate = turn.interpolate({ inputRange: [0, Math.max(1, detents - 1)], outputRange: ['-128deg', '128deg'] });
   const marks = useMemo(() => Array.from({ length: detents }, (_, i) => i), [detents]);
