@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-06-26T19:51:04.516Z",
+  "generatedAt": "2026-06-26T22:04:26.712Z",
   "precision": "fp32",
   "outDir": "assets/kws-model",
   "files": {

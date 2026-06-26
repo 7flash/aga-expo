@@ -1,0 +1,4 @@
+# AGA generated speech assets/cache
+.aga-cache/
+public/sherpa/kws-model/
+public/sherpa/runtime/kws/

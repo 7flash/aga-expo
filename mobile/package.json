@@ -28,7 +28,8 @@
     "react-native-screens": "latest",
     "react-native-svg": "^15.15.5",
     "react-native-web": "latest",
-    "react-native-webview": "13.16.1"
+    "react-native-webview": "13.16.1",
+    "sherpa-onnx": "^1.13.3"
   },
   "devDependencies": {
     "@types/react": "latest",

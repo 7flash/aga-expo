@@ -1,189 +1,232 @@
 import { Platform } from 'react-native';
-import { PorcupineWakeEngine, isPorcupineWakeAvailable, type PorcupineDetection } from './porcupineWakeEngine';
-import { PorcupineWebWakeEngine } from './porcupineWebWakeEngine';
-import { DevKeywordInjectorWakeEngine } from './devKeywordInjectorWakeEngine';
-import { createSherpaKeywordEngine } from './sherpaKeywordEngine';
-import { wakeKeywords } from './sherpaKeywordPhrases';
-import { shouldAllowDevKeywordFallback } from './sherpaModelManifest';
-import type { KeywordEngine, KeywordEvent } from './keywordEngine';
+import { SherpaWasmKeywordEngine } from './sherpaWasmKeywordEngine';
 
-export type WakeKeywordSource = 'sherpa_native' | 'sherpa_wasm' | 'porcupine' | 'porcupine_web' | 'dev_keyword';
+export type WakeKeywordProvider =
+  | 'sherpa-wasm'
+  | 'sherpa-native'
+  | 'porcupine'
+  | 'dev'
+  | 'unavailable';
 
-export type WakeEngineEvent =
-  | { type: 'wake'; label: 'aga' | string; source: WakeKeywordSource }
-  | { type: 'control'; command: 'stop' | 'pause' | 'resume'; source: WakeKeywordSource }
-  | { type: 'status'; status: string }
-  | { type: 'error'; message: string };
-
-export type WakeEngine = {
-  start(): Promise<void> | void;
-  stop(): Promise<void> | void;
-  getDiagnostics?(): unknown;
+export type WakeEngineEvent = {
+  type: 'keyword' | 'status' | 'error';
+  provider: WakeKeywordProvider | string;
+  keyword?: string;
+  index?: number;
+  confidence?: number;
+  message?: string;
+  raw?: unknown;
 };
 
-export type WakeEngineCallbacks = {
-  onEvent: (event: WakeEngineEvent) => void;
+export type KeywordEngineConfig = {
+  keywords?: string[];
+  wakeKeywords?: string[];
+  allowDevFallback?: boolean;
 };
 
-function env(name: string) {
-  return process.env?.[name] ?? '';
+export interface KeywordEngine {
+  start(config?: KeywordEngineConfig): Promise<void>;
+  stop(): Promise<void>;
+  subscribe(listener: (event: WakeEngineEvent) => void): () => void;
 }
 
-function wakeEngineName() {
-  return String(env('EXPO_PUBLIC_AGA_KEYWORD_ENGINE') || env('EXPO_PUBLIC_AGA_WAKE_ENGINE') || 'sherpa').toLowerCase();
+export type WakeEngine = KeywordEngine;
+
+function env(name: string, fallback = '') {
+  return String((process as any)?.env?.[name] ?? fallback).trim();
 }
 
-function webWakeEngineName() {
-  return String(env('EXPO_PUBLIC_AGA_BROWSER_KEYWORD_ENGINE') || env('EXPO_PUBLIC_AGA_WEB_WAKE_ENGINE') || '').toLowerCase();
+function wakeKeywords() {
+  return env('EXPO_PUBLIC_AGA_SHERPA_WAKE_KEYWORDS', 'aga,stop,pause')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
-function porcupineToEvent(event: PorcupineDetection, source: WakeKeywordSource): WakeEngineEvent {
-  const label = String(event.label || '').toLowerCase();
-  if (event.index === 1 || label === 'stop') return { type: 'control', command: 'stop', source };
-  if (event.index === 2 || label === 'pause') return { type: 'control', command: 'pause', source };
-  return { type: 'wake', label: label || 'aga', source };
-}
-
-function sherpaToEvent(event: KeywordEvent): WakeEngineEvent {
-  const source = event.provider as WakeKeywordSource;
-  if (event.intent === 'control.stop') return { type: 'control', command: 'stop', source };
-  if (event.intent === 'control.pause') return { type: 'control', command: 'pause', source };
-  if (event.intent === 'control.resume') return { type: 'control', command: 'resume', source };
-  return { type: 'wake', label: event.value || event.phrase || 'aga', source };
-}
-
-function createDevEngine(callbacks: WakeEngineCallbacks, reason: string): WakeEngine {
-  return new DevKeywordInjectorWakeEngine({
-    onWake: (label) => callbacks.onEvent({ type: 'wake', label, source: 'dev_keyword' }),
-    onControl: (command) => callbacks.onEvent({ type: 'control', command, source: 'dev_keyword' }),
-    onStatus: (status) => callbacks.onEvent({ type: 'status', status }),
-    onError: (message) => callbacks.onEvent({ type: 'error', message }),
-  }, reason);
-}
-
-class ResilientWakeEngine implements WakeEngine {
-  private primary: WakeEngine;
-  private fallbackFactory: () => WakeEngine | null;
-  private active: WakeEngine | null = null;
-  private fallbackReason: string | null = null;
-
-  constructor(primary: WakeEngine, fallbackFactory: () => WakeEngine | null) {
-    this.primary = primary;
-    this.fallbackFactory = fallbackFactory;
-  }
+class UnavailableWakeEngine implements WakeEngine {
+  private listeners = new Set<(event: WakeEngineEvent) => void>();
+  constructor(private readonly message: string, private readonly provider: WakeKeywordProvider = 'unavailable') {}
 
   async start() {
-    try {
-      this.active = this.primary;
-      await Promise.resolve(this.primary.start());
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error || 'primary wake engine failed');
-      await Promise.resolve(this.primary.stop?.()).catch(() => undefined);
-      const fallback = this.fallbackFactory();
-      if (!fallback) throw error;
-      this.fallbackReason = message;
-      this.active = fallback;
-      await Promise.resolve(fallback.start());
-    }
-  }
-
-  async stop() {
-    const active = this.active;
-    this.active = null;
-    await Promise.resolve(active?.stop?.()).catch(() => undefined);
-  }
-
-  getDiagnostics() {
-    return {
-      provider: this.fallbackReason ? 'dev_keyword' : 'sherpa_wasm',
-      fallbackReason: this.fallbackReason,
-      active: this.active?.getDiagnostics?.(),
-      primary: this.primary.getDiagnostics?.(),
+    const event: WakeEngineEvent = {
+      type: 'error',
+      provider: this.provider,
+      message: this.message,
     };
+    this.emit(event);
+    throw new Error(this.message);
+  }
+
+  async stop() {}
+
+  subscribe(listener: (event: WakeEngineEvent) => void) {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private emit(event: WakeEngineEvent) {
+    for (const listener of Array.from(this.listeners)) listener(event);
   }
 }
 
-class SherpaWakeEngine implements WakeEngine {
-  private engine: KeywordEngine;
-  private callbacks: WakeEngineCallbacks;
-  private provider: 'sherpa_native' | 'sherpa_wasm' | 'dev_keyword';
+class DevKeywordEngine implements WakeEngine {
+  private listeners = new Set<(event: WakeEngineEvent) => void>();
+  private keywords = wakeKeywords();
 
-  constructor(callbacks: WakeEngineCallbacks, provider?: 'sherpa_native' | 'sherpa_wasm' | 'dev_keyword') {
-    this.callbacks = callbacks;
-    this.provider = provider || (Platform.OS === 'web' ? 'sherpa_wasm' : 'sherpa_native');
-    this.engine = createSherpaKeywordEngine({
-      onKeyword: (event) => this.callbacks.onEvent(sherpaToEvent(event)),
-      onStatus: (status) => this.callbacks.onEvent({ type: 'status', status }),
-      onError: (message) => this.callbacks.onEvent({ type: 'error', message }),
-      onNoMatch: (reason) => this.callbacks.onEvent({ type: 'status', status: `sherpa wake no-match: ${reason}` }),
-    }, this.provider);
-  }
+  async start(config: KeywordEngineConfig = {}) {
+    this.keywords = config.keywords || config.wakeKeywords || this.keywords;
+    const root: any = globalThis as any;
 
-  getDiagnostics() {
-    return { provider: this.provider, diagnostics: this.engine.getDiagnostics?.() };
-  }
+    root.__AGA_WAKE = () => this.fire('aga');
+    root.__AGA_STOP = () => this.fire('stop');
+    root.__AGA_PAUSE = () => this.fire('pause');
+    root.__AGA_KEYWORD = (word: string) => this.fire(String(word || ''));
 
-  start() {
-    return this.engine.start({ mode: 'wake', provider: this.provider, keywords: wakeKeywords(), timeoutMs: 0, allowTextFallback: false });
-  }
-
-  stop() {
-    return this.engine.stop('wake_stop');
-  }
-}
-
-/**
- * Wake engine factory.
- *
- * Product contract:
- * - No Android SpeechRecognizer hot-mic path.
- * - Sherpa native is the preferred Android keyword engine.
- * - Sherpa WASM is the preferred browser preview keyword engine.
- * - Porcupine remains a fallback for fixed aga/stop/pause keyword files.
- * - Dev injection is explicit fallback only.
- */
-export function createWakeEngine(callbacks: WakeEngineCallbacks): WakeEngine {
-  const requested = wakeEngineName();
-  const requestedWeb = webWakeEngineName();
-
-  if (requested === 'dev' || requested === 'keyword_dev' || requestedWeb === 'dev') {
-    return createDevEngine(callbacks, 'explicit dev keyword injector');
-  }
-
-  if (requested === 'speech' || requested === 'web_speech' || requestedWeb === 'speech' || requestedWeb === 'web_speech') {
-    return createDevEngine(callbacks, 'speech hot-mic disabled; use Sherpa, Porcupine, or explicit dev injection');
-  }
-
-  if (Platform.OS === 'web') {
-    if (requestedWeb === 'sherpa' || requestedWeb === 'sherpa_wasm' || requested === 'sherpa' || requested === 'auto') {
-      const primary = new SherpaWakeEngine(callbacks, 'sherpa_wasm');
-      return new ResilientWakeEngine(primary, () => {
-        if (!shouldAllowDevKeywordFallback()) return null;
-        return createDevEngine(callbacks, 'Sherpa WASM unavailable; explicit dev keyword fallback enabled');
-      });
-    }
-    if (requestedWeb === 'porcupine' || requestedWeb === 'porcupine_web' || requested === 'porcupine') {
-      return new PorcupineWebWakeEngine({
-        onDetected: (detected) => callbacks.onEvent(porcupineToEvent(detected, 'porcupine_web')),
-        onStatus: (status) => callbacks.onEvent({ type: 'status', status }),
-        onError: (message) => callbacks.onEvent({ type: 'error', message }),
-      });
-    }
-    return createDevEngine(callbacks, 'web keyword engine not configured');
-  }
-
-  if (requested === 'sherpa' || requested === 'sherpa_native' || requested === 'auto') {
-    return new SherpaWakeEngine(callbacks, 'sherpa_native');
-  }
-
-  if (requested === 'porcupine') {
-    if (!isPorcupineWakeAvailable()) return createDevEngine(callbacks, 'Porcupine native unavailable');
-    return new PorcupineWakeEngine({
-      onDetected: (detected) => callbacks.onEvent(porcupineToEvent(detected, 'porcupine')),
-      onStatus: (status) => callbacks.onEvent({ type: 'status', status }),
-      onError: (message) => callbacks.onEvent({ type: 'error', message }),
+    this.emit({
+      type: 'status',
+      provider: 'dev',
+      message: 'Dev keyword injector ready: __AGA_WAKE(), __AGA_STOP(), __AGA_PAUSE(), __AGA_KEYWORD("aga").',
     });
   }
 
-  return createDevEngine(callbacks, `unknown wake engine "${requested}"`);
+  async stop() {}
+
+  subscribe(listener: (event: WakeEngineEvent) => void) {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private fire(keyword: string) {
+    const clean = keyword.toLowerCase().trim();
+    const index = this.keywords.findIndex((k) => clean.includes(k.toLowerCase()));
+    this.emit({
+      type: 'keyword',
+      provider: 'dev',
+      keyword: clean,
+      index: index >= 0 ? index : undefined,
+      confidence: 1,
+      raw: { dev: true },
+    });
+  }
+
+  private emit(event: WakeEngineEvent) {
+    for (const listener of Array.from(this.listeners)) listener(event);
+  }
+}
+
+class SherpaNativePlaceholderEngine implements WakeEngine {
+  private listeners = new Set<(event: WakeEngineEvent) => void>();
+
+  async start(config: KeywordEngineConfig = {}) {
+    try {
+      const mod = await import('react-native-sherpa-onnx' as any);
+      const factory =
+        (mod as any).createKeywordSpotter ||
+        (mod as any).SherpaOnnxKws ||
+        (mod as any).KeywordSpotter ||
+        (mod as any).default;
+
+      if (!factory) {
+        throw new Error(`react-native-sherpa-onnx loaded but no known keyword spotter export found. Exports: ${Object.keys(mod as any).join(', ')}`);
+      }
+
+      this.emit({
+        type: 'status',
+        provider: 'sherpa-native',
+        message: 'Native Sherpa module detected. Wire concrete Android KWS adapter here if not already provided by your installed package.',
+        raw: { exports: Object.keys(mod as any), config },
+      });
+
+      throw new Error('Native Sherpa adapter exists but is not fully mapped in this web-first patch.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.emit({ type: 'error', provider: 'sherpa-native', message });
+      throw error;
+    }
+  }
+
+  async stop() {}
+
+  subscribe(listener: (event: WakeEngineEvent) => void) {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private emit(event: WakeEngineEvent) {
+    for (const listener of Array.from(this.listeners)) listener(event);
+  }
+}
+
+class PorcupinePlaceholderEngine implements WakeEngine {
+  private listeners = new Set<(event: WakeEngineEvent) => void>();
+
+  async start() {
+    try {
+      const mod = await import('@picovoice/porcupine-react-native' as any);
+      this.emit({
+        type: 'status',
+        provider: 'porcupine',
+        message: 'Porcupine module detected. This build prefers Sherpa; Porcupine fallback adapter is not active in web.',
+        raw: { exports: Object.keys(mod as any) },
+      });
+      throw new Error('Porcupine fallback is disabled for browser Path A. Use EXPO_PUBLIC_AGA_BROWSER_KEYWORD_ENGINE=sherpa_wasm.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.emit({ type: 'error', provider: 'porcupine', message });
+      throw error;
+    }
+  }
+
+  async stop() {}
+
+  subscribe(listener: (event: WakeEngineEvent) => void) {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private emit(event: WakeEngineEvent) {
+    for (const listener of Array.from(this.listeners)) listener(event);
+  }
+}
+
+function createWebWakeEngine() {
+  const browserEngine = env('EXPO_PUBLIC_AGA_BROWSER_KEYWORD_ENGINE', env('EXPO_PUBLIC_AGA_KEYWORD_ENGINE', 'sherpa_wasm')).toLowerCase();
+  const allowDev = env('EXPO_PUBLIC_AGA_ALLOW_DEV_KEYWORD_INJECTOR', '0') === '1';
+
+  if (browserEngine === 'sherpa_wasm' || browserEngine === 'sherpa-wasm' || browserEngine === 'sherpa' || browserEngine === '') {
+    return new SherpaWasmKeywordEngine();
+  }
+
+  if (browserEngine === 'dev' || browserEngine === 'dev_injector') {
+    if (!allowDev) {
+      return new UnavailableWakeEngine('Dev keyword injector requested but EXPO_PUBLIC_AGA_ALLOW_DEV_KEYWORD_INJECTOR=1 is not set.', 'dev');
+    }
+    return new DevKeywordEngine();
+  }
+
+  return new UnavailableWakeEngine(`Unsupported browser keyword engine: ${browserEngine}. Use sherpa_wasm.`, 'unavailable');
+}
+
+function createNativeWakeEngine() {
+  const nativeEngine = env('EXPO_PUBLIC_AGA_KEYWORD_ENGINE', env('EXPO_PUBLIC_AGA_WAKE_ENGINE', 'sherpa')).toLowerCase();
+
+  if (nativeEngine === 'sherpa' || nativeEngine === 'sherpa_native' || nativeEngine === 'sherpa-native') {
+    return new SherpaNativePlaceholderEngine();
+  }
+
+  if (nativeEngine === 'porcupine') return new PorcupinePlaceholderEngine();
+
+  const allowDev = env('EXPO_PUBLIC_AGA_ALLOW_DEV_KEYWORD_INJECTOR', '0') === '1';
+  if (nativeEngine === 'dev' && allowDev) return new DevKeywordEngine();
+
+  return new UnavailableWakeEngine(`Unsupported native keyword engine: ${nativeEngine}. Use sherpa or porcupine.`, 'unavailable');
+}
+
+export function createWakeEngine(): WakeEngine {
+  if (Platform.OS === 'web') return createWebWakeEngine();
+  return createNativeWakeEngine();
+}
+
+export function defaultWakeKeywords() {
+  return wakeKeywords();
 }
