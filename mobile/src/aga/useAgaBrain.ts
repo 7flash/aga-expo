@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { AgaBrainSnapshot } from './CognitiveEngine';
+import type { VoiceTransportSnapshot as AgaBrainSnapshot } from '../voice/VoiceTransport';
 import type { RealtimeSnapshot } from '../realtime/RealtimeSession';
 import { agaEngineDiagnostics, getAgaEngine, isLocalEngine, shouldUseDirectOpenAiRealtime } from './engine';
 
@@ -11,6 +11,7 @@ const INITIAL_SNAPSHOT: AgaBrainSnapshot = {
   reminders: [],
   activeMedia: null,
   mediaCommand: null,
+  audioLevel: 0,
   speechStatus: 'starting',
   error: null,
   lastMeasure: undefined,
@@ -74,8 +75,8 @@ async function createSelectedBrain(): Promise<{ engine: BrainLike; useWakeRuntim
     return { engine: new mod.WakeRealtimeController(), useWakeRuntime };
   }
 
-  const mod = await import('./CognitiveEngine');
-  return { engine: new mod.CognitiveEngine(), useWakeRuntime };
+  const mod = await import('../voice/LocalTransport');
+  return { engine: new mod.LocalTransport(), useWakeRuntime };
 }
 
 export function useAgaBrain() {

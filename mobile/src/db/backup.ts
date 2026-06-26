@@ -3,7 +3,7 @@ import { migrate } from './migrations';
 
 export type BackupSnapshot = {
   app: 'AGA';
-  version: 4;
+  version: 5;
   exportedAt: string;
   tables: Record<string, unknown[]>;
 };
@@ -18,6 +18,8 @@ export type StorageSummary = {
   favorites: number;
   translations: number;
   routines: number;
+  reflections: number;
+  learnedSkills: number;
   events: number;
   backupBytes: number;
 };
@@ -26,7 +28,9 @@ const TABLES = [
   'conversations',
   'messages',
   'user_preferences',
+  'aga_preferences_extra',
   'memory_facts',
+  'episodic_reflections',
   'reminders',
   'proactive_events',
   'media_sessions',
@@ -34,6 +38,7 @@ const TABLES = [
   'media_favorites',
   'translation_history',
   'routines',
+  'learned_skills',
   'event_log',
 ] as const;
 
@@ -42,6 +47,7 @@ type BackupTable = typeof TABLES[number];
 const ALLOWED_COLUMNS: Record<BackupTable, readonly string[]> = {
   conversations: ['id', 'title', 'createdAt', 'updatedAt'],
   messages: ['id', 'conversationId', 'role', 'content', 'createdAt'],
+  aga_preferences_extra: ['id', 'json', 'updatedAt'],
   user_preferences: [
     'id',
     'activePersona',
@@ -62,14 +68,16 @@ const ALLOWED_COLUMNS: Record<BackupTable, readonly string[]> = {
     'quietHoursEnd',
     'updatedAt',
   ],
-  memory_facts: ['id', 'text', 'source', 'pinned', 'createdAt', 'updatedAt'],
+  memory_facts: ['id', 'text', 'kind', 'source', 'confidence', 'pinned', 'createdAt', 'updatedAt'],
+  episodic_reflections: ['id', 'sessionId', 'kind', 'summary', 'goal', 'technique', 'emotionalPattern', 'nextRitual', 'tagsJson', 'createdAt'],
   reminders: ['id', 'title', 'dueAt', 'status', 'source', 'notificationId', 'createdAt', 'updatedAt'],
   proactive_events: ['id', 'kind', 'speech', 'payload', 'status', 'createdAt', 'updatedAt'],
   media_sessions: ['id', 'kind', 'title', 'artist', 'query', 'ref', 'artworkUrl', 'state', 'createdAt', 'updatedAt'],
   media_queue: ['id', 'kind', 'query', 'title', 'artist', 'ref', 'artworkUrl', 'status', 'sortOrder', 'createdAt', 'updatedAt'],
   media_favorites: ['id', 'kind', 'title', 'artist', 'query', 'ref', 'artworkUrl', 'createdAt', 'updatedAt'],
   translation_history: ['id', 'sourceText', 'translatedText', 'fromLang', 'toLang', 'createdAt'],
-  routines: ['id', 'title', 'prompt', 'timeOfDay', 'daysOfWeek', 'enabled', 'lastFiredAt', 'createdAt', 'updatedAt'],
+  routines: ['id', 'title', 'prompt', 'timeOfDay', 'daysOfWeek', 'triggerJson', 'actionJson', 'confidence', 'source', 'enabled', 'consentState', 'lastFiredAt', 'lastObservedAt', 'createdAt', 'updatedAt'],
+  learned_skills: ['id', 'label', 'aliasesJson', 'instructions', 'segmentsJson', 'toolsJson', 'source', 'confidence', 'enabled', 'createdAt', 'updatedAt'],
   event_log: ['id', 'kind', 'label', 'payload', 'durationMs', 'createdAt'],
 };
 
@@ -104,7 +112,7 @@ export async function createBackupSnapshot(): Promise<BackupSnapshot> {
   }));
   return {
     app: 'AGA',
-    version: 4,
+    version: 5,
     exportedAt: new Date().toISOString(),
     tables: Object.fromEntries(entries),
   };
@@ -115,7 +123,7 @@ export async function createBackupJson() {
 }
 
 export async function getStorageSummary(): Promise<StorageSummary> {
-  const [conversations, messages, memories, reminders, mediaSessions, mediaQueue, favorites, translations, routines, events, databaseBytes] = await Promise.all([
+  const [conversations, messages, memories, reminders, mediaSessions, mediaQueue, favorites, translations, routines, reflections, learnedSkills, events, databaseBytes] = await Promise.all([
     count('conversations'),
     count('messages'),
     count('memory_facts'),
@@ -125,6 +133,8 @@ export async function getStorageSummary(): Promise<StorageSummary> {
     count('media_favorites'),
     count('translation_history'),
     count('routines'),
+    count('episodic_reflections'),
+    count('learned_skills'),
     count('event_log'),
     estimateDatabaseBytes(),
   ]);
@@ -138,6 +148,8 @@ export async function getStorageSummary(): Promise<StorageSummary> {
     favorites,
     translations,
     routines,
+    reflections,
+    learnedSkills,
     events,
     backupBytes: databaseBytes,
   };
@@ -161,6 +173,7 @@ export async function factoryResetLocalData() {
   await run('DELETE FROM messages');
   await run('DELETE FROM conversations');
   await run('DELETE FROM memory_facts');
+  await run('DELETE FROM episodic_reflections');
   await run('DELETE FROM reminders');
   await run('DELETE FROM proactive_events');
   await run('DELETE FROM media_sessions');
@@ -168,9 +181,12 @@ export async function factoryResetLocalData() {
   await run('DELETE FROM media_favorites');
   await run('DELETE FROM translation_history');
   await run('DELETE FROM routines');
+  await run('DELETE FROM learned_skills');
   await run('DELETE FROM event_log');
   await run('DELETE FROM user_preferences WHERE id = 1');
+  await run('DELETE FROM aga_preferences_extra WHERE id = 1');
   await run('INSERT OR IGNORE INTO user_preferences (id) VALUES (1)');
+  await run("INSERT OR IGNORE INTO aga_preferences_extra (id, json) VALUES (1, '{}')");
 }
 
 function safeImportRow(table: BackupTable, row: Record<string, unknown>) {
@@ -201,5 +217,5 @@ export async function importBackupJson(json: string) {
 
 export function summarizeStorage(summary: StorageSummary) {
   const kb = Math.max(1, Math.round(summary.backupBytes / 1024));
-  return `${summary.conversations} conversations, ${summary.messages} messages, ${summary.memories} memories, ${summary.reminders} reminders, ${summary.mediaQueue} queued media items, ${summary.favorites} favorites, ${summary.translations} translations, ${summary.routines} routines, and ${summary.events} log events. SQLite database is about ${kb} kilobytes.`;
+  return `${summary.conversations} conversations, ${summary.messages} messages, ${summary.memories} memories, ${summary.reminders} reminders, ${summary.mediaQueue} queued media items, ${summary.favorites} favorites, ${summary.translations} translations, ${summary.routines} routines, ${summary.reflections} reflections, ${summary.learnedSkills} learned skills, and ${summary.events} log events. SQLite database is about ${kb} kilobytes.`;
 }

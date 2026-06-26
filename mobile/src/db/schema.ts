@@ -39,13 +39,41 @@ export type UserPreferences = {
   updatedAt: string;
 };
 
+export type MemoryKind =
+  | 'user_fact'
+  | 'preference'
+  | 'routine'
+  | 'trigger'
+  | 'effective_technique'
+  | 'emotional_pattern'
+  | 'relationship_context'
+  | 'music_preference'
+  | 'avoidance';
+
+export type MemorySource = 'voice' | 'assistant' | 'settings' | 'reflection' | 'habit_observed';
+
 export type MemoryFact = {
   id: number;
   text: string;
-  source: 'voice' | 'assistant' | 'settings';
+  kind: MemoryKind | string;
+  source: MemorySource;
+  confidence: number;
   pinned: number;
   createdAt: string;
   updatedAt: string;
+};
+
+export type EpisodicReflection = {
+  id: number;
+  sessionId: string | null;
+  kind: string;
+  summary: string;
+  goal: string | null;
+  technique: string | null;
+  emotionalPattern: string | null;
+  nextRitual: string | null;
+  tagsJson: string;
+  createdAt: string;
 };
 
 export type ReminderRow = {
@@ -55,6 +83,38 @@ export type ReminderRow = {
   status: 'pending' | 'fired' | 'cancelled';
   source: 'voice' | 'settings';
   notificationId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type LearnedRoutine = {
+  id: number;
+  title: string;
+  prompt: string;
+  timeOfDay: string | null;
+  daysOfWeek: string | null;
+  triggerJson: string | null;
+  actionJson: string | null;
+  confidence: number;
+  source: string;
+  enabled: number;
+  consentState: 'proposed' | 'accepted' | 'dismissed' | string;
+  lastFiredAt: string | null;
+  lastObservedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type LearnedSkillRow = {
+  id: string;
+  label: string;
+  aliasesJson: string;
+  instructions: string;
+  segmentsJson: string | null;
+  toolsJson: string;
+  source: 'builtin' | 'remote' | 'learned';
+  confidence: number;
+  enabled: number;
   createdAt: string;
   updatedAt: string;
 };

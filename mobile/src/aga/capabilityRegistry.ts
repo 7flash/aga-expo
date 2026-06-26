@@ -164,6 +164,41 @@ export const BUILTIN_CAPABILITY_TOOLS: readonly RealtimeToolDefinition[] = [
     }, ['kind']),
   },
 
+
+  {
+    type: 'function',
+    name: 'start_skill',
+    description: 'Start any skill from the unified registry. This covers builtin guided sessions, remote skills, and learned skills.',
+    parameters: schema({
+      idOrAlias: { type: 'string', description: 'Skill id, label, alias, or natural description.' },
+      goal: { type: 'string', description: 'Optional user goal/theme for this run.' },
+    }, ['idOrAlias']),
+  },
+  {
+    type: 'function',
+    name: 'create_learned_skill',
+    description: 'Save a reusable learned skill/scenario after the user asks AGA to learn a new skill or after explicit consent.',
+    parameters: schema({
+      label: { type: 'string' },
+      aliases: { type: 'array', items: { type: 'string' } },
+      instructions: { type: 'string', description: 'Voice-first instructions for how to run this skill safely.' },
+      tools: { type: 'array', items: { type: 'string' } },
+      confidence: { type: 'number' },
+    }, ['label', 'instructions']),
+  },
+  {
+    type: 'function',
+    name: 'propose_learned_routine',
+    description: 'Propose a learned routine from an observed pattern. Do not enable automation until the user accepts it by voice.',
+    parameters: schema({
+      title: { type: 'string' },
+      prompt: { type: 'string' },
+      timeOfDay: { type: 'string' },
+      trigger: { type: 'object' },
+      action: { type: 'object' },
+      confidence: { type: 'number' },
+    }, ['title', 'prompt']),
+  },
   {
     type: 'function',
     name: 'start_guided_session',

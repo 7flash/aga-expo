@@ -88,10 +88,10 @@ export function AgaZenScreen() {
 
   return (
     <SafeAreaView style={[styles.safe, hologramMode && styles.safeHologram]}>
-      <View style={styles.backgroundOrbOne} />
-      <View style={styles.backgroundOrbTwo} />
+      {!hologramMode && <View style={styles.backgroundOrbOne} />}
+      {!hologramMode && <View style={styles.backgroundOrbTwo} />}
 
-      <View style={styles.header}>
+      {!hologramMode && <View style={styles.header}>
         <View style={styles.brandPill}>
           <View style={styles.brandDot}>
             <Text style={styles.brandLetter}>A</Text>
@@ -110,9 +110,9 @@ export function AgaZenScreen() {
           />
           <Text style={styles.statusText}>{status}</Text>
         </View>
-      </View>
+      </View>}
 
-      {!!geminiCost && (
+      {!hologramMode && !!geminiCost && (
         <View style={styles.costPill}>
           <Text style={styles.costLabel}>Gemini</Text>
           <Text style={styles.costText}>{geminiCost.label ?? `${geminiCost.transport ?? 'text'} · ${geminiCost.turns ?? 0} turns`}</Text>
@@ -144,12 +144,12 @@ export function AgaZenScreen() {
         <AngelVisual
           mode={mode}
           audioLevel={audioLevel}
-          compact={!!activeMedia || !!activeChoiceMenu}
-          size={activeMedia || activeChoiceMenu ? 156 : 282}
+          compact={!hologramMode && (!!activeMedia || !!activeChoiceMenu)}
+          size={hologramMode ? 340 : (activeMedia || activeChoiceMenu ? 156 : 282)}
         />
       </Animated.View>
 
-      {!!interim && !activeChoiceMenu && (
+      {!hologramMode && !!interim && !activeChoiceMenu && (
         <Animated.View style={styles.interimPill}>
           <Text style={styles.interimLabel}>AGA HEARS</Text>
           <Text numberOfLines={2} style={styles.interimText}>{interim}</Text>
@@ -177,7 +177,8 @@ export function AgaZenScreen() {
         </View>
       )}
 
-      <View style={[styles.feedShell, activeChoiceMenu ? styles.feedShellWithChoice : null, activeMedia ? styles.feedShellWithMedia : null]}>
+      {(!hologramMode || debugUi || activeChoiceMenu || activeMedia) && (
+      <View style={[styles.feedShell, activeChoiceMenu ? styles.feedShellWithChoice : null, activeMedia ? styles.feedShellWithMedia : null, hologramMode && styles.feedShellHologram]}>
         <FlatList
           inverted
           data={messages.slice(-12).reverse()}
@@ -216,6 +217,7 @@ export function AgaZenScreen() {
           }
         />
       </View>
+      )}
 
       {media?.type === 'ambient' && (
         <AmbientPlayer
@@ -246,7 +248,7 @@ export function AgaZenScreen() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.bg, overflow: 'hidden' },
-  safeHologram: { backgroundColor: '#000005' },
+  safeHologram: { backgroundColor: '#000' },
   backgroundOrbOne: {
     position: 'absolute',
     width: 360,
@@ -400,6 +402,10 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   feedShellWithChoice: { top: '56%' },
+  feedShellHologram: {
+    backgroundColor: 'transparent',
+    borderColor: 'transparent',
+  },
   feedShellWithMedia: { bottom: 370 },
   feedContent: { padding: spacing.md, paddingTop: spacing.lg },
   emptyState: { minHeight: 160, alignItems: 'center', justifyContent: 'center', padding: spacing.lg },

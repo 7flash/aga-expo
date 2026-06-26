@@ -9,6 +9,7 @@ import {
 } from './choiceMenus';
 import { runGetTimeCapability, runGetWeatherCapability, type JsonObject } from './capabilityRegistry';
 import {
+  addEpisodicReflection,
   addMemory,
   addReminder,
   clearReminders,
@@ -21,6 +22,7 @@ import {
   savePreferences,
   searchMemories,
   startNewConversationSession,
+  upsertLearnedRoutine,
   type Preferences,
   type ResetScope,
 } from '../db/localStore';
@@ -33,6 +35,7 @@ import { searchYouTube } from '../media/youtube';
 import { resolveLocalAmbient } from '../media/ambient';
 import { buildGuidedSessionInstructions, findGuidedSession, guidedSessionOpening } from '../sessions/guidedSessions';
 import { getUserProfile, profilePromptBlock, updateUserProfileFromSignal } from '../memory/userProfile';
+import { findSkill, writeLearnedSkill } from '../skills/skillRegistry';
 import {
   executeRemoteTool,
   getRemoteConfigRevision,
@@ -291,7 +294,7 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
     },
     play_youtube: async ({ query, forceYouTube }) => {
       const q = String(query ?? 'music').trim() || 'music';
-      const explicitYouTube = /(?:youtube\.com|youtu\.be|watch\?v=|youtube video|on youtube|search youtube)/i.test(q);
+      const explicitYouTube = /(?:youtube.com|youtu.be|watch?v=|youtube video|on youtube|search youtube)/i.test(q);
 
       // Broad background music is a local ambient capability by default. YouTube
       // embed availability is not deterministic without a server/Data API check;
@@ -359,6 +362,60 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
       return `Listening mode set to ${listeningModeLabel(nextMode, nextBargeIn)}.`;
     },
 
+    start_skill: async ({ idOrAlias, goal }) => {
+      const skill = await findSkill(idOrAlias || goal);
+      if (!skill) return `I could not find a skill matching ${String(idOrAlias || goal || '').slice(0, 80)}.`;
+      if (skill.source === 'builtin' && skill.kind) {
+        return handlers.start_guided_session({ kind: skill.kind, goal: goal ? String(goal) : skill.theme ?? skill.label });
+      }
+      const activeSession = {
+        kind: 'remote' as SessionKind,
+        label: skill.label,
+        skillId: skill.id,
+        instructions: [
+          skill.instructions,
+          goal ? `User goal/theme for this run: ${String(goal)}.` : '',
+          'Run this as a voice-only skill. Speak one short segment or question at a time, then wait.',
+        ].filter(Boolean).join('\n\n'),
+        targetLanguage: skill.targetLanguage ?? null,
+        theme: goal ? String(goal) : skill.theme ?? null,
+        iconUrl: skill.iconUrl ?? null,
+        imageUrl: skill.imageUrl ?? null,
+        toolNames: skill.tools ?? [],
+        startedAt: new Date().toISOString(),
+      };
+      await setPrefs({ activeSession } as Partial<Preferences>);
+      ctx.publish({ sessionLabel: activeSession.label });
+      ctx.updateRealtimeSession();
+      await logEvent('skill.start', `${skill.source}:${skill.id}`);
+      return `Starting ${activeSession.label}.`;
+    },
+    create_learned_skill: async ({ label, aliases, instructions, tools, confidence }) => {
+      const skill = await writeLearnedSkill({
+        label: String(label || 'Learned skill'),
+        aliases: Array.isArray(aliases) ? aliases.map(String) : [],
+        instructions: String(instructions || ''),
+        tools: Array.isArray(tools) ? tools.map(String) : [],
+        confidence: typeof confidence === 'number' ? confidence : 0.7,
+      });
+      await logEvent('skill.learned.create', skill ? `${skill.id}: ${skill.label}` : String(label || 'learned'));
+      await ctx.refresh();
+      return skill ? `I learned the skill ${skill.label}.` : 'I saved that learned skill.';
+    },
+    propose_learned_routine: async ({ title, prompt, timeOfDay, trigger, action, confidence }) => {
+      const routine = await upsertLearnedRoutine({
+        title: String(title || 'Learned routine'),
+        prompt: String(prompt || title || 'Learned routine'),
+        timeOfDay: timeOfDay ? String(timeOfDay) : null,
+        trigger: trigger && typeof trigger === 'object' ? trigger as Record<string, unknown> : undefined,
+        action: action && typeof action === 'object' ? action as Record<string, unknown> : undefined,
+        confidence: typeof confidence === 'number' ? confidence : 0.55,
+        consentState: 'proposed',
+      });
+      await logEvent('routine.proposed', routine ? `${(routine as any).id}: ${(routine as any).title}` : String(title || 'routine'));
+      return `I noticed a possible routine: ${title}. Say AGA make that a routine if you want me to remember it.`;
+    },
+
     start_guided_session: async ({ kind, goal, durationMinutes }) => {
       const preset = findGuidedSession(kind) ?? findGuidedSession(goal) ?? findGuidedSession('breathing');
       if (!preset) return 'I could not find that guided session.';
@@ -417,6 +474,14 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
       return `Profile updated. ${profile.goals.length} goals, ${profile.effectiveTechniques.length} helpful techniques, ${profile.emotionalPatterns.length} patterns.`;
     },
     reflect_session: async ({ summary, technique, goal, emotionalPattern, nextRitual }) => {
+      await addEpisodicReflection({
+        summary: String(summary ?? ''),
+        goal: goal ? String(goal) : null,
+        technique: technique ? String(technique) : null,
+        emotionalPattern: emotionalPattern ? String(emotionalPattern) : null,
+        nextRitual: nextRitual ? String(nextRitual) : null,
+        tags: ['guided_session'],
+      });
       const profile = await updateUserProfileFromSignal({
         note: summary ? String(summary) : undefined,
         goal: goal ? String(goal) : undefined,
@@ -424,6 +489,7 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
         emotionalPattern: emotionalPattern ? String(emotionalPattern) : undefined,
         ritual: nextRitual ? String(nextRitual) : undefined,
       });
+      await addMemory(`Session reflection: ${summary}`, { kind: 'effective_technique', source: 'reflection', confidence: 0.72 });
       await logEvent('profile.reflect_session', String(summary ?? ''));
       await ctx.refresh();
       return `Reflection saved. I will use this to guide you better next time.`;

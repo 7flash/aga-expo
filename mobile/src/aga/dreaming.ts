@@ -1,59 +1,47 @@
-import type { AgaMode } from './turn';
+import { compactEventLogIfIdle, drainDueReminders, logEvent } from '../db/localStore';
+import { runLearningConsolidation } from '../learning/consolidation';
 
-export type DreamInput = {
-  mode: AgaMode;
-  proactiveEnabled: boolean;
-  pendingReminders: Array<{ text: string; dueAt: string }>;
-  recentMessages: Array<{ role: string; content: string; createdAt?: string }>;
-  now?: Date;
+export type DreamTickResult = {
+  reminders: Array<{ id: number; text: string; dueAt: string }>;
+  proactiveSpeech: string[];
+  learned?: {
+    observed: number;
+    proposedRoutines: number;
+    promotedMemories: number;
+  };
 };
-
-export type DreamOutput = {
-  shouldCompactLogs: boolean;
-  labels: string[];
-  manifestation: string | null;
-};
-
-function hourOf(date: Date) {
-  return date.getHours();
-}
-
-function isNightIdle(date: Date, mode: AgaMode) {
-  const hour = hourOf(date);
-  return (hour >= 23 || hour <= 5) && (mode === 'sleeping' || mode === 'listening');
-}
-
-function soonestReminder(input: DreamInput) {
-  const now = (input.now ?? new Date()).getTime();
-  return input.pendingReminders
-    .map((reminder) => ({ reminder, ms: Date.parse(reminder.dueAt) - now }))
-    .filter((item) => Number.isFinite(item.ms) && item.ms > 0)
-    .sort((a, b) => a.ms - b.ms)[0] ?? null;
-}
 
 /**
- * Lightweight proactive cognition. Heavy LLM summarization can be attached here
- * later, but this first phase keeps the device reliable and privacy-preserving.
+ * Idle consolidation loop.
+ *
+ * This is deliberately allowed to write durable learning artifacts. It still
+ * does not speak unsolicited advice except due reminders or consent requests
+ * for learned routines. That keeps AGA evolving without becoming intrusive.
  */
-export function runDreamTick(input: DreamInput): DreamOutput {
-  if (!input.proactiveEnabled) return { shouldCompactLogs: false, labels: ['dream.disabled'], manifestation: null };
+export async function runDreamTick(): Promise<DreamTickResult> {
+  const due = await drainDueReminders();
+  const proactiveSpeech: string[] = due.map((reminder) => `Reminder: ${reminder.text}`);
 
-  const now = input.now ?? new Date();
-  const labels: string[] = [];
-  let manifestation: string | null = null;
+  const learned = await runLearningConsolidation().catch(async (error) => {
+    await logEvent('dream.learning.error', error instanceof Error ? error.message : String(error || 'learning error')).catch(() => undefined);
+    return null;
+  });
 
-  if (isNightIdle(now, input.mode)) labels.push('dream.night_idle');
-  if (input.recentMessages.length > 12) labels.push('dream.context_rich');
+  if (learned?.speech) proactiveSpeech.push(learned.speech);
 
-  const soon = soonestReminder(input);
-  if (soon && soon.ms <= 10 * 60_000) {
-    labels.push('dream.reminder_soon');
-    manifestation = `A reminder is coming soon: ${soon.reminder.text}.`;
-  }
+  await compactEventLogIfIdle();
+  await logEvent(
+    'dream.tick',
+    `due=${due.length} learned=${learned?.observed ?? 0} routines=${learned?.proposedRoutines ?? 0}`,
+  ).catch(() => undefined);
 
   return {
-    shouldCompactLogs: isNightIdle(now, input.mode) || labels.includes('dream.context_rich'),
-    labels: labels.length ? labels : ['dream.idle'],
-    manifestation,
+    reminders: due,
+    proactiveSpeech,
+    learned: learned ? {
+      observed: learned.observed,
+      proposedRoutines: learned.proposedRoutines,
+      promotedMemories: learned.promotedMemories,
+    } : undefined,
   };
 }

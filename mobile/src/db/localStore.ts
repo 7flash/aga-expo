@@ -1,12 +1,7 @@
-import { openAgaKvDatabase, type AgaKvDatabase } from './sqliteLoader';
+import { all, first, run, transaction } from './sqlite';
+import { migrate } from './migrations';
 
-type MaybeStorage = {
-  getItem?: (key: string) => string | null;
-  setItem?: (key: string, value: string) => void;
-  removeItem?: (key: string) => void;
-};
-
-type SQLiteDatabase = AgaKvDatabase;
+type MaybeJson = Record<string, unknown> | null | undefined;
 
 export type Preferences = {
   wakePhrase: string;
@@ -21,8 +16,7 @@ export type Preferences = {
   realtimeVoice?: string | null;
   personalityPrompt?: string | null;
   activeSession?: {
-    kind: 'language' | 'imagination' | 'advice' | 'focus' | 'bedtime' | 'breathing' | 'music' | 'general'
-    | 'remote';
+    kind: 'language' | 'imagination' | 'advice' | 'focus' | 'bedtime' | 'breathing' | 'music' | 'general' | 'remote';
     label: string;
     targetLanguage?: string | null;
     theme?: string | null;
@@ -33,15 +27,8 @@ export type Preferences = {
     toolNames?: string[];
     startedAt: string;
   } | null;
-  /**
-   * strict: require AGA/Angel wake unless AGA is waiting for a short answer.
-   * answer_window: same as strict, with a longer answer window after direct questions.
-   * handsfree: process natural speech during the active realtime session.
-   */
   realtimeListenMode?: 'strict' | 'answer_window' | 'handsfree';
-  /** Whether speech detected while AGA is speaking can interrupt her response. */
   allowBargeIn?: boolean;
-  /** Whether background media ducks while AGA speaks. */
   mediaDuckingEnabled?: boolean;
   remoteConfigRevision?: string | null;
   remoteConfigUrl?: string | null;
@@ -53,20 +40,18 @@ export type Preferences = {
   homeLongitude?: number | null;
   homeLabel?: string | null;
   temperatureUnit?: 'celsius' | 'fahrenheit';
-  /** Current ephemeral conversation/duplex activation. Durable memory lives separately. */
   currentConversation?: {
     id: string;
     startedAt: string;
     reason: string;
     generation: number;
+    dbId?: number;
   } | null;
-  /** Pending destructive reset confirmation. Voice-only safety gate. */
   forgetConfirmation?: {
     scope: 'session' | 'personalization' | 'everything';
     requestedAt: string;
     expiresAt: string;
   } | null;
-  /** Durable evolving profile. Kept here until the relational store migration lands. */
   userProfile?: unknown;
 };
 
@@ -81,16 +66,8 @@ export type Reminder = {
 
 export type ResetScope = 'session' | 'personalization' | 'everything';
 
-type StoreShape = {
-  preferences: Preferences;
-  messages: Array<{ role: 'user' | 'assistant' | string; content: string; createdAt: string }>;
-  memories: Array<{ text: string; createdAt: string }>;
-  reminders: Reminder[];
-  events: Array<{ label: string; detail: string; createdAt: string }>;
-};
-
 const DEFAULT_PREFS: Preferences = {
-  wakePhrase: process.env.EXPO_PUBLIC_AGA_WAKE_PHRASE || 'aga',
+  wakePhrase: process.env.EXPO_PUBLIC_AGA_WAKE_PHRASE || process.env.EXPO_PUBLIC_AGA_WAKE_WORD || 'aga',
   persona: 'warm',
   voiceLocale: 'en-US',
   openaiApiKey: process.env.EXPO_PUBLIC_OPENAI_API_KEY ?? '',
@@ -120,47 +97,177 @@ const DEFAULT_PREFS: Preferences = {
   userProfile: undefined,
 };
 
-const STORAGE_KEY = 'aga.mobile.localStore.v20';
-const LEGACY_KEYS = ['aga.mobile.localStore.v18', 'aga.mobile.localStore.v11'];
-const SQLITE_DB = 'aga-local-kv.db';
+type MemoryState = {
+  preferences: Preferences;
+  messages: Array<{ role: string; content: string; createdAt: string }>;
+  memories: Array<{ id: number; text: string; createdAt: string; kind?: string; source?: string; confidence?: number }>;
+  reminders: Reminder[];
+  events: Array<{ label: string; detail: string; createdAt: string }>;
+};
 
-let store: StoreShape = {
+let memory: MemoryState = {
   preferences: { ...DEFAULT_PREFS },
   messages: [],
   memories: [],
   reminders: [],
   events: [],
 };
+
 let initialized = false;
-let sqliteDbPromise: Promise<SQLiteDatabase | null> | null = null;
 let sqliteAvailable = false;
 let lastPersistenceError: string | null = null;
-let storageBackend: 'memory' | 'web-storage' | 'sqlite' = 'memory';
-let persistTimer: ReturnType<typeof setTimeout> | null = null;
-let persistDirtyReason = '';
-const PERSIST_DEBOUNCE_MS = Number(process.env.EXPO_PUBLIC_AGA_STORE_DEBOUNCE_MS || 250);
-
-function storage(): MaybeStorage | null {
-  const root: any = globalThis as any;
-  return root?.localStorage ?? null;
-}
+let storageBackend: 'sqlite-relational' | 'memory-fallback' = 'memory-fallback';
+let currentPrefs: Preferences = { ...DEFAULT_PREFS };
 
 function isoNow() {
   return new Date().toISOString();
+}
+
+function bool(value: unknown, fallback = false) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') return /^(1|true|yes|on)$/i.test(value);
+  return fallback;
+}
+
+function safeJson<T>(raw: unknown, fallback: T): T {
+  if (!raw || typeof raw !== 'string') return fallback;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed == null ? fallback : parsed;
+  } catch {
+    return fallback;
+  }
+}
+
+function asJson(value: unknown) {
+  return JSON.stringify(value ?? null);
 }
 
 function newConversationId() {
   return `aga-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function nextConversation(reason: string) {
-  const previousGeneration = store.preferences.currentConversation?.generation ?? 0;
-  return {
-    id: newConversationId(),
-    startedAt: isoNow(),
-    reason: String(reason || 'new_session'),
-    generation: previousGeneration + 1,
+function mapBackendMode(value: unknown): Preferences['brainMode'] {
+  const raw = String(value || '').toLowerCase();
+  if (raw.includes('gemini')) return 'gemini';
+  if (raw.includes('offline')) return 'offline';
+  if (raw.includes('openai')) return 'openai';
+  return 'realtime';
+}
+
+function toPreferenceCore(prefs: Preferences) {
+  const backendMode = prefs.brainMode === 'gemini'
+    ? 'gemini-direct'
+    : prefs.brainMode === 'offline'
+      ? 'offline'
+      : prefs.brainMode === 'openai'
+        ? 'openai-direct'
+        : 'openai-direct';
+  return [
+    prefs.persona || DEFAULT_PREFS.persona,
+    prefs.wakePhrase || DEFAULT_PREFS.wakePhrase,
+    prefs.translateTarget ?? null,
+    backendMode,
+    prefs.openaiApiKey || null,
+    prefs.geminiApiKey || null,
+    prefs.remoteConfigUrl ?? null,
+    prefs.voiceLocale || DEFAULT_PREFS.voiceLocale,
+    prefs.proactiveReminders === false ? 0 : 1,
+  ];
+}
+
+function prefsExtra(prefs: Preferences) {
+  const {
+    wakePhrase,
+    persona,
+    voiceLocale,
+    openaiApiKey,
+    geminiApiKey,
+    brainMode,
+    translateTarget,
+    proactiveReminders,
+    ...extra
+  } = prefs;
+  return extra;
+}
+
+async function bootSqlite() {
+  if (initialized) return sqliteAvailable;
+  initialized = true;
+  try {
+    await migrate();
+    sqliteAvailable = true;
+    storageBackend = 'sqlite-relational';
+    currentPrefs = await readPreferencesFromSqlite();
+    return true;
+  } catch (error) {
+    sqliteAvailable = false;
+    storageBackend = 'memory-fallback';
+    lastPersistenceError = error instanceof Error ? error.message : String(error || 'sqlite unavailable');
+    currentPrefs = { ...memory.preferences };
+    return false;
+  }
+}
+
+async function ensureReady() {
+  await bootSqlite();
+}
+
+async function readPreferencesFromSqlite(): Promise<Preferences> {
+  const core = await first<any>('SELECT * FROM user_preferences WHERE id = 1');
+  const extraRow = await first<{ json: string }>('SELECT json FROM aga_preferences_extra WHERE id = 1');
+  const extra = safeJson<Record<string, unknown>>(extraRow?.json, {});
+  const prefs: Preferences = {
+    ...DEFAULT_PREFS,
+    ...(extra as Partial<Preferences>),
+    wakePhrase: String(core?.wakePhrase || extra.wakePhrase || DEFAULT_PREFS.wakePhrase),
+    persona: String(core?.activePersona || extra.persona || DEFAULT_PREFS.persona),
+    voiceLocale: String(core?.voiceLocale || extra.voiceLocale || DEFAULT_PREFS.voiceLocale),
+    openaiApiKey: String(core?.openaiApiKey || extra.openaiApiKey || DEFAULT_PREFS.openaiApiKey || ''),
+    geminiApiKey: String(core?.geminiApiKey || extra.geminiApiKey || DEFAULT_PREFS.geminiApiKey || ''),
+    brainMode: mapBackendMode(core?.backendMode || extra.brainMode || DEFAULT_PREFS.brainMode),
+    translateTarget: core?.translateTargetLang ?? (extra.translateTarget as string | null | undefined) ?? null,
+    proactiveReminders: bool(core?.proactiveEnabled, true),
   };
+  return prefs;
+}
+
+async function writePreferencesToSqlite(prefs: Preferences) {
+  const core = toPreferenceCore(prefs);
+  await run(
+    `UPDATE user_preferences
+       SET activePersona = ?, wakePhrase = ?, translateTargetLang = ?, backendMode = ?, openaiApiKey = ?, geminiApiKey = ?, remoteBackendUrl = ?, voiceLocale = ?, proactiveEnabled = ?, updatedAt = CURRENT_TIMESTAMP
+     WHERE id = 1`,
+    core,
+  );
+  await run(
+    `INSERT OR REPLACE INTO aga_preferences_extra (id, json, updatedAt) VALUES (1, ?, CURRENT_TIMESTAMP)`,
+    [asJson(prefsExtra(prefs))],
+  );
+}
+
+async function ensureConversationRow(reason = 'implicit') {
+  await ensureReady();
+  if (!sqliteAvailable) return null;
+  const current = currentPrefs.currentConversation;
+  if (current?.dbId) return current.dbId;
+  const title = reason === 'implicit' ? 'AGA voice session' : `AGA ${reason}`.slice(0, 80);
+  const result: any = await run('INSERT INTO conversations (title, createdAt, updatedAt) VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)', [title]);
+  const row = await first<{ id: number }>('SELECT id FROM conversations ORDER BY id DESC LIMIT 1');
+  const dbId = Number(result?.lastInsertRowId ?? result?.insertId ?? row?.id ?? 1);
+  currentPrefs = {
+    ...currentPrefs,
+    currentConversation: {
+      id: current?.id || newConversationId(),
+      startedAt: current?.startedAt || isoNow(),
+      reason,
+      generation: current?.generation ?? 1,
+      dbId,
+    },
+  };
+  await writePreferencesToSqlite(currentPrefs);
+  return dbId;
 }
 
 function preserveTechnicalPrefs(prefs: Preferences): Partial<Preferences> {
@@ -189,239 +296,131 @@ function preserveTechnicalPrefs(prefs: Preferences): Partial<Preferences> {
   };
 }
 
-function parseStore(raw: string | null | undefined): StoreShape | null {
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw);
-    return {
-      preferences: { ...DEFAULT_PREFS, ...(parsed?.preferences ?? {}) },
-      messages: Array.isArray(parsed?.messages) ? parsed.messages : [],
-      memories: Array.isArray(parsed?.memories) ? parsed.memories : [],
-      reminders: Array.isArray(parsed?.reminders) ? parsed.reminders : [],
-      events: Array.isArray(parsed?.events) ? parsed.events : [],
-    };
-  } catch {
-    return null;
-  }
-}
-
-function serializeStore() {
-  return JSON.stringify(store);
-}
-
-async function openSqlite(): Promise<SQLiteDatabase | null> {
-  if (sqliteDbPromise) return sqliteDbPromise;
-  sqliteDbPromise = (async () => {
-    const db = await openAgaKvDatabase(SQLITE_DB);
-    if (!db) return null;
-    await sqlExec(db, 'CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL, updatedAt TEXT NOT NULL);');
-    sqliteAvailable = true;
-    return db;
-  })().catch((error) => {
-    lastPersistenceError = error instanceof Error ? error.message : String(error || 'sqlite open failed');
-    sqliteAvailable = false;
-    sqliteDbPromise = null;
-    return null;
-  });
-  return sqliteDbPromise;
-}
-
-async function sqlExec(db: SQLiteDatabase | null, sql: string, params: unknown[] = []) {
-  if (!db) return;
-  if (typeof db.runAsync === 'function') return db.runAsync(sql, params as any[]);
-  if (typeof db.execAsync === 'function' && params.length === 0) return db.execAsync(sql);
-  if (typeof db.transaction === 'function') {
-    return new Promise<void>((resolve, reject) => {
-      db.transaction((tx: any) => {
-        tx.executeSql(sql, params as any[], () => resolve(), (_: any, error: any) => { reject(error); return false; });
-      });
-    });
-  }
-}
-
-async function sqlFirst<T = any>(db: SQLiteDatabase | null, sql: string, params: unknown[] = []): Promise<T | null> {
-  if (!db) return null;
-  if (typeof db.getFirstAsync === 'function') return db.getFirstAsync(sql, params as any[]);
-  if (typeof db.getAllAsync === 'function') {
-    const rows = await db.getAllAsync(sql, params as any[]);
-    return rows?.[0] ?? null;
-  }
-  if (typeof db.transaction === 'function') {
-    return new Promise<T | null>((resolve, reject) => {
-      db.transaction((tx: any) => {
-        tx.executeSql(sql, params as any[], (_: any, result: any) => resolve(result.rows?._array?.[0] ?? null), (_: any, error: any) => { reject(error); return false; });
-      });
-    });
-  }
-  return null;
-}
-
-function readWebStorageOnce() {
-  const s = storage();
-  if (!s) return false;
-  for (const key of [STORAGE_KEY, ...LEGACY_KEYS]) {
-    const parsed = parseStore(s.getItem?.(key));
-    if (parsed) {
-      store = parsed;
-      storageBackend = 'web-storage';
-      return true;
-    }
-  }
-  return false;
-}
-
-async function readSqliteOnce() {
-  const db = await openSqlite();
-  if (!db) return false;
-  const row = await sqlFirst<{ value: string }>(db, 'SELECT value FROM kv WHERE key = ?', [STORAGE_KEY]);
-  const parsed = parseStore(row?.value);
-  if (parsed) {
-    store = parsed;
-    storageBackend = 'sqlite';
-    return true;
-  }
-  return false;
-}
-
-function persistWebStorage() {
-  try {
-    storage()?.setItem?.(STORAGE_KEY, serializeStore());
-  } catch (error) {
-    lastPersistenceError = error instanceof Error ? error.message : String(error || 'web storage persist failed');
-  }
-}
-
-async function persistSqlite() {
-  try {
-    const db = await openSqlite();
-    if (!db) return;
-    await sqlExec(db, 'INSERT OR REPLACE INTO kv (key, value, updatedAt) VALUES (?, ?, ?)', [STORAGE_KEY, serializeStore(), isoNow()]);
-    storageBackend = 'sqlite';
-  } catch (error) {
-    lastPersistenceError = error instanceof Error ? error.message : String(error || 'sqlite persist failed');
-  }
-}
-
-function persistNow(reason = 'immediate') {
-  persistDirtyReason = reason;
-  if (persistTimer) {
-    clearTimeout(persistTimer);
-    persistTimer = null;
-  }
-  persistWebStorage();
-  void persistSqlite();
-}
-
-function persist(reason = 'change') {
-  persistDirtyReason = reason;
-  if (persistTimer) return;
-  persistTimer = setTimeout(() => {
-    persistTimer = null;
-    persistWebStorage();
-    void persistSqlite();
-  }, PERSIST_DEBOUNCE_MS);
+function memoryNextConversation(reason: string) {
+  const previousGeneration = memory.preferences.currentConversation?.generation ?? 0;
+  return {
+    id: newConversationId(),
+    startedAt: isoNow(),
+    reason: String(reason || 'new_session'),
+    generation: previousGeneration + 1,
+  };
 }
 
 export async function flushLocalStore(reason = 'flush') {
-  persistDirtyReason = reason;
-  if (persistTimer) {
-    clearTimeout(persistTimer);
-    persistTimer = null;
-  }
-  persistWebStorage();
-  await persistSqlite();
-}
-
-function ensureRead() {
-  if (initialized) return;
-  initialized = true;
-  readWebStorageOnce();
+  void reason;
+  if (sqliteAvailable) await writePreferencesToSqlite(currentPrefs);
 }
 
 export async function initializeLocalStore() {
-  if (!initialized) {
-    initialized = true;
-    const webLoaded = readWebStorageOnce();
-    const sqliteLoaded = await readSqliteOnce();
-    if (!webLoaded && !sqliteLoaded) store.preferences = { ...DEFAULT_PREFS, ...store.preferences };
-  }
-  store.preferences = { ...DEFAULT_PREFS, ...store.preferences };
-  persist('initialize');
-  return { sqliteAvailable, fallback: sqliteAvailable ? 'sqlite-kv' : storage() ? 'web-storage' : 'memory' };
+  const ok = await bootSqlite();
+  return { sqliteAvailable: ok, fallback: ok ? 'sqlite-relational' : 'memory-fallback' };
 }
 
 export async function loadPreferences(): Promise<Preferences> {
-  ensureRead();
-  store.preferences = { ...DEFAULT_PREFS, ...store.preferences };
-  return { ...store.preferences };
+  await ensureReady();
+  if (!sqliteAvailable) return { ...memory.preferences };
+  currentPrefs = await readPreferencesFromSqlite();
+  return { ...currentPrefs };
 }
 
 export async function savePreferences(input: Partial<Preferences>) {
-  ensureRead();
-  store.preferences = { ...store.preferences, ...input };
-  persistNow('preferences');
-  return { ...store.preferences };
+  await ensureReady();
+  if (!sqliteAvailable) {
+    memory.preferences = { ...memory.preferences, ...input };
+    currentPrefs = { ...memory.preferences };
+    return { ...memory.preferences };
+  }
+  currentPrefs = { ...currentPrefs, ...input };
+  await writePreferencesToSqlite(currentPrefs);
+  return { ...currentPrefs };
 }
 
 export async function addMessage(role: 'user' | 'assistant' | string, content: string) {
-  ensureRead();
   const clean = String(content ?? '').trim();
   if (!clean) return;
-  store.messages.push({ role, content: clean, createdAt: isoNow() });
-  store.messages = store.messages.slice(-160);
-  persist('message');
+  await ensureReady();
+  if (!sqliteAvailable) {
+    memory.messages.push({ role, content: clean, createdAt: isoNow() });
+    memory.messages = memory.messages.slice(-160);
+    return;
+  }
+  const conversationId = await ensureConversationRow('message');
+  await run('INSERT INTO messages (conversationId, role, content, createdAt) VALUES (?, ?, ?, CURRENT_TIMESTAMP)', [conversationId, role, clean]);
 }
 
 export async function listMessages(limit = 20) {
-  ensureRead();
-  return store.messages.slice(-limit);
+  await ensureReady();
+  if (!sqliteAvailable) return memory.messages.slice(-limit);
+  const conversationId = currentPrefs.currentConversation?.dbId;
+  if (!conversationId) return [];
+  const rows = await all<{ role: string; content: string; createdAt: string }>(
+    'SELECT role, content, createdAt FROM messages WHERE conversationId = ? ORDER BY id DESC LIMIT ?',
+    [conversationId, limit],
+  );
+  return rows.reverse();
 }
 
 export async function clearMessages() {
-  ensureRead();
-  store.messages = [];
-  persist('clear_messages');
+  await ensureReady();
+  if (!sqliteAvailable) {
+    memory.messages = [];
+    return;
+  }
+  const conversationId = currentPrefs.currentConversation?.dbId;
+  if (conversationId) await run('DELETE FROM messages WHERE conversationId = ?', [conversationId]);
 }
 
 export async function startNewConversationSession(
   reason = 'manual',
   options: { clearTranscript?: boolean; endActiveSession?: boolean; clearTranslate?: boolean } = {},
 ) {
-  ensureRead();
-  store.preferences = {
-    ...store.preferences,
-    currentConversation: nextConversation(reason),
+  await ensureReady();
+  if (!sqliteAvailable) {
+    memory.preferences = {
+      ...memory.preferences,
+      currentConversation: memoryNextConversation(reason),
+      forgetConfirmation: null,
+      translateTarget: options.clearTranslate === false ? memory.preferences.translateTarget : null,
+      activeSession: options.endActiveSession ? null : memory.preferences.activeSession ?? null,
+    };
+    if (options.clearTranscript !== false) memory.messages = [];
+    currentPrefs = { ...memory.preferences };
+    return { ...memory.preferences.currentConversation! };
+  }
+  const previousGeneration = currentPrefs.currentConversation?.generation ?? 0;
+  const result: any = await run('INSERT INTO conversations (title, createdAt, updatedAt) VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)', [`AGA ${reason}`.slice(0, 80)]);
+  const row = await first<{ id: number }>('SELECT id FROM conversations ORDER BY id DESC LIMIT 1');
+  const dbId = Number(result?.lastInsertRowId ?? result?.insertId ?? row?.id ?? 1);
+  currentPrefs = {
+    ...currentPrefs,
+    currentConversation: {
+      id: newConversationId(),
+      startedAt: isoNow(),
+      reason: String(reason || 'new_session'),
+      generation: previousGeneration + 1,
+      dbId,
+    },
     forgetConfirmation: null,
-    // Translation is a live/session behavior, not a permanent preference.
-    // Clearing it prevents an old language-learning/translation run from making
-    // the next fresh wake answer in the wrong language.
-    translateTarget: options.clearTranslate === false ? store.preferences.translateTarget : null,
-    activeSession: options.endActiveSession ? null : store.preferences.activeSession ?? null,
+    translateTarget: options.clearTranslate === false ? currentPrefs.translateTarget : null,
+    activeSession: options.endActiveSession ? null : currentPrefs.activeSession ?? null,
   };
-  if (options.clearTranscript !== false) store.messages = [];
-  persistNow('conversation_session');
-  return { ...store.preferences.currentConversation! };
+  await writePreferencesToSqlite(currentPrefs);
+  return { ...currentPrefs.currentConversation! };
 }
 
 export async function requestForgetConfirmation(scope: ResetScope = 'everything', ttlMs = 60_000) {
-  ensureRead();
   const requestedAt = isoNow();
   const expiresAt = new Date(Date.now() + ttlMs).toISOString();
-  store.preferences = {
-    ...store.preferences,
-    forgetConfirmation: { scope, requestedAt, expiresAt },
-  };
-  persistNow('forget_confirmation');
-  return { ...store.preferences.forgetConfirmation! };
+  const prefs = await savePreferences({ forgetConfirmation: { scope, requestedAt, expiresAt } });
+  return { ...prefs.forgetConfirmation! };
 }
 
 export async function getForgetConfirmation(scope?: ResetScope) {
-  ensureRead();
-  const pending = store.preferences.forgetConfirmation ?? null;
+  const prefs = await loadPreferences();
+  const pending = prefs.forgetConfirmation ?? null;
   if (!pending) return null;
   if (pending.expiresAt <= isoNow()) {
-    store.preferences = { ...store.preferences, forgetConfirmation: null };
-    persistNow('forget_confirmation_expired');
+    await savePreferences({ forgetConfirmation: null });
     return null;
   }
   if (scope && pending.scope !== scope) return null;
@@ -429,21 +428,19 @@ export async function getForgetConfirmation(scope?: ResetScope) {
 }
 
 export async function clearForgetConfirmation() {
-  ensureRead();
-  store.preferences = { ...store.preferences, forgetConfirmation: null };
-  persistNow('forget_confirmation_clear');
+  await savePreferences({ forgetConfirmation: null });
 }
 
 export async function resetAgaData(scope: ResetScope = 'everything') {
-  ensureRead();
+  await ensureReady();
   const cleanScope: ResetScope = scope === 'session' || scope === 'personalization' || scope === 'everything' ? scope : 'everything';
 
   if (cleanScope === 'session') {
     const conversation = await startNewConversationSession('forget_session', { clearTranscript: true, endActiveSession: true });
-    return { scope: cleanScope, conversation, messages: store.messages.length, memories: store.memories.length, reminders: store.reminders.length };
+    return { scope: cleanScope, conversation, messages: 0, memories: await countMemories(), reminders: await countReminders() };
   }
 
-  const preserved = preserveTechnicalPrefs(store.preferences);
+  const preserved = preserveTechnicalPrefs(await loadPreferences());
   const nextPrefs: Preferences = {
     ...DEFAULT_PREFS,
     ...preserved,
@@ -451,116 +448,271 @@ export async function resetAgaData(scope: ResetScope = 'everything') {
     realtimeVoice: DEFAULT_PREFS.realtimeVoice,
     personalityPrompt: null,
     activeSession: null,
-    currentConversation: nextConversation(`forget_${cleanScope}`),
+    currentConversation: null,
     forgetConfirmation: null,
     userProfile: undefined,
   } as Preferences;
 
-  store.preferences = nextPrefs;
-  store.messages = [];
-  store.memories = [];
-  store.events = [];
-  if (cleanScope === 'everything') store.reminders = [];
-  persistNow(`forget_${cleanScope}`);
+  if (!sqliteAvailable) {
+    memory.preferences = { ...nextPrefs, currentConversation: memoryNextConversation(`forget_${cleanScope}`) };
+    memory.messages = [];
+    memory.memories = [];
+    memory.events = [];
+    if (cleanScope === 'everything') memory.reminders = [];
+    currentPrefs = { ...memory.preferences };
+    return { scope: cleanScope, conversation: memory.preferences.currentConversation, messages: 0, memories: 0, reminders: memory.reminders.length };
+  }
 
-  return {
-    scope: cleanScope,
-    conversation: store.preferences.currentConversation,
-    messages: store.messages.length,
-    memories: store.memories.length,
-    reminders: store.reminders.length,
-  };
+  await transaction(async () => {
+    await run('DELETE FROM messages');
+    await run('DELETE FROM conversations');
+    await run('DELETE FROM memory_facts');
+    await run('DELETE FROM episodic_reflections');
+    await run('DELETE FROM routines');
+    await run('DELETE FROM learned_skills WHERE source = ?', ['learned']);
+    await run('DELETE FROM event_log');
+    if (cleanScope === 'everything') await run('DELETE FROM reminders');
+  });
+  currentPrefs = nextPrefs;
+  await writePreferencesToSqlite(currentPrefs);
+  const conversation = await startNewConversationSession(`forget_${cleanScope}`, { clearTranscript: true, endActiveSession: true });
+  return { scope: cleanScope, conversation, messages: 0, memories: 0, reminders: await countReminders() };
 }
 
-export async function addMemory(text: string) {
-  ensureRead();
+export async function addMemory(text: string, options: { kind?: string; source?: string; confidence?: number } = {}) {
   const clean = String(text ?? '').trim();
   if (!clean) return;
-  store.memories.push({ text: clean, createdAt: isoNow() });
-  store.memories = store.memories.slice(-300);
-  persist('memory');
+  await ensureReady();
+  const kind = String(options.kind || 'user_fact');
+  const rawSource = String(options.source || 'voice');
+  const source = rawSource === 'voice' || rawSource === 'settings' || rawSource === 'assistant' ? rawSource : 'assistant';
+  const confidence = Number.isFinite(options.confidence) ? Number(options.confidence) : 1;
+  if (!sqliteAvailable) {
+    memory.memories.push({ id: Date.now(), text: clean, createdAt: isoNow(), kind, source, confidence });
+    memory.memories = memory.memories.slice(-1000);
+    return;
+  }
+  await run(
+    'INSERT INTO memory_facts (text, kind, source, confidence, pinned, createdAt, updatedAt) VALUES (?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)',
+    [clean, kind, source, confidence],
+  );
+}
+
+function ftsQuery(query: string) {
+  return query.trim().split(/\s+/).filter(Boolean).map((part) => `${part.replace(/["']/g, '')}*`).join(' ');
 }
 
 export async function searchMemories(query?: string, limit = 8) {
-  ensureRead();
-  const q = query?.trim().toLowerCase();
-  return store.memories
-    .filter((item) => !q || item.text.toLowerCase().includes(q))
-    .slice(-limit)
-    .reverse();
+  await ensureReady();
+  const q = query?.trim();
+  if (!sqliteAvailable) {
+    const lower = q?.toLowerCase();
+    return memory.memories
+      .filter((item) => !lower || item.text.toLowerCase().includes(lower))
+      .slice(-limit)
+      .reverse();
+  }
+  if (q) {
+    try {
+      return await all<{ id: number; text: string; createdAt: string; kind: string; source: string; confidence: number }>(
+        `SELECT mf.id, mf.text, mf.createdAt, mf.kind, mf.source, mf.confidence
+           FROM memory_facts_fts fts
+           JOIN memory_facts mf ON mf.id = fts.rowid
+          WHERE memory_facts_fts MATCH ?
+          ORDER BY bm25(memory_facts_fts), mf.pinned DESC, mf.updatedAt DESC
+          LIMIT ?`,
+        [ftsQuery(q), limit],
+      );
+    } catch {
+      const like = `%${q.replace(/[%_]/g, '')}%`;
+      return all('SELECT id, text, createdAt, kind, source, confidence FROM memory_facts WHERE text LIKE ? ORDER BY pinned DESC, updatedAt DESC LIMIT ?', [like, limit]);
+    }
+  }
+  return all('SELECT id, text, createdAt, kind, source, confidence FROM memory_facts ORDER BY pinned DESC, updatedAt DESC LIMIT ?', [limit]);
 }
 
 export async function addReminder(text: string, dueAt: string, notificationId?: string | null): Promise<Reminder> {
-  ensureRead();
-  const reminder: Reminder = {
-    id: Date.now() + Math.floor(Math.random() * 1000),
-    text: String(text ?? '').trim(),
-    dueAt,
-    delivered: 0,
-    createdAt: isoNow(),
-    notificationId: notificationId ?? null,
+  const clean = String(text ?? '').trim();
+  await ensureReady();
+  if (!sqliteAvailable) {
+    const reminder: Reminder = { id: Date.now() + Math.floor(Math.random() * 1000), text: clean, dueAt, delivered: 0, createdAt: isoNow(), notificationId: notificationId ?? null };
+    memory.reminders.push(reminder);
+    memory.reminders.sort((a, b) => a.dueAt.localeCompare(b.dueAt));
+    return reminder;
+  }
+  const result: any = await run(
+    'INSERT INTO reminders (title, dueAt, status, source, notificationId, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)',
+    [clean, dueAt, 'pending', 'voice', notificationId ?? null],
+  );
+  const row = await first<any>('SELECT * FROM reminders WHERE id = COALESCE(?, (SELECT MAX(id) FROM reminders))', [result?.lastInsertRowId ?? result?.insertId ?? null]);
+  return mapReminder(row);
+}
+
+function mapReminder(row: any): Reminder {
+  return {
+    id: Number(row.id),
+    text: String(row.title ?? row.text ?? ''),
+    dueAt: String(row.dueAt),
+    delivered: row.status === 'pending' ? 0 : 1,
+    createdAt: String(row.createdAt ?? isoNow()),
+    notificationId: row.notificationId ?? null,
   };
-  store.reminders.push(reminder);
-  store.reminders.sort((a, b) => a.dueAt.localeCompare(b.dueAt));
-  persistNow('reminder');
-  return reminder;
 }
 
 export async function listPendingReminders(limit = 8) {
-  ensureRead();
-  return store.reminders
-    .filter((reminder) => !reminder.delivered)
-    .sort((a, b) => a.dueAt.localeCompare(b.dueAt))
-    .slice(0, limit);
+  await ensureReady();
+  if (!sqliteAvailable) {
+    return memory.reminders.filter((reminder) => !reminder.delivered).sort((a, b) => a.dueAt.localeCompare(b.dueAt)).slice(0, limit);
+  }
+  const rows = await all<any>('SELECT * FROM reminders WHERE status = ? ORDER BY dueAt ASC LIMIT ?', ['pending', limit]);
+  return rows.map(mapReminder);
 }
 
 export async function drainDueReminders(now = new Date()) {
-  ensureRead();
+  await ensureReady();
   const nowIso = now.toISOString();
-  const due = store.reminders.filter((reminder) => !reminder.delivered && reminder.dueAt <= nowIso);
-  if (due.length) {
-    const dueIds = new Set(due.map((reminder) => reminder.id));
-    store.reminders = store.reminders.map((reminder) => dueIds.has(reminder.id) ? { ...reminder, delivered: 1 } : reminder);
-    persistNow('drain_reminders');
+  if (!sqliteAvailable) {
+    const due = memory.reminders.filter((reminder) => !reminder.delivered && reminder.dueAt <= nowIso);
+    if (due.length) {
+      const ids = new Set(due.map((reminder) => reminder.id));
+      memory.reminders = memory.reminders.map((reminder) => ids.has(reminder.id) ? { ...reminder, delivered: 1 } : reminder);
+    }
+    return due;
   }
+  const due = (await all<any>('SELECT * FROM reminders WHERE status = ? AND dueAt <= ? ORDER BY dueAt ASC', ['pending', nowIso])).map(mapReminder);
+  if (due.length) await run(`UPDATE reminders SET status = 'fired', updatedAt = CURRENT_TIMESTAMP WHERE id IN (${due.map(() => '?').join(',')})`, due.map((item) => item.id));
   return due;
 }
 
 export async function clearReminders() {
-  ensureRead();
-  store.reminders = [];
-  persistNow('clear_reminders');
+  await ensureReady();
+  if (!sqliteAvailable) {
+    memory.reminders = [];
+    return;
+  }
+  await run("UPDATE reminders SET status = 'cancelled', updatedAt = CURRENT_TIMESTAMP WHERE status = 'pending'");
 }
 
 export async function logEvent(label: string, detail = '') {
-  ensureRead();
-  store.events.push({ label: String(label), detail: String(detail ?? ''), createdAt: isoNow() });
-  store.events = store.events.slice(-700);
-  persist('event');
+  await ensureReady();
+  if (!sqliteAvailable) {
+    memory.events.push({ label: String(label), detail: String(detail ?? ''), createdAt: isoNow() });
+    memory.events = memory.events.slice(-700);
+    return;
+  }
+  await run('INSERT INTO event_log (kind, label, payload, createdAt) VALUES (?, ?, ?, CURRENT_TIMESTAMP)', [String(label || 'event'), String(label || 'event'), String(detail ?? '')]);
 }
 
 export async function compactEventLogIfIdle() {
-  ensureRead();
-  if (store.events.length > 300) {
-    store.events = store.events.slice(-300);
-    persist('compact_event_log');
+  await ensureReady();
+  if (!sqliteAvailable) {
+    if (memory.events.length > 300) memory.events = memory.events.slice(-300);
+    return;
   }
+  await run('DELETE FROM event_log WHERE id NOT IN (SELECT id FROM event_log ORDER BY id DESC LIMIT 500)');
+}
+
+async function countMemories() {
+  if (!sqliteAvailable) return memory.memories.length;
+  const row = await first<{ count: number }>('SELECT COUNT(*) AS count FROM memory_facts');
+  return Number(row?.count ?? 0);
+}
+
+async function countReminders() {
+  if (!sqliteAvailable) return memory.reminders.length;
+  const row = await first<{ count: number }>('SELECT COUNT(*) AS count FROM reminders');
+  return Number(row?.count ?? 0);
 }
 
 export async function getDiagnostics() {
-  ensureRead();
+  await ensureReady();
+  const messages = sqliteAvailable ? Number((await first<{ count: number }>('SELECT COUNT(*) AS count FROM messages'))?.count ?? 0) : memory.messages.length;
+  const memories = await countMemories();
+  const reminders = await countReminders();
+  const pendingReminders = sqliteAvailable
+    ? Number((await first<{ count: number }>("SELECT COUNT(*) AS count FROM reminders WHERE status = 'pending'"))?.count ?? 0)
+    : memory.reminders.filter((reminder) => !reminder.delivered).length;
+  const events = sqliteAvailable ? Number((await first<{ count: number }>('SELECT COUNT(*) AS count FROM event_log'))?.count ?? 0) : memory.events.length;
+  const routines = sqliteAvailable ? Number((await first<{ count: number }>('SELECT COUNT(*) AS count FROM routines'))?.count ?? 0) : 0;
+  const reflections = sqliteAvailable ? Number((await first<{ count: number }>('SELECT COUNT(*) AS count FROM episodic_reflections'))?.count ?? 0) : 0;
+  const learnedSkills = sqliteAvailable ? Number((await first<{ count: number }>('SELECT COUNT(*) AS count FROM learned_skills'))?.count ?? 0) : 0;
   return {
-    messages: store.messages.length,
-    memories: store.memories.length,
-    pendingReminders: store.reminders.filter((reminder) => !reminder.delivered).length,
-    reminders: store.reminders.length,
-    events: store.events.length,
+    messages,
+    memories,
+    pendingReminders,
+    reminders,
+    events,
+    routines,
+    reflections,
+    learnedSkills,
     sqliteAvailable,
     storageBackend,
     lastPersistenceError,
-    persistPending: !!persistTimer,
-    persistDirtyReason,
-    currentConversation: store.preferences.currentConversation ?? null,
-    forgetConfirmationPending: !!store.preferences.forgetConfirmation,
+    persistPending: false,
+    persistDirtyReason: null,
+    currentConversation: currentPrefs.currentConversation ?? null,
+    forgetConfirmationPending: !!currentPrefs.forgetConfirmation,
   } as any;
+}
+
+export async function addEpisodicReflection(input: {
+  summary: string;
+  sessionId?: string | null;
+  kind?: string;
+  goal?: string | null;
+  technique?: string | null;
+  emotionalPattern?: string | null;
+  nextRitual?: string | null;
+  tags?: string[];
+}) {
+  await ensureReady();
+  const summary = String(input.summary ?? '').trim();
+  if (!summary) return null;
+  if (!sqliteAvailable) {
+    await addMemory(summary, { kind: 'effective_technique', source: 'reflection', confidence: 0.8 });
+    return null;
+  }
+  await run(
+    `INSERT INTO episodic_reflections (sessionId, kind, summary, goal, technique, emotionalPattern, nextRitual, tagsJson, createdAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+    [
+      input.sessionId ?? currentPrefs.currentConversation?.id ?? null,
+      input.kind || 'reflection',
+      summary,
+      input.goal ?? null,
+      input.technique ?? null,
+      input.emotionalPattern ?? null,
+      input.nextRitual ?? null,
+      asJson(input.tags ?? []),
+    ],
+  );
+  return first('SELECT * FROM episodic_reflections ORDER BY id DESC LIMIT 1');
+}
+
+export async function upsertLearnedRoutine(input: {
+  title: string;
+  prompt: string;
+  timeOfDay?: string | null;
+  daysOfWeek?: string | null;
+  trigger?: MaybeJson;
+  action?: MaybeJson;
+  confidence?: number;
+  consentState?: 'proposed' | 'accepted' | 'dismissed';
+}) {
+  await ensureReady();
+  const title = String(input.title || 'Learned routine').trim();
+  const prompt = String(input.prompt || title).trim();
+  if (!sqliteAvailable) return null;
+  await run(
+    `INSERT INTO routines (title, prompt, timeOfDay, daysOfWeek, triggerJson, actionJson, confidence, source, enabled, consentState, lastObservedAt, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'learned', 1, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+    [title, prompt, input.timeOfDay ?? 'any', input.daysOfWeek ?? null, input.trigger ? asJson(input.trigger) : null, input.action ? asJson(input.action) : null, input.confidence ?? 0.55, input.consentState || 'proposed'],
+  );
+  return first('SELECT * FROM routines ORDER BY id DESC LIMIT 1');
+}
+
+export async function listProposedRoutines(limit = 5) {
+  await ensureReady();
+  if (!sqliteAvailable) return [];
+  return all('SELECT * FROM routines WHERE enabled = 1 AND consentState = ? ORDER BY confidence DESC, updatedAt DESC LIMIT ?', ['proposed', limit]);
 }
