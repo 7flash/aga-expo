@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-06-26T19:51:04.516Z",
+  "precision": "fp32",
+  "outDir": "assets/kws-model",
+  "files": {
+    "encoder": "encoder.onnx",
+    "decoder": "decoder.onnx",
+    "joiner": "joiner.onnx",
+    "tokens": "tokens.txt",
+    "keywordsRaw": "keywords_raw.txt",
+    "keywords": "keywords.txt"
+  },
+  "recommendedConfig": {
+    "sampleRate": 16000,
+    "featureDim": 80,
+    "provider": "cpu",
+    "numThreads": 4
+  }
+}

@@ -1,0 +1,39 @@
+aga
+stop
+pause
+resume
+repeat
+back
+close
+confirm
+cancel
+one
+two
+three
+four
+five
+six
+seven
+eight
+nine
+ten
+a
+b
+c
+d
+e
+satu
+dua
+tiga
+empat
+lima
+pilihan satu
+pilihan dua
+pilihan tiga
+guardian
+calm
+whisper
+bright
+english
+indonesian
+russian
