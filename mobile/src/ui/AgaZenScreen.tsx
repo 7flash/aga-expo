@@ -190,10 +190,14 @@ export function AgaZenScreen() {
             />
           )}
           ListEmptyComponent={
-            <View style={styles.emptyState}>
-              <Text style={styles.emptyTitle}>Say “Hey AGA”</Text>
-              <Text style={styles.emptyText}>Ask for advice, reminders, memory, translation, YouTube, or a skill — all by voice.</Text>
-              <Text style={styles.versionText}>v{AGA_APP_VERSION}</Text>
+            <View style={[styles.emptyState, hologramMode && styles.emptyStateHologram]}>
+              <Text style={[styles.emptyTitle, hologramMode && styles.emptyTitleHologram]}>Say “Hey AGA”</Text>
+              {!hologramMode && (
+                <>
+                  <Text style={styles.emptyText}>Ask for advice, reminders, memory, translation, YouTube, or a skill — all by voice.</Text>
+                  <Text style={styles.versionText}>v{AGA_APP_VERSION}</Text>
+                </>
+              )}
               {debugUi ? (
                 <>
                   <Text style={styles.speechStatus}>{speechStatus}</Text>
@@ -202,7 +206,11 @@ export function AgaZenScreen() {
                   {!!lastMeasure && <Text style={styles.measureStatus}>{lastMeasure}</Text>}
                 </>
               ) : (
-                <Text style={styles.speechStatus}>{voiceUnavailable ? 'Voice standby' : 'Listening locally'}</Text>
+                <Text style={[styles.speechStatus, hologramMode && styles.speechStatusHologram]}>
+                  {hologramMode
+                    ? (voiceUnavailable ? 'Voice standby' : 'Listening')
+                    : (voiceUnavailable ? 'Voice standby' : 'Listening locally')}
+                </Text>
               )}
             </View>
           }
@@ -395,9 +403,12 @@ const styles = StyleSheet.create({
   feedShellWithMedia: { bottom: 310 },
   feedContent: { padding: spacing.md, paddingTop: spacing.lg },
   emptyState: { minHeight: 160, alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
+  emptyStateHologram: { minHeight: 118, padding: spacing.sm },
   emptyTitle: { color: colors.text, fontSize: 22, fontWeight: '900', letterSpacing: -0.4 },
+  emptyTitleHologram: { fontSize: 24, letterSpacing: 0.2, textShadowColor: 'rgba(103,232,249,0.75)', textShadowRadius: 18 },
   emptyText: { color: colors.muted, textAlign: 'center', marginTop: spacing.sm, lineHeight: 20 },
   versionText: { color: colors.faint, fontSize: 11, fontWeight: '800', marginTop: spacing.xs },
   speechStatus: { color: colors.faint, textAlign: 'center', marginTop: spacing.md, fontSize: 11, fontWeight: '700' },
+  speechStatusHologram: { marginTop: 5, fontSize: 10, color: 'rgba(185,255,255,0.62)' },
   measureStatus: { color: 'rgba(103,232,249,0.58)', textAlign: 'center', marginTop: spacing.xs, fontSize: 10, fontWeight: '800' },
 });

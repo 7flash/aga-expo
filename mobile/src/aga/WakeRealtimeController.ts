@@ -27,6 +27,22 @@ function selectedVoiceEngine() {
   return getAgaEngine();
 }
 
+function geminiTransportPreference() {
+  return (
+    env('EXPO_PUBLIC_AGA_GEMINI_TRANSPORT') ||
+    env('EXPO_PUBLIC_GEMINI_TRANSPORT') ||
+    ''
+  ).trim().toLowerCase();
+}
+
+function canUseWakelessGeminiDuplex() {
+  const engine = selectedVoiceEngine();
+  if (engine !== 'gemini') return false;
+  const transport = geminiTransportPreference();
+  const duplexish = transport === 'duplex' || transport === 'auto' || envFlag('EXPO_PUBLIC_AGA_GEMINI_DUPLEX', false);
+  return duplexish && envFlag('EXPO_PUBLIC_AGA_GEMINI_WAKELESS_DUPLEX', true);
+}
+
 type Listener = (snapshot: RealtimeSnapshot) => void;
 
 type VoiceSessionLike = {
@@ -219,8 +235,34 @@ export class WakeRealtimeController {
     if (diagnostics?.available === false || diagnostics?.provider === 'none') {
       this.wakeLoop = null;
       const message = diagnostics?.lastError || 'Speech recognition is not available in this runtime.';
-      this.publish({ speechStatus: `wake scout unavailable: ${message}`, error: message, voiceCapability: diagnostics });
       await logEvent('wake.unavailable', message).catch(() => undefined);
+
+      // Physical device fallback: if native/browser STT is missing but Gemini
+      // duplex is selected, do not leave AGA dead. Open Gemini Live audio as
+      // the wake/listening layer. This costs live-audio seconds, so it is
+      // guarded by Gemini budget limits and can be disabled with
+      // EXPO_PUBLIC_AGA_GEMINI_WAKELESS_DUPLEX=0.
+      if (canUseWakelessGeminiDuplex()) {
+        this.publish({
+          speechStatus: 'local wake unavailable — starting Gemini duplex listener',
+          error: envFlag('EXPO_PUBLIC_AGA_DEBUG_UI', false) ? message : null,
+          voiceCapability: diagnostics,
+        });
+        await this.activateRealtime('__AGA_DUPLEX_STANDBY__').catch((error: unknown) => {
+          const detail = error instanceof Error ? error.message : String(error || 'duplex fallback failed');
+          this.publish({ speechStatus: 'voice fallback unavailable', error: detail });
+          this.scheduleWakeRetry('duplex_fallback_failed');
+        });
+        return;
+      }
+
+      this.publish({
+        speechStatus: envFlag('EXPO_PUBLIC_AGA_DEBUG_UI', false)
+          ? `wake scout unavailable: ${message}`
+          : 'voice standby: microphone wake unavailable',
+        error: envFlag('EXPO_PUBLIC_AGA_DEBUG_UI', false) ? message : null,
+        voiceCapability: diagnostics,
+      });
       this.scheduleWakeRetry('unavailable');
       return;
     }
@@ -339,7 +381,7 @@ export class WakeRealtimeController {
       this.publish({
         mode: 'awake',
         interim: '',
-        speechStatus: selectedEngine === 'gemini' ? 'connecting gemini text turn engine' : selectedEngine === 'openai' ? 'connecting OpenAI realtime' : 'starting local engine',
+        speechStatus: selectedEngine === 'gemini' ? `connecting Gemini ${geminiTransportPreference() || 'text'} engine` : selectedEngine === 'openai' ? 'connecting OpenAI realtime' : 'starting local engine',
         error: null,
         voiceSummary: JSON.stringify(agaEngineDiagnostics()),
         voiceCapability: agaEngineDiagnostics(),

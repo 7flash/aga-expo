@@ -42,7 +42,7 @@ function geminiApiKey() {
 const LIVE_MODEL = env('EXPO_PUBLIC_GEMINI_LIVE_MODEL') || 'gemini-3.1-flash-live-preview';
 const TEXT_MODEL = env('EXPO_PUBLIC_GEMINI_TEXT_MODEL') || 'gemini-2.5-flash-lite';
 
-type GeminiTransport = 'text' | 'live' | 'duplex' | 'auto';
+type GeminiTransport = 'text' | 'live' | 'duplex' | 'hybrid' | 'auto';
 
 function numberEnv(name: string, fallback: number) {
   const raw = Number(env(name));
@@ -61,7 +61,7 @@ function geminiTransport(): GeminiTransport {
     env('EXPO_PUBLIC_GEMINI_TRANSPORT') ||
     ''
   ).trim().toLowerCase();
-  if (explicit === 'live' || explicit === 'duplex' || explicit === 'auto' || explicit === 'text') return explicit;
+  if (explicit === 'live' || explicit === 'duplex' || explicit === 'hybrid' || explicit === 'auto' || explicit === 'text') return explicit;
   if (envFlag('EXPO_PUBLIC_AGA_GEMINI_DUPLEX', false)) return 'duplex';
   if (envFlag('EXPO_PUBLIC_AGA_GEMINI_USE_LIVE', false)) return 'live';
   // Cost-safe default: REST text turns + local soft speech. Live stays opt-in.
@@ -128,7 +128,7 @@ function buildGeminiInstructions(prefs: Preferences | null) {
 
 function wantsGeminiDuplexAudio() {
   const transport = geminiTransport();
-  if (transport === 'duplex') return true;
+  if (transport === 'duplex' || transport === 'hybrid') return true;
   if (transport === 'auto') return envFlag('EXPO_PUBLIC_AGA_GEMINI_AUTO_DUPLEX', true);
   return envFlag('EXPO_PUBLIC_AGA_GEMINI_LIVE_AUDIO', false);
 }
@@ -192,6 +192,17 @@ function downsampleBuffer(input: Float32Array, inputRate: number, outputRate: nu
     offsetBuffer = nextOffsetBuffer;
   }
   return result;
+}
+
+const DUPLEX_STANDBY_PROMPT = '__AGA_DUPLEX_STANDBY__';
+
+function isDuplexStandbyPrompt(text: string) {
+  return String(text || '').trim() === DUPLEX_STANDBY_PROMPT;
+}
+
+function canUseLiveForTextFallbackRace() {
+  const transport = geminiTransport();
+  return transport === 'hybrid' || transport === 'auto' || envFlag('EXPO_PUBLIC_AGA_GEMINI_TEXT_RACE_FALLBACK', true);
 }
 
 export class GeminiLiveSession {
@@ -273,7 +284,7 @@ export class GeminiLiveSession {
       if (!key) throw new Error('Set EXPO_PUBLIC_GEMINI_API_KEY or EXPO_PUBLIC_GOOGLE_API_KEY for Gemini mode.');
 
       const transport = geminiTransport();
-      if (transport === 'live' || transport === 'duplex' || transport === 'auto') {
+      if (transport === 'live' || transport === 'duplex' || transport === 'hybrid' || transport === 'auto') {
         await this.connectLive().catch(async (error: unknown) => {
           const message = error instanceof Error ? error.message : String(error || 'Gemini Live unavailable');
           await logEvent('gemini.live.connect.fallback_text', message).catch(() => undefined);
@@ -327,7 +338,10 @@ export class GeminiLiveSession {
         else this.publish({ error: 'Gemini Live WebSocket error.' });
       };
       ws.onclose = () => {
-        if (!this.stopped) this.publish({ speechStatus: 'gemini live closed; text fallback ready' });
+        if (!this.stopped) {
+          this.duplexAudioActive = false;
+          this.publish({ speechStatus: 'gemini live closed; text fallback ready', listeningMode: 'wake-word / text fallback' });
+        }
         if (this.ws === ws) this.ws = null;
       };
     });
@@ -483,6 +497,18 @@ export class GeminiLiveSession {
   async replay(text: string) {
     const clean = String(text ?? '').trim();
     if (!clean || this.stopped) return;
+    if (isDuplexStandbyPrompt(clean)) {
+      // Used when local native/browser STT is unavailable on the physical device.
+      // Gemini Live audio becomes the listening layer; do not spend a REST text
+      // turn or immediately rearm wake scout.
+      this.publish({
+        mode: this.duplexAudioActive ? 'listening' : 'awake',
+        interim: '',
+        speechStatus: this.duplexAudioActive ? 'Gemini duplex listening — say AGA or speak naturally' : 'Gemini standby ready; duplex audio unavailable, text fallback waiting',
+        listeningMode: this.duplexAudioActive ? 'Gemini Live duplex wake fallback' : 'Gemini text fallback',
+      });
+      return;
+    }
     if (this.turnInProgress) {
       this.publish({ speechStatus: 'gemini is finishing the current turn; say AGA again after the chime', interim: clean.slice(0, 120) });
       await logEvent('gemini.turn.dropped_while_busy', clean.slice(0, 220)).catch(() => undefined);
@@ -519,7 +545,7 @@ export class GeminiLiveSession {
       this.ws.send(JSON.stringify({ clientContent: { turns: [{ role: 'user', parts: [{ text: clean }] }], turnComplete: true } }));
       // Some Live text turns do not emit an obvious final event in all clients.
       // If nothing completes quickly, fall back to REST so the user gets a reply.
-      this.liveFallbackTimer = setTimeout(() => {
+      this.liveFallbackTimer = canUseLiveForTextFallbackRace() ? setTimeout(() => {
         if (!this.turnInProgress) return;
         if (this.assistantBuffer) {
           void this.finishAssistantTurn(this.assistantBuffer);
@@ -529,7 +555,7 @@ export class GeminiLiveSession {
         void this.callTextFallback(clean)
           .then((answer) => this.finishAssistantTurn(answer))
           .catch((error) => this.failTurn(error));
-      }, numberEnv('EXPO_PUBLIC_AGA_GEMINI_LIVE_TEXT_TIMEOUT_MS', 6500));
+      }, numberEnv('EXPO_PUBLIC_AGA_GEMINI_LIVE_TEXT_TIMEOUT_MS', 6500)) : null;
       return;
     }
 
@@ -594,7 +620,16 @@ export class GeminiLiveSession {
       } catch { /* socket closing */ }
     };
     this.micSource.connect(this.micProcessor);
-    this.micProcessor.connect(ctx.destination);
+    // ScriptProcessor must be connected to run, but do not route microphone
+    // audio to speakers. Use a zero-gain sink to avoid echo/feedback.
+    const sink = typeof ctx.createGain === 'function' ? ctx.createGain() : null;
+    if (sink) {
+      sink.gain.value = 0;
+      this.micProcessor.connect(sink);
+      sink.connect(ctx.destination);
+    } else {
+      this.micProcessor.connect(ctx.destination);
+    }
     this.duplexAudioActive = true;
     this.liveAudioStartedAt = Date.now();
     this.publish({ speechStatus: `gemini duplex live:${LIVE_MODEL}`, audioLevel: 0.2, listeningMode: 'Gemini Live duplex' });
@@ -644,7 +679,15 @@ export class GeminiLiveSession {
       if (this.duplexAudioActive && this.liveAudioStartedAt) {
         const budget = readGeminiBudget();
         const elapsed = Math.max(0, (Date.now() - this.liveAudioStartedAt) / 1000);
-        this.publish({ geminiCost: { ...geminiBudgetSnapshot(this.currentTransportLabel()), liveAudioSeconds: budget.liveAudioSeconds + elapsed } } as any);
+        const projected = budget.liveAudioSeconds + elapsed;
+        this.publish({ geminiCost: { ...geminiBudgetSnapshot(this.currentTransportLabel()), liveAudioSeconds: projected } } as any);
+        const liveLimit = geminiBudgetSnapshot(this.currentTransportLabel()).maxLiveAudioSeconds;
+        if (liveLimit > 0 && projected >= liveLimit) {
+          this.publish({ speechStatus: 'Gemini live-audio budget reached; switching to text fallback', listeningMode: 'Gemini text fallback' });
+          this.stopDuplexAudio();
+          try { this.ws?.close?.(); } catch { /* ignore */ }
+          this.ws = null;
+        }
       } else {
         this.publish({ geminiCost: geminiBudgetSnapshot(this.currentTransportLabel()) } as any);
       }
