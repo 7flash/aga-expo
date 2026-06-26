@@ -4,10 +4,12 @@ export const REQUIRED_EXPO_INSTALLS = [
   'expo-secure-store',
   'expo-sqlite',
   'expo-keep-awake',
+  'expo-modules-core',
 ];
 
 export const REQUIRED_NPM_INSTALLS = [
   'react-native-sherpa-onnx',
+  'aga-native-audio',
 ];
 
 export const OPTIONAL_BROWSER_INSTALLS = [
@@ -27,8 +29,10 @@ export const OPTIONAL_AUDIO_CAPTURE_INSTALLS = [
 export const BUILD_COMMANDS = [
   'npx expo install expo-av expo-file-system expo-secure-store expo-sqlite expo-keep-awake',
   'npm install react-native-sherpa-onnx',
+  'npm install ./modules/aga-native-audio',
   'npm install sherpa-onnx-wasm --save-dev',
   'npx expo start --clear',
+  'node scripts/aga-tier3-aec-check.js',
   'npx expo prebuild',
   'npx expo run:android',
 ];

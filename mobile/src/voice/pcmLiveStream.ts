@@ -1,4 +1,5 @@
 import { measureMark } from '../observability/measure';
+import { enterTier3DuplexAudio, exitTier3DuplexAudio } from './tier3DuplexAudio';
 
 declare function require(name: string): any;
 
@@ -53,9 +54,16 @@ export class PcmLiveStreamer {
         this.options.onStatus?.('native PCM stream unavailable; using session fallback');
         return false;
       }
+      await enterTier3DuplexAudio(`pcm:${this.options.target}`);
       this.recorder = create({
         sampleRate: 16000,
         channels: 1,
+        audioSource: 7,
+        audioSourceName: 'VOICE_COMMUNICATION',
+        androidAudioSource: 'VOICE_COMMUNICATION',
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
         onFrame: (frame: PcmFrame) => this.sendFrame(frame),
         onError: (message: string) => this.options.onError?.(message),
       });
@@ -76,6 +84,7 @@ export class PcmLiveStreamer {
     try { await this.recorder?.stop?.(); } catch { /* ignore */ }
     this.recorder = null;
     this.started = false;
+    await exitTier3DuplexAudio(`pcm:${this.options.target}`);
     measureMark('voice.pcm.stop', { target: this.options.target });
   }
 

@@ -4,6 +4,7 @@ import { PorcupineWebWakeEngine } from './porcupineWebWakeEngine';
 import { DevKeywordInjectorWakeEngine } from './devKeywordInjectorWakeEngine';
 import { createSherpaKeywordEngine } from './sherpaKeywordEngine';
 import { wakeKeywords } from './sherpaKeywordPhrases';
+import { shouldAllowDevKeywordFallback } from './sherpaModelManifest';
 import type { KeywordEngine, KeywordEvent } from './keywordEngine';
 
 export type WakeKeywordSource = 'sherpa_native' | 'sherpa_wasm' | 'porcupine' | 'porcupine_web' | 'dev_keyword';
@@ -60,6 +61,48 @@ function createDevEngine(callbacks: WakeEngineCallbacks, reason: string): WakeEn
   }, reason);
 }
 
+class ResilientWakeEngine implements WakeEngine {
+  private primary: WakeEngine;
+  private fallbackFactory: () => WakeEngine | null;
+  private active: WakeEngine | null = null;
+  private fallbackReason: string | null = null;
+
+  constructor(primary: WakeEngine, fallbackFactory: () => WakeEngine | null) {
+    this.primary = primary;
+    this.fallbackFactory = fallbackFactory;
+  }
+
+  async start() {
+    try {
+      this.active = this.primary;
+      await Promise.resolve(this.primary.start());
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error || 'primary wake engine failed');
+      await Promise.resolve(this.primary.stop?.()).catch(() => undefined);
+      const fallback = this.fallbackFactory();
+      if (!fallback) throw error;
+      this.fallbackReason = message;
+      this.active = fallback;
+      await Promise.resolve(fallback.start());
+    }
+  }
+
+  async stop() {
+    const active = this.active;
+    this.active = null;
+    await Promise.resolve(active?.stop?.()).catch(() => undefined);
+  }
+
+  getDiagnostics() {
+    return {
+      provider: this.fallbackReason ? 'dev_keyword' : 'sherpa_wasm',
+      fallbackReason: this.fallbackReason,
+      active: this.active?.getDiagnostics?.(),
+      primary: this.primary.getDiagnostics?.(),
+    };
+  }
+}
+
 class SherpaWakeEngine implements WakeEngine {
   private engine: KeywordEngine;
   private callbacks: WakeEngineCallbacks;
@@ -113,7 +156,11 @@ export function createWakeEngine(callbacks: WakeEngineCallbacks): WakeEngine {
 
   if (Platform.OS === 'web') {
     if (requestedWeb === 'sherpa' || requestedWeb === 'sherpa_wasm' || requested === 'sherpa' || requested === 'auto') {
-      return new SherpaWakeEngine(callbacks, 'sherpa_wasm');
+      const primary = new SherpaWakeEngine(callbacks, 'sherpa_wasm');
+      return new ResilientWakeEngine(primary, () => {
+        if (!shouldAllowDevKeywordFallback()) return null;
+        return createDevEngine(callbacks, 'Sherpa WASM unavailable; explicit dev keyword fallback enabled');
+      });
     }
     if (requestedWeb === 'porcupine' || requestedWeb === 'porcupine_web' || requested === 'porcupine') {
       return new PorcupineWebWakeEngine({

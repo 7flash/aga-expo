@@ -18,7 +18,7 @@ export type SherpaAssetManifest = {
   decoder?: string;
   joiner?: string;
   paraformer?: string;
-  provider: 'xnnpack' | 'nnapi' | 'cpu' | string;
+  provider: 'xnnpack' | 'nnapi' | 'coreml' | 'cpu' | string;
   sampleRate: number;
   featureDim: number;
   numThreads: number;
@@ -41,7 +41,11 @@ function intEnv(name: string, fallback: number) {
 }
 
 function provider() {
-  return env('EXPO_PUBLIC_AGA_SHERPA_EXECUTION_PROVIDER') || (Platform.OS === 'android' ? 'xnnpack' : 'cpu');
+  const explicit = env('EXPO_PUBLIC_AGA_SHERPA_EXECUTION_PROVIDER');
+  if (explicit) return explicit;
+  if (Platform.OS === 'android') return env('EXPO_PUBLIC_AGA_SHERPA_ANDROID_EXECUTION_PROVIDER') || 'xnnpack';
+  if (Platform.OS === 'ios') return env('EXPO_PUBLIC_AGA_SHERPA_IOS_EXECUTION_PROVIDER') || 'coreml';
+  return env('EXPO_PUBLIC_AGA_SHERPA_WASM_EXECUTION_PROVIDER') || 'wasm';
 }
 
 function targetDefault(): SherpaRuntimeTarget {

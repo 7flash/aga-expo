@@ -4,7 +4,7 @@ const config: ExpoConfig = {
   name: 'AGA Voice Assistant',
   slug: 'aga-voice-assistant',
   scheme: 'aga',
-  version: '3.1.0',
+  version: '3.2.0',
   orientation: 'default',
   userInterfaceStyle: 'dark',
   android: {
@@ -24,11 +24,13 @@ const config: ExpoConfig = {
     supportsTablet: true,
     infoPlist: {
       NSMicrophoneUsageDescription: 'AGA listens locally for its wake and safety control words.',
+      UIBackgroundModes: ['audio', 'processing'],
     },
   },
   web: {
     bundler: 'metro',
   },
+  plugins: ['./plugins/withAgaAudioAppliance'],
   extra: {
     assistantWebUrl: process.env.EXPO_PUBLIC_ASSISTANT_WEB_URL ?? 'http://localhost:3000',
     wakeWord: process.env.EXPO_PUBLIC_AGA_WAKE_WORD ?? 'aga',

@@ -1,0 +1,9 @@
+{
+  "platforms": ["android", "ios"],
+  "android": {
+    "modules": ["com.geeksy.aga.audio.AgaNativeAudioModule"]
+  },
+  "ios": {
+    "modules": ["AgaNativeAudioModule"]
+  }
+}

@@ -1,4 +1,5 @@
 import { Platform } from 'react-native';
+import { enterVoiceCommunicationMode, exitVoiceCommunicationMode } from './nativeAudioSession';
 
 export type ShortUtteranceAudio =
   | { kind: 'web_blob'; blob: Blob; mimeType: string; durationMs: number }
@@ -88,12 +89,13 @@ class NativeOptionalShortUtteranceRecorder implements ShortUtteranceRecorder {
   }
 
   async start() {
+    await enterVoiceCommunicationMode({ reason: 'short_utterance_stt', speaker: false }).catch(() => undefined);
     // This intentionally avoids Android SpeechRecognizer. It is raw audio capture
     // only, used after wake so OpenAI STT can transcribe the short utterance.
     const mod = await optionalImport('react-native-audio-record') || await optionalImport('expo-av');
     if (mod?.default?.init || mod?.init) {
       const audioRecord = mod.default || mod;
-      audioRecord.init?.({ sampleRate: 16000, channels: 1, bitsPerSample: 16, wavFile: 'aga-short-utterance.wav' });
+      audioRecord.init?.({ sampleRate: 16000, channels: 1, bitsPerSample: 16, wavFile: 'aga-short-utterance.wav', audioSource: 7, audioSourceName: 'VOICE_COMMUNICATION' });
       audioRecord.start?.();
       this.recorder = { kind: 'audio-record', audioRecord };
       this.startedAt = Date.now();
@@ -118,10 +120,12 @@ class NativeOptionalShortUtteranceRecorder implements ShortUtteranceRecorder {
     this.recorder = null;
     if (current.kind === 'audio-record') {
       const uri = await current.audioRecord.stop?.();
+      await exitVoiceCommunicationMode().catch(() => undefined);
       return uri ? { kind: 'native_uri', uri: String(uri), mimeType: 'audio/wav', durationMs } : null;
     }
     await current.recording.stopAndUnloadAsync();
     const uri = current.recording.getURI?.();
+    await exitVoiceCommunicationMode().catch(() => undefined);
     return uri ? { kind: 'native_uri', uri: String(uri), mimeType: 'audio/m4a', durationMs } : null;
   }
 
@@ -131,6 +135,7 @@ class NativeOptionalShortUtteranceRecorder implements ShortUtteranceRecorder {
       if (this.recorder?.kind === 'expo-av') await this.recorder.recording.stopAndUnloadAsync?.();
     } catch { /* ignore */ }
     this.recorder = null;
+    if (Platform.OS !== 'web') await exitVoiceCommunicationMode().catch(() => undefined);
   }
 }
 

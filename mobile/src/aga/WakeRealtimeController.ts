@@ -4,6 +4,7 @@ import { parseVoiceMenuCommand } from './voiceFirstMenuCommands';
 import { selectedChoiceSpeech, spokenChoicePrompt } from '../voice/spokenMenuPrompts';
 import { createPostWakeCommandEngine, postWakeWindowMs } from '../voice/postWakeCommandEngine';
 import { speakShortReply, stopSpeaking } from '../voice/speechOut';
+import { enterTier3DuplexAudio, exitTier3DuplexAudio, ensureWakeForegroundService, releaseWakeForegroundService, tier3AudioDiagnostics } from '../voice/tier3DuplexAudio';
 import { classifyTurnForVoicePath } from '../voice/liveEscalation';
 import { answerShortTextWithGpt5, ShortReasoningAudioTurn } from './shortReasoningTurn';
 import { DeterministicGuidedRunner } from '../sessions/deterministicGuidedRunner';
@@ -48,6 +49,36 @@ function selectedEngine() {
 
 function postWakeReply() {
   return env('EXPO_PUBLIC_AGA_POST_WAKE_REPLY') || 'Yes?';
+}
+
+function wakeRepairHint(message: string) {
+  const lower = String(message || '').toLowerCase();
+  if (lower.includes('sherpa') && lower.includes('wasm')) {
+    return {
+      provider: 'sherpa_wasm',
+      short: 'Sherpa web runtime missing',
+      detail: 'Browser preview needs the Sherpa WASM JS package plus public/sherpa/kws-model assets. Run: node scripts/aga-sherpa-web-listening-setup.js, then restart Expo with cache cleared.',
+    };
+  }
+  if (lower.includes('react-native-sherpa-onnx')) {
+    return {
+      provider: 'sherpa_native',
+      short: 'Sherpa native module missing',
+      detail: 'Android appliance builds need react-native-sherpa-onnx installed and rebuilt with Gradle. Do not fall back to Android SpeechRecognizer.',
+    };
+  }
+  if (lower.includes('assets') || lower.includes('model') || lower.includes('tokens') || lower.includes('keywords')) {
+    return {
+      provider: 'sherpa_assets',
+      short: 'Sherpa model assets missing',
+      detail: 'Run: node scripts/aga-sherpa-kws-setup.js --force && node scripts/aga-sherpa-runtime-assets-check.js.',
+    };
+  }
+  return {
+    provider: 'wake',
+    short: 'wake engine failed',
+    detail: 'Run: node scripts/aga-wake-listening-check.js for the exact missing runtime/assets.',
+  };
 }
 
 /**
@@ -191,17 +222,32 @@ export class WakeRealtimeController {
 
   private async startWakeScout(reason: string) {
     if (!this.started || this.wakeEngine) return;
-    this.wakeEngine = createWakeEngine({ onEvent: (event) => this.onWakeEvent(event) });
+    const engine = createWakeEngine({ onEvent: (event) => this.onWakeEvent(event) });
+    this.wakeEngine = engine;
     try {
-      await this.wakeEngine.start();
-      const wakeDiagnostics = this.wakeEngine.getDiagnostics?.() as any;
+      await ensureWakeForegroundService(reason).catch(() => undefined);
+      await engine.start();
+      const wakeDiagnostics = engine.getDiagnostics?.() as any;
       const provider = String(wakeDiagnostics?.provider || (wakeDiagnostics?.diagnostics?.provider) || 'wake');
       this.publish({ mode: 'listening', speechStatus: `${provider} listening (${reason})`, error: null, wakeProvider: provider, voiceCapability: { ...(this.snapshot as any).voiceCapability, wakeProvider: provider, wakeDiagnostics } } as any);
       await logEvent('wake.keyword.start', reason).catch(() => undefined);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error || 'wake engine failed');
-      this.publish({ mode: 'recovering', speechStatus: 'wake engine failed', error: message, heardText: '' } as any);
-      await logEvent('wake.keyword.error', message).catch(() => undefined);
+      // Important: a failed engine must not stay installed. Otherwise manual
+      // rearm/startWakeScout returns early forever and it looks like AGA is
+      // “not even trying.”
+      if (this.wakeEngine === engine) this.wakeEngine = null;
+      await Promise.resolve(engine.stop?.()).catch(() => undefined);
+      const hint = wakeRepairHint(message);
+      this.publish({
+        mode: 'recovering',
+        speechStatus: hint.short,
+        error: `${message}${hint.detail ? `\n${hint.detail}` : ''}`,
+        heardText: '',
+        wakeProvider: hint.provider,
+        voiceCapability: { ...(this.snapshot as any).voiceCapability, wakeStartError: message, wakeRepair: hint },
+      } as any);
+      await logEvent('wake.keyword.error', `${message} ${hint.detail || ''}`.trim()).catch(() => undefined);
     }
   }
 
@@ -209,6 +255,7 @@ export class WakeRealtimeController {
     const engine = this.wakeEngine;
     this.wakeEngine = null;
     if (engine) await Promise.resolve(engine.stop()).catch(() => undefined);
+    await releaseWakeForegroundService(reason).catch(() => undefined);
     await logEvent('wake.keyword.stop', reason).catch(() => undefined);
   }
 
@@ -443,7 +490,8 @@ export class WakeRealtimeController {
     if (envFlag('EXPO_PUBLIC_AGA_FRESH_CONTEXT_PER_WAKE', true)) {
       await startNewConversationSession('wake_activation', { clearTranscript: true, endActiveSession: false }).catch(() => undefined);
     }
-    this.publish({ mode: 'thinking', speechStatus: `${selectedEngine()} live session starting`, error: null, heardText: initialText } as any);
+    const aec = await enterTier3DuplexAudio(`live:${selectedEngine()}`).catch((error) => ({ ok: false, message: error instanceof Error ? error.message : String(error) }));
+    this.publish({ mode: 'thinking', speechStatus: `${selectedEngine()} live session starting`, error: null, heardText: initialText, voiceCapability: { ...(this.snapshot as any).voiceCapability, tier3Audio: aec, aec: tier3AudioDiagnostics() } } as any);
     const session = await this.createSelectedVoiceSession();
     this.realtime = session;
     this.realtimeUnsubscribe = session.subscribe((next) => {
@@ -551,6 +599,7 @@ export class WakeRealtimeController {
     this.realtimeUnsubscribe?.();
     this.realtimeUnsubscribe = null;
     if (session) await Promise.resolve(session.stop()).catch(() => undefined);
+    await exitTier3DuplexAudio(reason).catch(() => undefined);
     await logEvent('realtime.sleep', reason).catch(() => undefined);
     await this.refresh();
     if (this.started) await this.startWakeScout(reason).catch(() => undefined);
