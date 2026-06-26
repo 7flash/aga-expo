@@ -56,6 +56,14 @@ function naturalFollowupLooksActionable(text: string) {
   return /\b(want|need|can you|could you|please|play|open|change|switch|start|stop|pause|resume|tell|show|help|remember|forget|menu|music|youtube|meditation|hypnosis|breathe|breathing|remind)\b/i.test(clean) || clean.split(/\s+/).length >= 3;
 }
 
+
+function mediaFollowupLooksActionable(text: string) {
+  const clean = normalizeSpeech(text);
+  if (!clean || clean.length < 3) return false;
+  if (/^(uh|um|hmm|ha|haha|okay|ok|yes|no|yeah|yep|nope)$/i.test(clean)) return false;
+  return /\b(stop|pause|resume|continue|play|music|video|youtube|song|player|volume|louder|softer|quieter|mute|unmute|change|another|different|next|skip|close|dismiss|speak|talk|tell|say|explain|on top)\b/i.test(clean);
+}
+
 type Listener = (snapshot: RealtimeSnapshot) => void;
 
 type VoiceSessionLike = {
@@ -317,11 +325,13 @@ export class WakeRealtimeController {
     measureMark('wakeScout.final', { woke: wake.woke, kind: wake.kind, match: wake.match, source, chars: text.length, text: text.slice(0, 120) });
     if (!wake.woke) {
       const inFollowupWindow = Date.now() < this.followupAcceptUntil;
-      if (source === 'final' && inFollowupWindow && naturalFollowupLooksActionable(text)) {
+      const mediaOpen = !!this.snapshot.activeMedia;
+      const mediaFollowup = mediaOpen && mediaFollowupLooksActionable(text);
+      if (source === 'final' && ((inFollowupWindow && naturalFollowupLooksActionable(text)) || mediaFollowup)) {
         this.wakeActivationInFlight = true;
         try {
-          this.publish({ interim: '', speechStatus: 'follow-up heard — connecting' });
-          await logEvent('wake.followup.accepted', text.slice(0, 220)).catch(() => undefined);
+          this.publish({ interim: '', speechStatus: mediaFollowup ? 'media command heard — connecting' : 'follow-up heard — connecting' });
+          await logEvent(mediaFollowup ? 'wake.media_followup.accepted' : 'wake.followup.accepted', text.slice(0, 220)).catch(() => undefined);
           await this.activateRealtime(text);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error || 'follow-up activation failed');
@@ -333,7 +343,13 @@ export class WakeRealtimeController {
         }
         return;
       }
-      if (source === 'final') this.publish({ speechStatus: `wake scout heard “${text.slice(0, 72)}” — waiting for AGA / hey AGA` });
+      if (source === 'final') {
+        this.publish({
+          speechStatus: this.snapshot.activeMedia
+            ? `media open — say pause, stop, volume, change video, or say AGA for more`
+            : `wake scout heard “${text.slice(0, 72)}” — waiting for AGA / hey AGA`,
+        });
+      }
       return;
     }
 
@@ -386,7 +402,19 @@ export class WakeRealtimeController {
     // OpenAI transport out of the execution path unless selectedEngine=openai.
     if (selectedEngine === 'gemini') {
       const mod = await import('../gemini/GeminiLiveSession');
-      return new mod.GeminiLiveSession({ onTurnDone: () => { void this.sleepRealtime('gemini_turn_done'); } });
+      return new mod.GeminiLiveSession({
+        onTurnDone: () => {
+          // If media is open, keep the selected engine/session alive so the
+          // user can say “pause”, “louder”, “change video”, or ask AGA to
+          // speak over the music without needing a full wake cycle.
+          if (this.snapshot.activeMedia) {
+            this.publish({ mode: 'media', speechStatus: 'media active — listening for media controls' });
+            this.armIdleTimer(this.snapshot);
+            return;
+          }
+          void this.sleepRealtime('gemini_turn_done');
+        },
+      });
     }
     if (selectedEngine === 'openai') {
       const mod = await import('../realtime/RealtimeSession');

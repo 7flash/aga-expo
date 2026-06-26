@@ -33,6 +33,10 @@ export function localControlIntent(text: string): LocalControlIntent {
   const language = detectLanguageRequest(clean);
   if (language) return { tool: 'set_ui_language', args: { locale: language.locale, label: language.label } };
 
+
+  if (/\b(gemini|cost|budget|usage|spent|spend|cheap\s+mode|daily\s+limit)\b/.test(clean) && /\b(status|how\s+much|usage|cost|budget|spent|left|remaining|limit)\b/.test(clean)) {
+    return { tool: 'gemini_cost_status', args: {} };
+  }
   if (/\b(change|switch|choose|set|open|show)\b.*\bvoice\b|\bvoice\s+(menu|settings|options)\b/.test(clean)) {
     return { tool: 'show_settings_menu', args: { category: 'voice' } };
   }
@@ -47,6 +51,22 @@ export function localControlIntent(text: string): LocalControlIntent {
   }
   if (/\b(open|show)\b.*\b(menu|settings|options)\b|^menu$|^settings$|^options$/.test(clean)) {
     return { tool: 'show_settings_menu', args: { category: 'main' } };
+  }
+
+  if (/\b(louder|volume up|turn it up|raise volume|more volume)\b/.test(clean)) {
+    return { tool: 'media_control', args: { command: 'volume_up' } };
+  }
+  if (/\b(softer|quieter|volume down|turn it down|lower volume|less volume)\b/.test(clean)) {
+    return { tool: 'media_control', args: { command: 'volume_down' } };
+  }
+  if (/\b(mute|silent)\b/.test(clean)) {
+    return { tool: 'media_control', args: { command: 'mute' } };
+  }
+  if (/\bunmute\b/.test(clean)) {
+    return { tool: 'media_control', args: { command: 'unmute' } };
+  }
+  if (/\b(change|another|different|next|skip)\b.*\b(video|youtube|music|song|track)?\b/.test(clean)) {
+    return { tool: 'play_youtube', args: { query: clean || 'different calm ambient music', forceYouTube: /youtube|video/.test(clean) } };
   }
 
   if (/\b(close|stop|dismiss)\b.*\b(video|youtube|music|song|player|ambient)\b/.test(clean) || /^stop music$/.test(clean)) {

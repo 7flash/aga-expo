@@ -78,7 +78,7 @@ export function AgaZenScreen() {
     : error
       ? 'Needs attention'
       : mode === 'sleeping' || mode === 'listening'
-        ? 'Listening for AGA'
+        ? (activeMedia ? 'Media voice controls' : 'Listening for AGA')
         : mode;
   const media: any = activeMedia;
   const menu = activeChoiceMenu as any;
@@ -400,7 +400,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   feedShellWithChoice: { top: '56%' },
-  feedShellWithMedia: { bottom: 310 },
+  feedShellWithMedia: { bottom: 370 },
   feedContent: { padding: spacing.md, paddingTop: spacing.lg },
   emptyState: { minHeight: 160, alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
   emptyStateHologram: { minHeight: 118, padding: spacing.sm },

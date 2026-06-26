@@ -112,6 +112,36 @@ function cleanAssistantText(text: string) {
     .trim();
 }
 
+
+function normalizeMediaText(text: string) {
+  return String(text ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function localMediaIntent(text: string, activeMedia: ActiveMedia): { tool: string; args: Record<string, unknown>; quiet?: boolean } | null {
+  if (!activeMedia) return null;
+  const clean = normalizeMediaText(text);
+  if (!clean) return null;
+
+  if (/\b(close|stop|dismiss|turn off|shut off)\b.*\b(video|youtube|music|song|player|ambient)?\b/.test(clean) || /^stop(?: the)? music$/.test(clean) || /\bstop music\b/.test(clean)) {
+    return { tool: 'media_control', args: { command: 'stop' }, quiet: true };
+  }
+  if (/\b(pause|hold)\b.*\b(video|youtube|music|song|player|ambient)?\b/.test(clean) || /^pause$/.test(clean)) {
+    return { tool: 'media_control', args: { command: 'pause' }, quiet: true };
+  }
+  if (/\b(resume|continue|unpause)\b.*\b(video|youtube|music|song|player|ambient)?\b/.test(clean) || /^resume$/.test(clean)) {
+    return { tool: 'media_control', args: { command: 'resume' }, quiet: true };
+  }
+  if (/\b(mute|silent)\b/.test(clean)) return { tool: 'media_control', args: { command: 'mute' }, quiet: true };
+  if (/\b(unmute)\b/.test(clean)) return { tool: 'media_control', args: { command: 'unmute' }, quiet: true };
+  if (/\b(louder|volume up|turn it up|raise volume|more volume)\b/.test(clean)) return { tool: 'media_control', args: { command: 'volume_up' }, quiet: true };
+  if (/\b(softer|quieter|volume down|turn it down|lower volume|less volume)\b/.test(clean)) return { tool: 'media_control', args: { command: 'volume_down' }, quiet: true };
+  if (/\b(change|another|different|next|skip)\b.*\b(video|youtube|music|song|track)?\b/.test(clean)) {
+    const base = (activeMedia as any)?.query || (activeMedia as any)?.title || 'calm ambient music';
+    return { tool: 'play_youtube', args: { query: `different ${base}`, forceYouTube: (activeMedia as any)?.type === 'youtube' }, quiet: false };
+  }
+  return null;
+}
+
 function buildGeminiInstructions(prefs: Preferences | null) {
   return [
     'You are AGA, a soft, funny, friendly guardian angel voice companion.',
@@ -429,7 +459,9 @@ export class GeminiLiveSession {
       await addMessage('assistant', clean);
       await this.refresh();
       this.publish({ interim: clean, speechStatus: 'gemini speaking' });
-      await speakSoftly(clean, { locale: this.prefs?.voiceLocale });
+      if (!this.duplexAudioActive || envFlag('EXPO_PUBLIC_AGA_GEMINI_LOCAL_TTS', false)) {
+        await speakSoftly(clean, { locale: this.prefs?.voiceLocale });
+      }
     }
     this.publish({ interim: '', mode: this.snapshot.activeMedia ? 'media' : 'listening', speechStatus: 'gemini:turn_done' });
     if (!this.duplexAudioActive) setTimeout(() => this.options.onTurnDone?.(), numberEnv('EXPO_PUBLIC_AGA_GEMINI_REARM_DELAY_MS', 600));
@@ -468,7 +500,8 @@ export class GeminiLiveSession {
   }
 
   private async maybeHandleLocalControl(text: string) {
-    const intent = localControlIntent(text);
+    const mediaIntent = localMediaIntent(text, this.snapshot.activeMedia as ActiveMedia);
+    const intent = mediaIntent ?? localControlIntent(text);
     if (!intent) return false;
     if (intent.tool === 'gemini_cost_status') {
       await this.sayLocal(this.geminiBudgetStatus(), 'gemini_cost_status');
@@ -484,6 +517,13 @@ export class GeminiLiveSession {
     try { output = await this.capabilityRunner().run(intent.tool, intent.args ?? {}); }
     catch (error) { output = error instanceof Error ? error.message : 'That control failed.'; }
     await logEvent('gemini.local_control', `${intent.tool}: ${output.slice(0, 220)}`).catch(() => undefined);
+    if ((intent as any).quiet || (intent.tool === 'media_control' && !envFlag('EXPO_PUBLIC_AGA_SPEAK_MEDIA_CONFIRMATIONS', false))) {
+      const cleanOutput = output || 'Done.';
+      await addMessage('assistant', cleanOutput);
+      await this.refresh();
+      this.publish({ interim: '', speechStatus: `local:${intent.tool}`, mode: this.snapshot.activeMedia ? 'media' : 'listening' });
+      return true;
+    }
     await this.sayLocal(output || 'Done.', intent.tool);
     return true;
   }
@@ -495,8 +535,9 @@ export class GeminiLiveSession {
     await addMessage('assistant', clean);
     await this.refresh();
     this.publish({ interim: clean, speechStatus: `local:${reason}` });
-    this.setMode('speaking');
-    await speakSoftly(clean, { locale: this.prefs?.voiceLocale });
+    const shouldSpeakLocal = envFlag('EXPO_PUBLIC_AGA_GEMINI_LOCAL_TTS', false) || envFlag('EXPO_PUBLIC_AGA_LOCAL_TTS_FALLBACK', false);
+    this.setMode(shouldSpeakLocal ? 'speaking' : (this.snapshot.activeMedia ? 'media' : 'listening'));
+    if (shouldSpeakLocal) await speakSoftly(clean, { locale: this.prefs?.voiceLocale });
     this.publish({ interim: '', mode: this.snapshot.activeMedia ? 'media' : 'listening', speechStatus: 'gemini:turn_done' });
     if (!this.duplexAudioActive) setTimeout(() => this.options.onTurnDone?.(), numberEnv('EXPO_PUBLIC_AGA_GEMINI_REARM_DELAY_MS', 600));
   }

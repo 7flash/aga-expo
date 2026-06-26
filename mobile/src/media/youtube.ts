@@ -146,7 +146,7 @@ function onYouTubeIframeAPIReady(){
 setTimeout(function(){ if(!player) makeFallback(); }, 2200);
 document.addEventListener('message',function(event){handle(event.data)});
 window.addEventListener('message',function(event){handle(event.data)});
-function handle(raw){try{var msg=typeof raw==='string'?JSON.parse(raw):raw; if(msg.type==='volume'){pendingVolume=Math.max(0,Math.min(100,Number(msg.value)||50)); if(player&&player.setVolume)player.setVolume(pendingVolume); return;} if(!player)return; if(msg.type==='pause')player.pauseVideo(); if(msg.type==='resume')player.playVideo(); if(msg.type==='stop')player.stopVideo();}catch(e){}}
+function handle(raw){try{var msg=typeof raw==='string'?JSON.parse(raw):raw; if(msg.type==='volume'){pendingVolume=Math.max(0,Math.min(100,Number(msg.value)||50)); if(player&&player.setVolume)player.setVolume(pendingVolume); return;} if(msg.type==='volume_delta'){pendingVolume=Math.max(0,Math.min(100,(pendingVolume==null?50:pendingVolume)+(Number(msg.delta)||0))); if(player&&player.setVolume)player.setVolume(pendingVolume); tell('player.volume',{value:pendingVolume}); return;} if(!player)return; if(msg.type==='pause')player.pauseVideo(); if(msg.type==='resume')player.playVideo(); if(msg.type==='stop')player.stopVideo();}catch(e){}}
 </script>
 <noscript><div class="fallback"><a href="${htmlEscape(fallbackUrl)}">Open ${htmlEscape(title)} on YouTube</a></div></noscript>
 </body>
@@ -257,22 +257,6 @@ async function searchYouTubeDataApi(query: string): Promise<YouTubeResult | null
 }
 
 
-
-
-function hasYouTubeDataApiKey() {
-  return !!(env('EXPO_PUBLIC_YOUTUBE_API_KEY') || env('EXPO_PUBLIC_GOOGLE_API_KEY'));
-}
-
-function hasRemoteYouTubeBackend() {
-  const { base } = remoteBackendConfig();
-  return !!base && !/localhost|127\.0\.0\.1/i.test(base);
-}
-
-function shouldPreferVerifiedYouTube(query: string) {
-  const clean = String(query || '').toLowerCase();
-  if (hasYouTubeDataApiKey() || hasRemoteYouTubeBackend()) return true;
-  return /(?:youtube\.com|youtu\.be|watch\?v=|youtube video|on youtube|search youtube|youtube)/i.test(clean);
-}
 
 const KNOWN_BAD_YOUTUBE_IDS = new Set([
   // 24/7/live IDs or IDs seen returning “live stream recording is not available”.
@@ -387,30 +371,17 @@ export async function searchYouTube(query: string): Promise<YouTubeResult> {
   const explicitId = extractYouTubeVideoId(clean);
   if (explicitId) return genericPreset(explicitId)!;
 
+  // Broad music intent should be deterministic. Let explicit URLs/IDs and exact
+  // searches use API/server, but plain “play music/calm music” uses local safe
+  // presets immediately so the model cannot expand it into a broken search.
   const broadPreset = genericPreset(clean);
-  const preferVerified = shouldPreferVerifiedYouTube(clean);
-
-  // If the app has a YouTube Data API key or a TradJS YouTube backend, use it
-  // first — even for broad “play calm music”. A stale hardcoded preset is exactly
-  // how we got broken “live recording unavailable” iframes.
-  if (preferVerified) {
-    const api = await searchYouTubeDataApi(clean).catch(() => null);
-    if (api?.videoId && !KNOWN_BAD_YOUTUBE_IDS.has(api.videoId)) return api;
-
-    const remote = await searchRemoteYouTube(clean).catch(() => null);
-    if (remote?.videoId && !KNOWN_BAD_YOUTUBE_IDS.has(remote.videoId)) return remote;
-  }
-
-  // With no verifier available, only then use the local preset for broad music.
   if (broadPreset && broadPreset.source === 'preset') return broadPreset;
 
-  if (!preferVerified) {
-    const api = await searchYouTubeDataApi(clean).catch(() => null);
-    if (api?.videoId && !KNOWN_BAD_YOUTUBE_IDS.has(api.videoId)) return api;
+  const api = await searchYouTubeDataApi(clean).catch(() => null);
+  if (api?.videoId && !KNOWN_BAD_YOUTUBE_IDS.has(api.videoId)) return api;
 
-    const remote = await searchRemoteYouTube(clean).catch(() => null);
-    if (remote?.videoId && !KNOWN_BAD_YOUTUBE_IDS.has(remote.videoId)) return remote;
-  }
+  const remote = await searchRemoteYouTube(clean).catch(() => null);
+  if (remote?.videoId && !KNOWN_BAD_YOUTUBE_IDS.has(remote.videoId)) return remote;
 
   if (broadPreset) return broadPreset;
 

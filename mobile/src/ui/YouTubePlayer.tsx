@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useRef } from 'react';
-import { Animated, Platform, StyleSheet, Text, View } from 'react-native';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Animated, Platform, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { youtubeEmbedHtml, youtubeSearchEmbedHtml, youtubeSearchPlayerUrl, youtubeVideoPlayerUrl } from '../media/youtube';
 import { measureMark } from '../observability/measure';
 import { colors, radius, spacing } from './theme';
@@ -12,7 +12,7 @@ try {
   WebView = null;
 }
 
-export type MediaCommand = 'pause' | 'resume' | 'stop' | null;
+export type MediaCommand = 'pause' | 'resume' | 'stop' | 'volume_up' | 'volume_down' | 'mute' | 'unmute' | null;
 
 type Props = {
   videoId?: string;
@@ -105,7 +105,11 @@ function WebIframe({
     const key = `${command}:${Date.now()}`;
     lastCommandRef.current = key;
     measureMark('youtube.iframe.command', { command });
-    cw.postMessage(playerMessage(command), '*');
+    if (command === 'volume_up') cw.postMessage(playerMessage('volume_delta', { delta: 14 }), '*');
+    else if (command === 'volume_down') cw.postMessage(playerMessage('volume_delta', { delta: -14 }), '*');
+    else if (command === 'mute') cw.postMessage(playerMessage('volume', { value: 0 }), '*');
+    else if (command === 'unmute') cw.postMessage(playerMessage('volume', { value: volume }), '*');
+    else cw.postMessage(playerMessage(command), '*');
     // Settle parent command state once. The iframe will also emit a player.* event when possible.
     onEventRef.current?.(eventJson(`player.${command}`));
   }, [command]);
@@ -155,9 +159,12 @@ export function YouTubePlayer({
   const webviewRef = useRef<any>(null);
   const onEventRef = useRef(onEvent);
   const slide = useRef(new Animated.Value(0)).current;
+  const { width, height } = useWindowDimensions();
+  const isWide = width >= 820 && width > height;
   const url = useMemo(() => directPlayerUrl({ videoId, query, playerUrl, title }), [playerUrl, query, title, videoId]);
   const html = useMemo(() => htmlForPlayer({ videoId, query, embedHtml, title }), [embedHtml, query, title, videoId]);
-  const targetVolume = ducked ? duckedVolume : normalVolume;
+  const [baseVolume, setBaseVolume] = useState(Math.max(0, Math.min(100, Math.round(normalVolume))));
+  const targetVolume = ducked ? Math.min(baseVolume, duckedVolume) : baseVolume;
 
   useEffect(() => {
     onEventRef.current = onEvent;
@@ -170,10 +177,30 @@ export function YouTubePlayer({
   useEffect(() => {
     if (!command) return;
     measureMark('youtube.command', { command });
+    if (command === 'volume_up') {
+      setBaseVolume((current) => Math.min(100, current + 14));
+      webviewRef.current?.postMessage?.(JSON.stringify({ type: 'volume_delta', delta: 14 }));
+      return;
+    }
+    if (command === 'volume_down') {
+      setBaseVolume((current) => Math.max(0, current - 14));
+      webviewRef.current?.postMessage?.(JSON.stringify({ type: 'volume_delta', delta: -14 }));
+      return;
+    }
+    if (command === 'mute') {
+      setBaseVolume(0);
+      webviewRef.current?.postMessage?.(JSON.stringify({ type: 'volume', value: 0 }));
+      return;
+    }
+    if (command === 'unmute') {
+      setBaseVolume(Math.max(20, Math.round(normalVolume)));
+      webviewRef.current?.postMessage?.(JSON.stringify({ type: 'volume', value: Math.max(20, Math.round(normalVolume)) }));
+      return;
+    }
     webviewRef.current?.postMessage?.(JSON.stringify({ type: command }));
     if (Platform.OS !== 'web') return;
     // Web iframe command handling lives inside WebIframe so it can post to contentWindow.
-  }, [command]);
+  }, [command, normalVolume]);
 
   useEffect(() => {
     const safeVolume = Math.max(0, Math.min(100, Math.round(targetVolume)));
@@ -187,6 +214,7 @@ export function YouTubePlayer({
     <Animated.View
       style={[
         styles.card,
+        isWide ? styles.cardWide : null,
         {
           opacity: slide,
           transform: [{ translateY: slide.interpolate({ inputRange: [0, 1], outputRange: [42, 0] }) }],
@@ -202,7 +230,7 @@ export function YouTubePlayer({
           <Text style={styles.voiceOnlyCloseText}>say “AGA close video”</Text>
         </View>
       </View>
-      <View style={styles.webviewWrap}>
+      <View style={[styles.webviewWrap, isWide ? styles.webviewWrapWide : null]}>
         {Platform.OS === 'web' ? (
           <WebIframe url={url} html={html} title={title} command={command} volume={targetVolume} onEvent={onEvent} />
         ) : WebView ? (
@@ -228,7 +256,7 @@ export function YouTubePlayer({
         {ducked
           ? 'Music keeps playing quietly while AGA speaks.'
           : videoId
-            ? 'Say “AGA pause”, “AGA resume”, or “AGA close video”.'
+            ? 'Say “pause”, “resume”, “louder”, “softer”, “change video”, or “close video”.'
             : 'Search playback needs a YouTube API key or backend for exact videos. AGA will use safe presets for music.'}
       </Text>
     </Animated.View>
@@ -251,6 +279,11 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.35,
     shadowRadius: 24,
     shadowOffset: { width: 0, height: 16 },
+  },
+  cardWide: {
+    left: '12%',
+    right: '12%',
+    bottom: 28,
   },
   header: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginBottom: spacing.sm },
   kicker: { color: colors.pink, fontSize: 10, fontWeight: '900', letterSpacing: 1.8, marginBottom: 2 },

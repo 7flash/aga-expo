@@ -39,15 +39,6 @@ import {
   getRemoteTools,
 } from '../remote/config';
 
-
-function env(name: string) {
-  return process.env?.[name] ?? '';
-}
-
-function hasYoutubeVerifier() {
-  return !!(env('EXPO_PUBLIC_YOUTUBE_API_KEY') || env('EXPO_PUBLIC_GOOGLE_API_KEY') || env('EXPO_PUBLIC_AGA_YOUTUBE_BACKEND_URL') || env('EXPO_PUBLIC_AGA_REMOTE_BACKEND_URL'));
-}
-
 export type CapabilityPatch = Record<string, unknown>;
 export type CapabilityHandler = (args: JsonObject) => Promise<string>;
 
@@ -111,19 +102,6 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
     return next;
   }
 
-  async function rememberPreferenceSignal(kind: string, value: string, note: string) {
-    const clean = `${kind}: ${value}`.slice(0, 180);
-    await logEvent('profile.preference', `${clean} — ${note}`);
-    // These are durable personalization facts, not temporary chat context.
-    // They survive fresh Realtime sessions and can be wiped by “forget everything”.
-    await addMemory(`Preference — ${note}`);
-    await updateUserProfileFromSignal({
-      communicationStyle: kind === 'communication' || kind === 'language' || kind === 'persona' || kind === 'voice' ? note : undefined,
-      technique: kind === 'listening' ? note : undefined,
-      note: `User preference saved: ${note}`,
-    });
-  }
-
   async function applyChoice(option: ChoiceOption): Promise<string> {
     const action = option.action as ChoiceAction;
 
@@ -142,7 +120,6 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
       ctx.requestReconnect(`voice:${action.voice}`);
       ctx.publish({ speechStatus: `voice set: ${action.label}` });
       await logEvent('settings.voice', action.voice);
-      await rememberPreferenceSignal('voice', action.voice, `User chose AGA voice ${action.label}; use it persistently until changed.`);
       return `Voice changed to ${action.label}. I will use it from my next reply.`;
     }
 
@@ -150,7 +127,6 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
       await setPrefs({ persona: action.persona, personalityPrompt: null } as Partial<Preferences>);
       ctx.updateRealtimeSession();
       await logEvent('settings.persona', action.persona);
-      await rememberPreferenceSignal('persona', action.persona, `User chose ${action.label} personality for AGA.`);
       return `Personality changed to ${action.label}.`;
     }
 
@@ -159,7 +135,6 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
       await setPrefs({ personalityPrompt: prompt } as Partial<Preferences>);
       ctx.updateRealtimeSession();
       await logEvent('settings.personality.regenerate', action.style);
-      await rememberPreferenceSignal('persona', action.style, `User asked AGA to regenerate personality style: ${action.style}.`);
       return 'I regenerated my personality blend for this device.';
     }
 
@@ -211,10 +186,8 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
       await setPrefs({ realtimeListenMode: nextMode, allowBargeIn } as Partial<Preferences>);
       ctx.publish({ listeningMode: listeningModeLabel(nextMode, allowBargeIn) });
       ctx.updateRealtimeSession();
-      const label = listeningModeLabel(nextMode, allowBargeIn);
-      await logEvent('settings.listening', label);
-      await rememberPreferenceSignal('listening', label, `User prefers AGA listening mode ${label}.`);
-      return `Listening mode set to ${label}.`;
+      await logEvent('settings.listening', listeningModeLabel(nextMode, allowBargeIn));
+      return `Listening mode set to ${listeningModeLabel(nextMode, allowBargeIn)}.`;
     }
 
     return 'Done.';
@@ -323,14 +296,14 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
       // Broad background music is a local ambient capability by default. YouTube
       // embed availability is not deterministic without a server/Data API check;
       // a broken iframe is worse than a simple local soundscape.
-      if (!forceYouTube && !explicitYouTube && !hasYoutubeVerifier()) {
+      if (!forceYouTube && !explicitYouTube) {
         const ambient = resolveLocalAmbient(q);
         if (ambient) {
           ctx.publish({ activeMedia: { ...ambient, state: 'playing' }, mediaCommand: null });
           ctx.setMode('media');
           await logEvent('ambient.play', `${ambient.kind}: ${q}`);
           await ctx.refresh();
-          return `Playing ${ambient.title}. This is generated locally because no verified YouTube lookup is configured.`;
+          return `Playing ${ambient.title}. This is generated locally, so it keeps working even when YouTube embeds fail.`;
         }
       }
 
@@ -343,27 +316,47 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
       return `Opening ${result.title}. If YouTube blocks this embed, ask for local ambient music instead.`;
     },
     media_control: async ({ command }) => {
-      const cmd = String(command ?? '') as 'pause' | 'resume' | 'stop';
-      if (cmd === 'stop') {
+      const cmd = String(command ?? '').toLowerCase();
+      if (cmd === 'stop' || cmd === 'close' || cmd === 'dismiss') {
         ctx.publish({ activeMedia: null, mediaCommand: 'stop' });
         ctx.setMode('listening');
         return 'Stopped playback.';
       }
-      const state = cmd === 'pause' ? 'paused' : 'playing';
-      ctx.publish({ mediaCommand: cmd, mediaState: state });
-      return cmd === 'pause' ? 'Paused.' : 'Resuming.';
+      if (cmd === 'pause') {
+        ctx.publish({ mediaCommand: 'pause', mediaState: 'paused' });
+        return 'Paused.';
+      }
+      if (cmd === 'resume' || cmd === 'continue' || cmd === 'play') {
+        ctx.publish({ mediaCommand: 'resume', mediaState: 'playing' });
+        return 'Resuming.';
+      }
+      if (cmd === 'volume_up' || cmd === 'louder') {
+        ctx.publish({ mediaCommand: 'volume_up' });
+        return 'Turning it up a little.';
+      }
+      if (cmd === 'volume_down' || cmd === 'softer' || cmd === 'quieter') {
+        ctx.publish({ mediaCommand: 'volume_down' });
+        return 'Turning it down a little.';
+      }
+      if (cmd === 'mute') {
+        ctx.publish({ mediaCommand: 'mute' });
+        return 'Muted.';
+      }
+      if (cmd === 'unmute') {
+        ctx.publish({ mediaCommand: 'unmute' });
+        return 'Unmuted.';
+      }
+      return 'Media control not understood.';
     },
     set_listening_mode: async ({ mode, allow_barge_in }) => {
       const nextMode = normalizeListenMode(mode);
       const currentBarge = !!(ctx.getPrefs() as any)?.allowBargeIn;
       const nextBargeIn = typeof allow_barge_in === 'boolean' ? allow_barge_in : currentBarge;
       await setPrefs({ realtimeListenMode: nextMode, allowBargeIn: nextBargeIn } as Partial<Preferences>);
-      const label = listeningModeLabel(nextMode, nextBargeIn);
-      ctx.publish({ listeningMode: label });
+      ctx.publish({ listeningMode: listeningModeLabel(nextMode, nextBargeIn) });
       ctx.updateRealtimeSession();
-      await logEvent('settings.listening', label);
-      await rememberPreferenceSignal('listening', label, `User prefers AGA listening mode ${label}.`);
-      return `Listening mode set to ${label}.`;
+      await logEvent('settings.listening', listeningModeLabel(nextMode, nextBargeIn));
+      return `Listening mode set to ${listeningModeLabel(nextMode, nextBargeIn)}.`;
     },
 
     start_guided_session: async ({ kind, goal, durationMinutes }) => {
@@ -440,19 +433,16 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
       return `Pulled server configuration revision ${getRemoteConfigRevision()}.`;
     },
     set_persona: async ({ persona }) => {
-      const value = String(persona ?? 'warm');
-      await setPrefs({ persona: value } as Partial<Preferences>);
+      await setPrefs({ persona: String(persona ?? 'warm') } as Partial<Preferences>);
       ctx.updateRealtimeSession();
-      await logEvent('prefs.persona', value);
-      await rememberPreferenceSignal('persona', value, `User chose AGA persona ${value}.`);
-      return `Persona set to ${value}.`;
+      await logEvent('prefs.persona', String(persona ?? ''));
+      return `Persona set to ${persona}.`;
     },
     set_translate: async ({ target }) => {
       const value = target == null ? null : String(target);
       await setPrefs({ translateTarget: value } as Partial<Preferences>);
       ctx.updateRealtimeSession();
       ctx.setMode(value ? 'translating' : 'listening');
-      await rememberPreferenceSignal('language', value || 'translation off', value ? `User enabled translation to ${value}.` : 'User turned translation off.');
       return value ? `Translating to ${value}.` : 'Translation off.';
     },
     set_ui_language: async ({ locale, label }) => {
@@ -466,7 +456,6 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
       ctx.publish({ sessionLabel: null, activeChoiceMenu: null, speechStatus: `language set: ${cleanLabel}` });
       ctx.updateRealtimeSession();
       await logEvent('settings.language', `${cleanLabel} ${cleanLocale}`);
-      await rememberPreferenceSignal('language', cleanLocale, `User chose ${cleanLabel} as AGA's persistent UI/speaking preference.`);
       return `Okay. I will answer in ${cleanLabel} unless you speak another language or ask for translation.`;
     },
     show_settings_menu: async ({ category }) => {
