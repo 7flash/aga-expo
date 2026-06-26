@@ -19,7 +19,10 @@ public class AgaNativeAudioModule: Module {
         "mode": "AVAudioSessionModeVoiceChat",
         "category": "AVAudioSessionCategoryPlayAndRecord",
         "sampleRate": session.sampleRate,
-        "ioBufferDuration": session.ioBufferDuration
+        "ioBufferDuration": session.ioBufferDuration,
+        "inputAvailable": session.isInputAvailable,
+        "currentRoute": routeSummary(session),
+        "aecPolicy": "playAndRecord + voiceChat enables platform voice-processing AEC when supported"
       ]
     }
 
@@ -27,7 +30,7 @@ public class AgaNativeAudioModule: Module {
       let session = AVAudioSession.sharedInstance()
       try session.setCategory(.playback, mode: .default, options: [.duckOthers])
       try session.setActive(false, options: [.notifyOthersOnDeactivation])
-      return ["ok": true, "platform": "ios", "mode": "default"]
+      return ["ok": true, "platform": "ios", "mode": "default", "currentRoute": routeSummary(session)]
     }
 
     AsyncFunction("startWakeForegroundService") { (_: [String: Any]?) -> [String: Any] in
@@ -35,8 +38,15 @@ public class AgaNativeAudioModule: Module {
       // and an active AVAudioSession. There is no Android-style foreground service.
       let session = AVAudioSession.sharedInstance()
       try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
+      try session.setPreferredSampleRate(16000)
+      try session.setPreferredIOBufferDuration(0.02)
       try session.setActive(true, options: [])
-      return ["ok": true, "platform": "ios", "foreground": true, "backgroundMode": "audio"]
+      return ["ok": true, "platform": "ios", "foreground": true, "backgroundMode": "audio", "currentRoute": routeSummary(session)]
+    }
+
+    AsyncFunction("refreshWakeForegroundService") { (_: [String: Any]?) -> [String: Any] in
+      let session = AVAudioSession.sharedInstance()
+      return ["ok": true, "platform": "ios", "foreground": session.isOtherAudioPlaying == false, "backgroundMode": "audio", "currentRoute": routeSummary(session)]
     }
 
     AsyncFunction("stopWakeForegroundService") { () -> [String: Any] in
@@ -44,15 +54,26 @@ public class AgaNativeAudioModule: Module {
     }
 
     Function("getCapabilities") { () -> [String: Any] in
+      let session = AVAudioSession.sharedInstance()
       return [
         "ok": true,
         "platform": "ios",
         "voiceChatMode": true,
-        "category": "playAndRecord",
-        "mode": "voiceChat",
+        "category": String(describing: session.category),
+        "mode": String(describing: session.mode),
         "backgroundAudio": true,
-        "coreMlRecommended": true
+        "coreMlRecommended": true,
+        "sampleRate": session.sampleRate,
+        "ioBufferDuration": session.ioBufferDuration,
+        "inputAvailable": session.isInputAvailable,
+        "currentRoute": routeSummary(session)
       ]
     }
   }
+}
+
+private func routeSummary(_ session: AVAudioSession) -> String {
+  let inputs = session.currentRoute.inputs.map { $0.portType.rawValue }.joined(separator: ",")
+  let outputs = session.currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ",")
+  return "in=[\(inputs)] out=[\(outputs)]"
 }

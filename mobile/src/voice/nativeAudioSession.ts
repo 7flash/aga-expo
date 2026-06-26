@@ -1,4 +1,4 @@
-import { Platform, NativeModules } from 'react-native';
+import { AppState, Platform, NativeModules } from 'react-native';
 
 export type AgaAudioModeStatus = {
   ok: boolean;
@@ -7,6 +7,12 @@ export type AgaAudioModeStatus = {
   foreground?: boolean;
   message?: string;
   nativeAvailable?: boolean;
+  aecAvailable?: boolean;
+  noiseSuppressorAvailable?: boolean;
+  autoGainControlAvailable?: boolean;
+  recordAudioGranted?: boolean;
+  postNotificationsGranted?: boolean;
+  currentRoute?: string;
   [key: string]: unknown;
 };
 
@@ -35,12 +41,17 @@ async function callNative(name: string, args?: unknown): Promise<AgaAudioModeSta
   return { ok: true, nativeAvailable: true, ...(value || {}) };
 }
 
+function isVoiceMode(status: AgaAudioModeStatus | null | undefined) {
+  const mode = String(status?.mode || status?.audioModeName || '').toLowerCase();
+  return mode.includes('voicechat') || mode.includes('voice_chat') || mode.includes('communication') || mode.includes('browser-echo');
+}
+
 export async function enterVoiceCommunicationMode(options: { speaker?: boolean; reason?: string } = {}): Promise<AgaAudioModeStatus> {
   const native = await callNative('enterVoiceChatMode', options);
   if (native) return native;
 
   // Browser and managed/dev fallback. This does not guarantee hardware AEC, but
-  // keeps the JS runtime safe until the native module is available.
+  // it makes browser previews use WebRTC echo-cancellation constraints.
   if (Platform.OS === 'web') {
     return { ok: true, platform: 'web', mode: 'browser-echo-cancellation-constraints', nativeAvailable: false };
   }
@@ -81,6 +92,13 @@ export async function startWakeForegroundService(options: { title?: string; text
   return { ok: Platform.OS !== 'android', platform: Platform.OS, foreground: false, nativeAvailable: false, message: Platform.OS === 'android' ? 'AgaNativeAudio foreground service unavailable; prebuild/rebuild native module.' : 'No foreground service required on this platform.' };
 }
 
+export async function refreshWakeForegroundService(options: { title?: string; text?: string } = {}): Promise<AgaAudioModeStatus> {
+  const native = await callNative('refreshWakeForegroundService', options);
+  if (native) return native;
+  if (Platform.OS === 'android') return startWakeForegroundService(options);
+  return { ok: true, platform: Platform.OS, foreground: false, nativeAvailable: false };
+}
+
 export async function stopWakeForegroundService(): Promise<AgaAudioModeStatus> {
   const native = await callNative('stopWakeForegroundService');
   if (native) return native;
@@ -93,4 +111,16 @@ export function getNativeAudioCapabilities(): AgaAudioModeStatus {
     try { return { ok: true, nativeAvailable: true, ...mod.getCapabilities() }; } catch { /* ignore */ }
   }
   return { ok: false, platform: Platform.OS, nativeAvailable: false, message: 'AgaNativeAudio native module unavailable.' };
+}
+
+export function assertTier3EchoSafety(status: AgaAudioModeStatus, options: { requireNative?: boolean } = {}) {
+  const requireNative = options.requireNative ?? (Platform.OS !== 'web' && process.env?.EXPO_PUBLIC_AGA_REQUIRE_NATIVE_AEC === '1');
+  if (!status.ok) throw new Error(status.message || 'Voice communication audio mode failed.');
+  if (requireNative && !status.nativeAvailable) throw new Error('Native AEC/audio session module is required for Tier 3 live duplex mode. Rebuild the APK/IPA with modules/aga-native-audio.');
+  if (Platform.OS !== 'web' && !isVoiceMode(status)) throw new Error(`Unsafe live audio mode: ${status.mode || 'unknown'}. Tier 3 requires VoiceChat/MODE_IN_COMMUNICATION.`);
+  return true;
+}
+
+export function appIsForeground() {
+  return AppState.currentState === 'active';
 }

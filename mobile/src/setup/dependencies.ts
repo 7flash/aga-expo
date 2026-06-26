@@ -33,6 +33,7 @@ export const BUILD_COMMANDS = [
   'npm install sherpa-onnx-wasm --save-dev',
   'npx expo start --clear',
   'node scripts/aga-tier3-aec-check.js',
+  'node scripts/aga-appliance-runtime-safety-check.js',
   'npx expo prebuild',
   'npx expo run:android',
 ];
@@ -41,6 +42,7 @@ export const RELEASE_COMMANDS = [
   'npm run aga:sherpa-routing-check --if-present',
   'npm run aga:appliance-check --if-present',
   'npm run aga:voice-check --if-present',
+  'node scripts/aga-appliance-runtime-safety-check.js',
   'npm run lint --if-present',
   'npm run typecheck --if-present',
   'npx expo-doctor',

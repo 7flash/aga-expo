@@ -491,6 +491,13 @@ export class WakeRealtimeController {
       await startNewConversationSession('wake_activation', { clearTranscript: true, endActiveSession: false }).catch(() => undefined);
     }
     const aec = await enterTier3DuplexAudio(`live:${selectedEngine()}`).catch((error) => ({ ok: false, message: error instanceof Error ? error.message : String(error) }));
+    if (!(aec as any).ok) {
+      const message = String((aec as any).message || 'Tier 3 audio safety check failed.');
+      this.publish({ mode: 'recovering', speechStatus: 'live audio blocked by echo-safety guard', error: message, voiceCapability: { ...(this.snapshot as any).voiceCapability, tier3Audio: aec, aec: tier3AudioDiagnostics() } } as any);
+      await speakShortReply('Live conversation is blocked until echo cancellation is ready. I can still answer short requests.', 'warm').catch(() => undefined);
+      await this.startWakeScout('tier3_audio_blocked').catch(() => undefined);
+      return;
+    }
     this.publish({ mode: 'thinking', speechStatus: `${selectedEngine()} live session starting`, error: null, heardText: initialText, voiceCapability: { ...(this.snapshot as any).voiceCapability, tier3Audio: aec, aec: tier3AudioDiagnostics() } } as any);
     const session = await this.createSelectedVoiceSession();
     this.realtime = session;
