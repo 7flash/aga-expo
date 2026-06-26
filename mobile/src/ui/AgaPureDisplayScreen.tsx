@@ -54,7 +54,9 @@ function recentPlates(messages: any[]) {
 function providerLabel(brain: any) {
   const provider = oneLine(brain.wakeProvider || brain.voiceCapability?.wakeProvider || brain.voiceCapability?.wakeDiagnostics?.provider);
   if (!provider) return 'wake';
-  if (provider === 'web-speech-dev') return 'web mic';
+  if (provider === 'web-speech-dev') return 'deprecated';
+  if (provider === 'dev-keyword-injector') return 'dev-keyword';
+  if (provider === 'porcupine-web') return 'porcupine-web';
   if (provider === 'porcupine') return 'porcupine';
   return provider.length > 14 ? `${provider.slice(0, 12)}…` : provider;
 }
@@ -62,9 +64,9 @@ function providerLabel(brain: any) {
 /**
  * Tactile Neural Relic kiosk surface.
  *
- * This is still display-only; it now exposes the practical debugging state the
- * appliance needs: wake provider, captured words, and whether the post-wake live
- * ear is opening. No touch handlers, no text inputs, no flat app chrome.
+ * This is display-only. Porcupine shows keyword detections only; full words are
+ * shown only after the post-wake command layer or live session returns text.
+ * No touch handlers, no text inputs, no flat app chrome.
  */
 export const AgaPureDisplayScreen = memo(function AgaPureDisplayScreen() {
   const brain = useAgaBrain() as any;
@@ -133,7 +135,7 @@ export const AgaPureDisplayScreen = memo(function AgaPureDisplayScreen() {
       </View>
 
       {heardText || error ? (
-        <EmbossedPanel title={error ? 'fault plate' : 'captured phrase'} mode={error ? 'warning' : mode as any} active wear={wear} style={styles.livePhrasePanel}>
+        <EmbossedPanel title={error ? 'fault plate' : (heardText.startsWith('keyword detected') ? 'keyword plate' : heardText.startsWith('selected:') ? 'selection plate' : 'command plate')} mode={error ? 'warning' : mode as any} active wear={wear} style={styles.livePhrasePanel}>
           <MessagePlate role={error ? 'fault' : 'heard'} text={error || heardText} mode={error ? 'warning' : mode as any} active />
         </EmbossedPanel>
       ) : null}
@@ -161,8 +163,8 @@ export const AgaPureDisplayScreen = memo(function AgaPureDisplayScreen() {
           <View style={styles.wakeRow}>
             <TactileButton
               index={wakeProvider === 'web mic' ? 'WEB' : 'AGA'}
-              label={heardText ? 'phrase locked' : 'wake word'}
-              sublabel={heardText || (wakeProvider === 'web mic' ? 'Web preview: allow microphone, then say “AGA stop pause”.' : 'Android: Porcupine listens for AGA / stop / pause.')}
+              label={heardText?.startsWith('keyword detected') ? 'keyword locked' : heardText ? 'command locked' : 'wake word'}
+              sublabel={heardText || (wakeProvider === 'porcupine-web' ? 'Web Porcupine/WASM listens for AGA / stop / pause.' : wakeProvider === 'dev-keyword-injector' ? 'Dev preview: call __AGA_WAKE(), then __AGA_SAY("two").' : 'Porcupine listens for AGA / stop / pause only.')}
               active={mode === 'listening' || rawMode === 'awake' || !!heardText}
               pressed={!!heardText && mode === 'thinking'}
               mode="listening"

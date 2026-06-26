@@ -1,13 +1,13 @@
 import { Platform } from 'react-native';
-import { NativeSpeechLoop } from './nativeSpeech';
 import { PorcupineWakeEngine, isPorcupineWakeAvailable, type PorcupineDetection } from './porcupineWakeEngine';
-import { BrowserDevWakeEngine } from './browserDevWakeEngine';
-import { detectWake, normalizeSpeech } from '../aga/text';
+import { PorcupineWebWakeEngine } from './porcupineWebWakeEngine';
+import { DevKeywordInjectorWakeEngine } from './devKeywordInjectorWakeEngine';
+
+export type WakeKeywordSource = 'porcupine' | 'porcupine_web' | 'dev_keyword';
 
 export type WakeEngineEvent =
-  | { type: 'wake'; label: 'aga' | string; text?: string; source: 'porcupine' | 'speech' | 'web_speech' }
-  | { type: 'control'; command: 'stop' | 'pause' | 'resume'; source: 'porcupine' | 'speech' | 'web_speech' }
-  | { type: 'transcript'; text: string; final: boolean; source: 'speech' | 'web_speech' }
+  | { type: 'wake'; label: 'aga' | string; source: WakeKeywordSource }
+  | { type: 'control'; command: 'stop' | 'pause' | 'resume'; source: WakeKeywordSource }
   | { type: 'status'; status: string }
   | { type: 'error'; message: string };
 
@@ -29,70 +29,70 @@ function wakeEngineName() {
   return String(env('EXPO_PUBLIC_AGA_WAKE_ENGINE') || 'porcupine').toLowerCase();
 }
 
-function labelToEvent(event: PorcupineDetection): WakeEngineEvent {
+function webWakeEngineName() {
+  return String(env('EXPO_PUBLIC_AGA_WEB_WAKE_ENGINE') || '').toLowerCase();
+}
+
+function labelToEvent(event: PorcupineDetection, source: WakeKeywordSource): WakeEngineEvent {
   const label = String(event.label || '').toLowerCase();
-  if (event.index === 1 || label === 'stop') return { type: 'control', command: 'stop', source: 'porcupine' };
-  if (event.index === 2 || label === 'pause') return { type: 'control', command: 'pause', source: 'porcupine' };
-  return { type: 'wake', label: label || 'aga', source: 'porcupine' };
+  if (event.index === 1 || label === 'stop') return { type: 'control', command: 'stop', source };
+  if (event.index === 2 || label === 'pause') return { type: 'control', command: 'pause', source };
+  return { type: 'wake', label: label || 'aga', source };
 }
 
-function webPreviewAllowed() {
-  const raw = String(env('EXPO_PUBLIC_AGA_ALLOW_WEB_SPEECH_PREVIEW') || '1').toLowerCase();
-  return raw !== '0' && raw !== 'false' && raw !== 'no';
-}
-
-function createBrowserDevWake(callbacks: WakeEngineCallbacks, wakePhrase: string): WakeEngine {
-  return new BrowserDevWakeEngine({
-    onEvent: (event) => {
-      if (event.type === 'transcript') callbacks.onEvent({ ...event, source: 'web_speech' });
-      else if (event.type === 'control') callbacks.onEvent({ type: 'control', command: event.command, source: 'web_speech' });
-      else callbacks.onEvent({ type: 'wake', label: 'aga', text: event.text, source: 'web_speech' });
-    },
+function createDevEngine(callbacks: WakeEngineCallbacks, reason: string): WakeEngine {
+  return new DevKeywordInjectorWakeEngine({
+    onWake: (label) => callbacks.onEvent({ type: 'wake', label, source: 'dev_keyword' }),
+    onControl: (command) => callbacks.onEvent({ type: 'control', command, source: 'dev_keyword' }),
     onStatus: (status) => callbacks.onEvent({ type: 'status', status }),
     onError: (message) => callbacks.onEvent({ type: 'error', message }),
-  }, wakePhrase);
+  }, reason);
 }
 
-export function createWakeEngine(callbacks: WakeEngineCallbacks, wakePhrase = env('EXPO_PUBLIC_AGA_WAKE_WORD') || 'aga'): WakeEngine {
+/**
+ * Wake engine factory.
+ *
+ * Important contract:
+ * - Android/iOS appliance hot mic is Porcupine keyword spotting only.
+ * - Browser preview does not use SpeechRecognition by default.
+ * - Browser preview uses Porcupine Web/WASM when configured, or an explicit dev
+ *   keyword injector when EXPO_PUBLIC_AGA_WEB_WAKE_ENGINE=dev.
+ * - Full utterances, menu choices, numbers, and language names are handled only
+ *   by the post-wake command layer or live Gemini/OpenAI session.
+ */
+export function createWakeEngine(callbacks: WakeEngineCallbacks): WakeEngine {
   const requested = wakeEngineName();
+  const requestedWeb = webWakeEngineName();
 
-  // Web preview cannot load the native Porcupine manager. Use browser speech only
-  // for development visibility. Android/iOS appliance builds still use Porcupine.
-  if ((requested === 'web_speech' || requested === 'browser') || (Platform.OS === 'web' && webPreviewAllowed() && (requested === 'porcupine' || requested === 'auto'))) {
-    return createBrowserDevWake(callbacks, wakePhrase);
+  if (requested === 'dev' || requested === 'keyword_dev' || requestedWeb === 'dev') {
+    return createDevEngine(callbacks, 'explicit dev keyword injector');
+  }
+
+  if (requested === 'speech' || requested === 'web_speech' || requestedWeb === 'speech' || requestedWeb === 'web_speech') {
+    return createDevEngine(callbacks, 'speech hot-mic disabled; use dev keyword injector or Porcupine Web');
+  }
+
+  if (Platform.OS === 'web') {
+    if (requestedWeb === 'porcupine' || requestedWeb === 'porcupine_web' || requested === 'porcupine' || requested === 'auto') {
+      return new PorcupineWebWakeEngine({
+        onDetected: (detected) => callbacks.onEvent(labelToEvent(detected, 'porcupine_web')),
+        onStatus: (status) => callbacks.onEvent({ type: 'status', status }),
+        onError: (message) => callbacks.onEvent({ type: 'error', message }),
+      });
+    }
+    return createDevEngine(callbacks, 'web wake engine not configured');
   }
 
   if (requested === 'porcupine' || requested === 'auto') {
-    if (requested === 'auto' && !isPorcupineWakeAvailable() && Platform.OS === 'web' && webPreviewAllowed()) {
-      return createBrowserDevWake(callbacks, wakePhrase);
+    if (requested === 'auto' && !isPorcupineWakeAvailable()) {
+      return createDevEngine(callbacks, 'Porcupine native unavailable in auto mode');
     }
     return new PorcupineWakeEngine({
-      onDetected: (detected) => callbacks.onEvent(labelToEvent(detected)),
+      onDetected: (detected) => callbacks.onEvent(labelToEvent(detected, 'porcupine')),
       onStatus: (status) => callbacks.onEvent({ type: 'status', status }),
       onError: (message) => callbacks.onEvent({ type: 'error', message }),
     });
   }
 
-  // Last-resort dev fallback. Android appliance builds should not use this path.
-  const loop = new NativeSpeechLoop({
-    onPartial: (text) => {
-      const clean = normalizeSpeech(text);
-      if (clean) callbacks.onEvent({ type: 'transcript', text: clean, final: false, source: 'speech' });
-      if (detectWake(clean, wakePhrase).woke) callbacks.onEvent({ type: 'wake', label: 'aga', text: clean, source: 'speech' });
-    },
-    onFinal: (text) => {
-      const clean = normalizeSpeech(text);
-      if (clean) callbacks.onEvent({ type: 'transcript', text: clean, final: true, source: 'speech' });
-      if (/\b(stop|quiet|cancel)\b/i.test(clean)) callbacks.onEvent({ type: 'control', command: 'stop', source: 'speech' });
-      else if (/\b(pause|hold)\b/i.test(clean)) callbacks.onEvent({ type: 'control', command: 'pause', source: 'speech' });
-      else if (detectWake(clean, wakePhrase).woke) callbacks.onEvent({ type: 'wake', label: 'aga', text: clean, source: 'speech' });
-    },
-    onStatus: (status) => callbacks.onEvent({ type: 'status', status: `speech fallback: ${status}` }),
-    onError: (message) => callbacks.onEvent({ type: 'error', message: `speech fallback: ${message}` }),
-  });
-  return {
-    start: () => loop.start({ watchdogEnabled: false } as any),
-    stop: () => loop.stop(),
-    getDiagnostics: () => ({ provider: 'speech-fallback', diagnostics: loop.getDiagnostics?.() }),
-  };
+  return createDevEngine(callbacks, `unknown wake engine "${requested}"`);
 }
