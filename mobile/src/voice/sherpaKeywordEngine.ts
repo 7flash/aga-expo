@@ -1,6 +1,5 @@
 import { Platform } from 'react-native';
 import {
-  flattenKeywordPhrases,
   matchKeywordText,
   type KeywordEngine,
   type KeywordEngineCallbacks,
@@ -9,6 +8,8 @@ import {
   type KeywordEvent,
   type KeywordPhrase,
 } from './keywordEngine';
+import { compileSherpaKeywords, keywordDebugTable, type CompiledSherpaKeywords } from './sherpaKeywordCompiler';
+import { resolveSherpaManifest, sherpaManifestSummary, shouldAllowDevKeywordFallback, validateSherpaManifest } from './sherpaModelManifest';
 
 function env(name: string) {
   return process.env?.[name] ?? '';
@@ -43,13 +44,8 @@ function toEvent(match: { keyword: KeywordPhrase; phrase: string; confidence?: n
   };
 }
 
-function buildKeywordText(keywords: KeywordPhrase[]) {
-  // sherpa-onnx KWS accepts keyword/token lists depending on model packaging.
-  // Keep a plain phrase representation here; native/WASM adapters can tokenize
-  // internally when their concrete wrapper requires it.
-  return flattenKeywordPhrases(keywords)
-    .map(({ keyword, phrase }) => `${phrase} /${keyword.boost ?? 1.0}/ #${keyword.threshold ?? 0.5}`)
-    .join('\n');
+function targetFromProvider(provider: KeywordEngineProvider) {
+  return provider === 'sherpa_wasm' ? 'wasm' : 'native';
 }
 
 export class SherpaKeywordEngine implements KeywordEngine {
@@ -61,6 +57,8 @@ export class SherpaKeywordEngine implements KeywordEngine {
   private detections = 0;
   private lastError: string | null = null;
   private noMatchTimer: ReturnType<typeof setTimeout> | null = null;
+  private compiled: CompiledSherpaKeywords | null = null;
+  private manifest: ReturnType<typeof resolveSherpaManifest> | null = null;
 
   constructor(callbacks: KeywordEngineCallbacks, provider: KeywordEngineProvider = providerForPlatform()) {
     this.callbacks = callbacks;
@@ -72,11 +70,10 @@ export class SherpaKeywordEngine implements KeywordEngine {
       provider: this.provider,
       running: this.running,
       mode: this.config?.mode,
-      keywordCount: this.config?.keywords.length || 0,
-      phraseCount: this.config ? flattenKeywordPhrases(this.config.keywords).length : 0,
       detections: this.detections,
       lastError: this.lastError,
-      modelDir: env('EXPO_PUBLIC_AGA_SHERPA_MODEL_DIR') || env('EXPO_PUBLIC_AGA_SHERPA_WASM_MODEL_URL') || '(not configured)',
+      keywords: this.compiled ? keywordDebugTable(this.compiled) : null,
+      sherpa: this.manifest ? sherpaManifestSummary(this.manifest) : null,
     };
   }
 
@@ -85,14 +82,28 @@ export class SherpaKeywordEngine implements KeywordEngine {
     this.config = config;
     this.running = true;
     this.detections = 0;
+    this.compiled = compileSherpaKeywords(config.keywords || []);
+    this.manifest = resolveSherpaManifest(config.mode === 'wake' ? 'wake' : 'menu', targetFromProvider(this.provider) as any);
+    const validation = validateSherpaManifest(this.manifest);
+    if (!validation.ok) {
+      this.lastError = validation.message;
+      throw new Error(validation.message);
+    }
 
     const timeoutMs = config.timeoutMs || Number(env('EXPO_PUBLIC_AGA_POST_WAKE_COMMAND_WINDOW_MS') || 8000);
     if (config.mode !== 'wake' && timeoutMs > 0) {
       this.noMatchTimer = setTimeout(() => this.callbacks.onNoMatch?.('timeout'), timeoutMs);
     }
 
-    if (this.provider === 'sherpa_wasm') return this.startWasm(config);
-    return this.startNative(config);
+    try {
+      if (this.provider === 'sherpa_wasm') await this.startWasm(config, this.compiled, this.manifest);
+      else await this.startNative(config, this.compiled, this.manifest);
+    } catch (error) {
+      this.running = false;
+      this.lastError = error instanceof Error ? error.message : String(error || 'sherpa start failed');
+      this.callbacks.onError?.(this.lastError);
+      throw error;
+    }
   }
 
   async stop(reason = 'stop') {
@@ -109,20 +120,23 @@ export class SherpaKeywordEngine implements KeywordEngine {
   async setKeywords(keywords: KeywordPhrase[]) {
     if (!this.config) return;
     this.config = { ...this.config, keywords };
+    this.compiled = compileSherpaKeywords(keywords);
     if (this.nativeInstance?.setKeywords) {
-      await this.nativeInstance.setKeywords(this.materializeKeywords(keywords));
+      await this.nativeInstance.setKeywords(this.materializeForAdapter(this.compiled));
     }
   }
 
-  private materializeKeywords(keywords: KeywordPhrase[]) {
+  private materializeForAdapter(compiled: CompiledSherpaKeywords) {
     return {
-      phrases: flattenKeywordPhrases(keywords).map(({ phrase }) => phrase),
-      entries: keywords,
-      keywordText: buildKeywordText(keywords),
+      phrases: compiled.phrases,
+      entries: compiled.entries,
+      keywordText: compiled.keywordText,
+      phraseToId: compiled.phraseToId,
+      digest: compiled.digest,
     };
   }
 
-  private acceptText(text: string) {
+  private acceptText(text: string, confidence?: number) {
     if (!this.running || !this.config) return;
     const clean = String(text || '').trim();
     if (!clean) return;
@@ -131,73 +145,68 @@ export class SherpaKeywordEngine implements KeywordEngine {
       this.detections += 1;
       if (this.noMatchTimer) clearTimeout(this.noMatchTimer);
       this.noMatchTimer = null;
-      this.callbacks.onKeyword(toEvent(match, this.provider, this.config));
+      this.callbacks.onKeyword(toEvent({ ...match, confidence: confidence ?? match.confidence }, this.provider, this.config));
       return;
     }
-    if (this.config.allowTextFallback) {
-      this.callbacks.onText?.(clean, this.provider);
-    }
+    if (this.config.allowTextFallback) this.callbacks.onText?.(clean, this.provider);
   }
 
-  private async startNative(config: KeywordEngineConfig) {
+  private async startNative(config: KeywordEngineConfig, compiled: CompiledSherpaKeywords, manifest: NonNullable<typeof this.manifest>) {
     const mod = await optionalImport('react-native-sherpa-onnx');
-    if (!mod) throw new Error('Missing react-native-sherpa-onnx. Install it for Android native Sherpa keyword/STT.');
-    const modelDir = env('EXPO_PUBLIC_AGA_SHERPA_MODEL_DIR');
-    const executionProvider = env('EXPO_PUBLIC_AGA_SHERPA_EXECUTION_PROVIDER') || 'xnnpack';
-    const materialized = this.materializeKeywords(config.keywords);
+    if (!mod) throw new Error('Missing react-native-sherpa-onnx. Android appliance builds need Sherpa native; do not fall back to Android SpeechRecognizer.');
+    const materialized = this.materializeForAdapter(compiled);
+    const commonConfig = {
+      ...manifest,
+      modelDir: manifest.modelDir,
+      executionProvider: manifest.provider,
+      keywords: materialized.phrases,
+      keywordText: materialized.keywordText,
+      mode: config.mode,
+    };
 
-    // The community package has changed APIs across builds. Support the common
-    // shapes without hard-coding one wrapper name.
     const factory = mod.createKeywordSpotter || mod.createKws || mod.createKeywordRecognizer || mod.KeywordSpotter?.create || mod.SherpaOnnxKws?.create;
     if (factory) {
       this.nativeInstance = await factory({
-        modelDir,
-        executionProvider,
-        keywords: materialized.phrases,
-        keywordText: materialized.keywordText,
-        mode: config.mode,
-        onKeyword: (event: any) => this.acceptText(String(event?.text || event?.keyword || event?.phrase || event?.label || '')),
+        ...commonConfig,
+        onKeyword: (event: any) => this.acceptText(String(event?.text || event?.keyword || event?.phrase || event?.label || ''), Number(event?.confidence)),
         onText: (text: string) => this.acceptText(text),
       });
       await this.nativeInstance?.start?.();
-      this.callbacks.onStatus?.(`sherpa native keyword engine listening (${config.mode})`);
+      this.callbacks.onStatus?.(`sherpa native ${config.mode} listening (${compiled.phrases.length} phrases, ${compiled.digest})`);
       return;
     }
 
     const manager = mod.SherpaOnnx || mod.default;
     if (manager?.startKeywordSpotting) {
       this.nativeInstance = manager;
-      await manager.startKeywordSpotting({
-        modelDir,
-        executionProvider,
-        keywords: materialized.phrases,
-        keywordText: materialized.keywordText,
-      }, (event: any) => this.acceptText(String(event?.keyword || event?.text || event || '')));
-      this.callbacks.onStatus?.(`sherpa native keyword engine listening (${config.mode})`);
+      await manager.startKeywordSpotting(commonConfig, (event: any) => this.acceptText(String(event?.keyword || event?.text || event || ''), Number(event?.confidence)));
+      this.callbacks.onStatus?.(`sherpa native ${config.mode} listening (${compiled.phrases.length} phrases, ${compiled.digest})`);
       return;
     }
 
-    throw new Error('react-native-sherpa-onnx is installed, but no supported keyword spotting API was found. Add a small adapter in sherpaKeywordEngine.ts for your exact module export.');
+    throw new Error('react-native-sherpa-onnx is installed, but no supported KWS adapter was found. Add a tiny adapter in sherpaKeywordEngine.ts for your exact module export.');
   }
 
-  private async startWasm(config: KeywordEngineConfig) {
+  private async startWasm(config: KeywordEngineConfig, compiled: CompiledSherpaKeywords, manifest: NonNullable<typeof this.manifest>) {
     const mod = await optionalImport('sherpa-onnx-wasm') || await optionalImport('sherpa-onnx-web');
-    if (!mod) {
-      throw new Error('Missing sherpa-onnx WASM package/assets. Browser preview needs Sherpa WASM or explicit dev injector.');
-    }
-    const modelUrl = env('EXPO_PUBLIC_AGA_SHERPA_WASM_MODEL_URL') || '/sherpa/kws';
-    const materialized = this.materializeKeywords(config.keywords);
+    if (!mod) throw new Error('Missing Sherpa WASM package. Browser preview should use sherpa-onnx-wasm/web assets, not browser SpeechRecognition.');
+    const materialized = this.materializeForAdapter(compiled);
+    const commonConfig = {
+      ...manifest,
+      modelUrl: manifest.modelUrl,
+      keywords: materialized.phrases,
+      keywordText: materialized.keywordText,
+      mode: config.mode,
+    };
     const factory = mod.createKeywordSpotter || mod.createKws || mod.KeywordSpotter?.create || mod.createRecognizer;
     if (!factory) throw new Error('Sherpa WASM package loaded, but no supported keyword spotter factory was found.');
     this.nativeInstance = await factory({
-      modelUrl,
-      keywords: materialized.phrases,
-      keywordText: materialized.keywordText,
-      onKeyword: (event: any) => this.acceptText(String(event?.text || event?.keyword || event?.phrase || event || '')),
+      ...commonConfig,
+      onKeyword: (event: any) => this.acceptText(String(event?.text || event?.keyword || event?.phrase || event || ''), Number(event?.confidence)),
       onText: (text: string) => this.acceptText(text),
     });
     await this.nativeInstance?.start?.();
-    this.callbacks.onStatus?.(`sherpa WASM keyword engine listening (${config.mode})`);
+    this.callbacks.onStatus?.(`sherpa WASM ${config.mode} listening (${compiled.phrases.length} phrases, ${compiled.digest})`);
   }
 }
 
@@ -211,10 +220,11 @@ export class DevSherpaKeywordInjector implements KeywordEngine {
   }
 
   getDiagnostics() {
-    return { provider: 'dev_keyword', running: this.running, mode: this.config?.mode, command: '__AGA_SAY("two") / __AGA_WAKE()' };
+    return { provider: 'dev_keyword', running: this.running, mode: this.config?.mode, enabledBy: 'EXPO_PUBLIC_AGA_ALLOW_DEV_KEYWORD_INJECTOR=1' };
   }
 
   async start(config: KeywordEngineConfig) {
+    if (!shouldAllowDevKeywordFallback()) throw new Error('Dev keyword injector is disabled. Set EXPO_PUBLIC_AGA_ALLOW_DEV_KEYWORD_INJECTOR=1 only for browser harness testing.');
     this.config = config;
     this.running = true;
     const g = root();
@@ -224,7 +234,7 @@ export class DevSherpaKeywordInjector implements KeywordEngine {
     g.__AGA_PAUSE = () => this.accept('pause');
     g.__AGA_CHOOSE = (choice: string | number) => this.accept(String(choice));
     g.__AGA_REPEAT = () => this.accept('repeat options');
-    this.callbacks.onStatus?.('dev Sherpa keyword injector ready');
+    this.callbacks.onStatus?.('dev keyword injector ready');
   }
 
   async stop() {

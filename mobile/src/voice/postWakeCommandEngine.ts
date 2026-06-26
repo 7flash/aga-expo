@@ -204,7 +204,7 @@ export function createPostWakeCommandEngine(callbacks: PostWakeCommandCallbacks)
   if (requested === 'dev') return new DevPostWakeCommandEngine(callbacks);
   if (requested === 'none' || requested === 'off') return null;
   if (requested === 'speech' || requested === 'web_speech' || requested === 'android_speech') {
-    return new DevPostWakeCommandEngine(callbacks);
+    throw new Error('SpeechRecognition engines are not allowed. Use Sherpa native/WASM for post-wake commands, or set EXPO_PUBLIC_AGA_ALLOW_DEV_KEYWORD_INJECTOR=1 with engine=dev for browser harness testing.');
   }
   if (requested === 'sherpa_wasm') return new SherpaPostWakeCommandEngine(callbacks, 'sherpa_wasm');
   if (requested === 'sherpa_native') return new SherpaPostWakeCommandEngine(callbacks, 'sherpa_native');

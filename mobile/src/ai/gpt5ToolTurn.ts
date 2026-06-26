@@ -33,11 +33,14 @@ function toolDefs() {
 }
 
 function systemText(opts: Gpt5ToolTurnOptions) {
-  const memoryBlock = opts.memories?.length ? `Relevant long-term context:\n${opts.memories.map((m) => `- ${m}`).join('\n')}` : 'No relevant long-term context was retrieved.';
+  const memoryBlock = opts.memories?.length
+    ? `Relevant long-term context:\n${opts.memories.map((m) => `- ${m}`).join('\n')}`
+    : 'No relevant long-term context was retrieved.';
   return [
     'You are AGA, the Artificial Guardian Angel running on a no-touch Android appliance.',
-    'Default path is short text reasoning plus tools plus expressive TTS. Do not start live audio unless the user explicitly asks for an interactive/live/practice session.',
-    'Keep replies short, warm, and voice-first. Never mention buttons, tapping, or typing.',
+    'Default path is short OpenAI STT, GPT-5 tool reasoning, then expressive ElevenLabs/OpenAI TTS.',
+    'Do not start a live audio session unless the user explicitly asks for practice, live, hands-free, or continuous conversation mode.',
+    'Keep replies short, warm, and voice-first. Never mention buttons, tapping, typing, or touch controls.',
     'Use tools for time, weather, reminders, memory, media, settings, guided sessions, and profile updates.',
     buildTurnContextBlock(opts.prefs),
     memoryBlock,
@@ -51,6 +54,7 @@ function extractText(data: any): string {
   if (Array.isArray(out)) {
     const chunks: string[] = [];
     for (const item of out) {
+      if (typeof item?.text === 'string') chunks.push(item.text);
       if (typeof item?.content === 'string') chunks.push(item.content);
       if (Array.isArray(item?.content)) {
         for (const c of item.content) {
@@ -59,7 +63,7 @@ function extractText(data: any): string {
         }
       }
     }
-    return chunks.join(' ').trim();
+    return chunks.join(' ').replace(/\s+/g, ' ').trim();
   }
   return '';
 }
@@ -99,22 +103,30 @@ async function callResponses(body: JsonObject) {
 }
 
 export async function runGpt5ToolTurn(opts: Gpt5ToolTurnOptions): Promise<string> {
+  const tools = toolDefs();
   const input: any[] = [
     { role: 'system', content: systemText(opts) },
     { role: 'user', content: opts.text },
   ];
-  let data = await callResponses({ model: model(), input, tools: toolDefs(), tool_choice: 'auto' });
+  let data = await callResponses({ model: model(), input, tools, tool_choice: 'auto' });
   let toolCalls = extractToolCalls(data);
   const max = opts.maxToolCalls ?? 4;
   let used = 0;
 
   while (toolCalls.length && used < max) {
+    const toolOutputs: any[] = [];
     for (const call of toolCalls) {
       used += 1;
       const output = await opts.runTool(call.name, call.arguments).catch((error: unknown) => error instanceof Error ? error.message : String(error || 'tool failed'));
-      input.push({ type: 'function_call_output', call_id: call.id, output });
+      toolOutputs.push({ type: 'function_call_output', call_id: call.id, output });
     }
-    data = await callResponses({ model: model(), input, tools: toolDefs(), tool_choice: 'auto' });
+
+    // Prefer response continuation when available; fall back to replaying the
+    // accumulated input plus function outputs for compatibility with wrappers.
+    const body: any = data?.id
+      ? { model: model(), previous_response_id: data.id, input: toolOutputs, tools, tool_choice: 'auto' }
+      : { model: model(), input: [...input, ...toolOutputs], tools, tool_choice: 'auto' };
+    data = await callResponses(body);
     toolCalls = extractToolCalls(data);
   }
 
