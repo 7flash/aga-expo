@@ -16,11 +16,10 @@ export function normalizeSpeech(text: string) {
     .replace(/[“”]/g, '"')
     .replace(/[‘’]/g, "'")
     .replace(/[.,!?;:]+/g, ' ')
-    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/[\u200b-\u200d\ufeff]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
 }
-
 
 function compactSpeech(text: string) {
   return normalizeSpeech(text).toLowerCase().replace(/[^a-z0-9а-яё]+/gi, '');
@@ -57,10 +56,6 @@ function fuzzyWakeFromShortUtterance(text: string): { woke: boolean; match: stri
   if (!normalized) return { woke: false, match: '', index: -1 };
   const compact = compactSpeech(normalized);
 
-  // Web/Android STT often turns “hey AGA” into things like “hey agar”,
-  // “hey a guy”, “hey egg a”, “hey ay gee ay”, “hey Google”, or just
-  // “hey ag…”. This fallback only applies to short wake-sized utterances so
-  // normal room speech does not randomly summon the assistant.
   const words = normalized.split(/\s+/).filter(Boolean);
   const shortWakeSized = words.length <= 5 && normalized.length <= 42;
   if (!shortWakeSized) return { woke: false, match: '', index: -1 };
@@ -85,10 +80,6 @@ function fuzzyWakeFromShortUtterance(text: string): { woke: boolean; match: stri
     return { woke: true, match: words.slice(0, startIndex + 3).join(' '), index: 0 };
   }
 
-  // Developer/web recovery: many browser STT engines aggressively autocorrect
-  // “hey AGA” to an unrelated assistant name. In web harness/dev this makes the
-  // app feel deaf. Accept any very short “hey/hi/ok …” wake-sized phrase unless
-  // explicitly disabled. APK production can set EXPO_PUBLIC_AGA_WAKE_ACCEPT_SHORT_HEY=0.
   if (envFlag('EXPO_PUBLIC_AGA_WAKE_ACCEPT_SHORT_HEY', true) && startIndex === 1 && words.length <= 3) {
     return { woke: true, match: words.join(' '), index: 0 };
   }
@@ -102,6 +93,10 @@ export function hasWord(text: string, alternatives: string) {
 
 function cleanAlias(value: string) {
   return normalizeSpeech(value).toLowerCase();
+}
+
+function aliasPattern(value: string) {
+  return escapeRegExp(value.trim()).replace(/\s+/g, '\\s+');
 }
 
 function strictWakeAliases(wakePhrase: string) {
@@ -131,28 +126,20 @@ function strictWakeAliases(wakePhrase: string) {
     .map((value) => value.trim())
     .filter(Boolean)
     .sort((a, b) => b.length - a.length)
-    .map((value) => escapeRegExp(value).replace(/\s+/g, '\\s+'));
+    .map(aliasPattern);
 }
 
-/**
- * Strict wake phrases may match anywhere in the transcript. This catches
- * Android/Web speech engines that prepend filler words before "hey AGA".
- */
 export function wakeRegex(wakePhrase: string) {
   const aliases = strictWakeAliases(wakePhrase);
   return new RegExp(`(?:^|\\b)(?:${aliases.join('|')})(?:\\b|$)[,\\s-]*`, 'i');
 }
 
-/**
- * Fuzzy wake is only accepted at the beginning so random room speech does not
- * wake AGA. These cover common STT mishearings of "AGA".
- */
 function fuzzyPrefixWakeRegex(wakePhrase: string) {
   const custom = cleanAlias(wakePhrase || 'aga');
   const customWithoutHey = custom.replace(/^(?:hey|hi|ok|okay)\s+/, '');
-  const fuzzyAliases = [
-    custom,
-    customWithoutHey,
+  const rawAliases = [
+    aliasPattern(custom),
+    aliasPattern(customWithoutHey),
     'hey\\s+aga',
     'hi\\s+aga',
     'ok(?:ay)?\\s+aga',
@@ -167,10 +154,8 @@ function fuzzyPrefixWakeRegex(wakePhrase: string) {
     'gaga',
     'angel',
     'anger',
-  ]
-    .filter(Boolean)
-    .map((value) => typeof value === 'string' && value.includes('\\') ? value : escapeRegExp(String(value)).replace(/\s+/g, '\\s+'));
-  return new RegExp(`^\\s*(?:(?:hey|ok|okay|hi|yo)\\s+)?(?:${fuzzyAliases.join('|')})(?:\\b|$)[,\\s-]*`, 'i');
+  ].filter(Boolean);
+  return new RegExp(`^\\s*(?:(?:hey|ok|okay|hi|yo)\\s+)?(?:${rawAliases.join('|')})(?:\\b|$)[,\\s-]*`, 'i');
 }
 
 export function detectWake(text: string, wakePhrase: string): WakeDetection {

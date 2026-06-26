@@ -40,6 +40,7 @@ const INITIAL_BACKOFF_MS = 450;
 const MAX_BACKOFF_MS = 4000;
 const WATCHDOG_INTERVAL_MS = 15_000;
 const STALE_ENGINE_MS = 90_000;
+const PARTIAL_THROTTLE_MS = 140;
 const WEB_LIFECYCLE_NOISE_RE = /^(no-speech|aborted)$/i;
 
 async function importVoice(): Promise<VoiceModule | null> {
@@ -120,6 +121,7 @@ export class NativeSpeechLoop {
   private watchdogTimer: ReturnType<typeof setInterval> | null = null;
   private watchdogEnabled = true;
   private lastFinalFingerprint = '';
+  private lastPartialEmitAt = 0;
   diagnostics: Diagnostics = {
     available: false,
     provider: 'none',
@@ -241,7 +243,13 @@ export class NativeSpeechLoop {
       const text = firstTranscript(event?.value);
       this.diagnostics.lastPartialAt = new Date().toISOString();
       this.diagnostics.lastError = null;
-      if (text) this.callbacks.onPartial?.(text);
+      if (text) {
+        const now = Date.now();
+        if (now - this.lastPartialEmitAt >= PARTIAL_THROTTLE_MS) {
+          this.lastPartialEmitAt = now;
+          this.callbacks.onPartial?.(text);
+        }
+      }
     };
     this.voice.onSpeechResults = (event: any) => {
       const text = firstTranscript(event?.value);

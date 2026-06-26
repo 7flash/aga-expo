@@ -3,7 +3,16 @@ import { stripWakePrefix } from './text';
 export type LocalControlIntent = { tool: string; args?: Record<string, unknown>; userVisible?: boolean } | null;
 
 function normalizeControlText(text: string) {
-  return String(text ?? '').trim().toLowerCase().replace(/[“”]/g, '"').replace(/[’]/g, "'");
+  return String(text ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[“”]/g, '"')
+    .replace(/[’]/g, "'")
+    .replace(/\s+/g, ' ');
+}
+
+function has(text: string, alternatives: string) {
+  return new RegExp(`\\b(?:${alternatives})\\b`, 'i').test(text);
 }
 
 function detectLanguageRequest(text: string): { locale: string; label: string } | null {
@@ -33,8 +42,7 @@ export function localControlIntent(text: string): LocalControlIntent {
   const language = detectLanguageRequest(clean);
   if (language) return { tool: 'set_ui_language', args: { locale: language.locale, label: language.label } };
 
-
-  if (/\b(gemini|cost|budget|usage|spent|spend|cheap\s+mode|daily\s+limit)\b/.test(clean) && /\b(status|how\s+much|usage|cost|budget|spent|left|remaining|limit)\b/.test(clean)) {
+  if (has(clean, 'gemini|cost|budget|usage|spent|spend|cheap mode|daily limit') && has(clean, 'status|how much|usage|cost|budget|spent|left|remaining|limit')) {
     return { tool: 'gemini_cost_status', args: {} };
   }
   if (/\b(change|switch|choose|set|open|show)\b.*\bvoice\b|\bvoice\s+(menu|settings|options)\b/.test(clean)) {
@@ -46,23 +54,23 @@ export function localControlIntent(text: string): LocalControlIntent {
   if (/\b(change|set|open|show)\b.*\b(listening|sensitivity|interruptions?)\b|\b(stop\s+interrupting|be\s+less\s+sensitive|listen\s+hands\s*free)\b/.test(clean)) {
     return { tool: 'show_settings_menu', args: { category: 'listening' } };
   }
-  if (/\b(choose|open|show|start|pick)\b.*\b(skill|skills|session|sessions)\b|\bskill\s+menu\b/.test(clean)) {
+  if (/\b(choose|open|show|start|pick)\b.*\b(skill|skills|session|sessions)\b|\bskills\s+menu\b/.test(clean)) {
     return { tool: 'show_settings_menu', args: { category: 'skills' } };
   }
   if (/\b(open|show)\b.*\b(menu|settings|options)\b|^menu$|^settings$|^options$/.test(clean)) {
     return { tool: 'show_settings_menu', args: { category: 'main' } };
   }
 
-  if (/\b(louder|volume up|turn it up|raise volume|more volume)\b/.test(clean)) {
+  if (has(clean, 'louder|volume up|turn it up|raise volume|more volume')) {
     return { tool: 'media_control', args: { command: 'volume_up' } };
   }
-  if (/\b(softer|quieter|volume down|turn it down|lower volume|less volume)\b/.test(clean)) {
+  if (has(clean, 'softer|quieter|volume down|turn it down|lower volume|less volume')) {
     return { tool: 'media_control', args: { command: 'volume_down' } };
   }
-  if (/\b(mute|silent)\b/.test(clean)) {
+  if (has(clean, 'mute|silent')) {
     return { tool: 'media_control', args: { command: 'mute' } };
   }
-  if (/\bunmute\b/.test(clean)) {
+  if (has(clean, 'unmute')) {
     return { tool: 'media_control', args: { command: 'unmute' } };
   }
   if (/\b(change|another|different|next|skip)\b.*\b(video|youtube|music|song|track)?\b/.test(clean)) {
@@ -72,19 +80,19 @@ export function localControlIntent(text: string): LocalControlIntent {
   if (/\b(close|stop|dismiss)\b.*\b(video|youtube|music|song|player|ambient)\b/.test(clean) || /^stop music$/.test(clean)) {
     return { tool: 'media_control', args: { command: 'stop' } };
   }
-  if (/\b(pause|hold)\b.*\b(video|youtube|music|song|player|ambient)?\b/.test(clean)) {
+  if (/\b(pause|hold)\b(?:.*\b(video|youtube|music|song|player|ambient)\b)?/.test(clean)) {
     return { tool: 'media_control', args: { command: 'pause' } };
   }
-  if (/\b(resume|continue)\b.*\b(video|youtube|music|song|player|ambient)?\b/.test(clean)) {
+  if (/\b(resume|continue)\b(?:.*\b(video|youtube|music|song|player|ambient)\b)?/.test(clean)) {
     return { tool: 'media_control', args: { command: 'resume' } };
   }
   if (/\b(play|put on|start|search)\b.*\b(music|youtube|song|ambient|lofi|lo-fi|calm|meditation music|relaxing|piano)\b|^music$|^calm music$/.test(clean)) {
-    return { tool: 'play_youtube', args: { query: clean || 'calm music', forceYouTube: /youtube|youtu\.be/.test(clean) } };
+    return { tool: 'play_youtube', args: { query: clean || 'calm music', forceYouTube: /youtube|youtu.be/.test(clean) } };
   }
 
-  if (/\b(body\s+scan)\b/.test(clean)) return { tool: 'start_guided_session', args: { kind: 'body_scan', goal: 'body scan' } };
+  if (/\bbody\s+scan\b/.test(clean)) return { tool: 'start_guided_session', args: { kind: 'body_scan', goal: 'body scan' } };
   if (/\b(hypnosis|self\s+hypnosis|hypnotic)\b/.test(clean)) return { tool: 'start_guided_session', args: { kind: 'self_hypnosis', goal: 'safe self-hypnosis' } };
-  if (/\b(resolve|process|help).*\b(conflict|argument|fight|tension)\b/.test(clean)) return { tool: 'start_guided_session', args: { kind: 'conflict_navigation', goal: clean } };
+  if (/\b(resolve|process|help)\b.*\b(conflict|argument|fight|tension)\b/.test(clean)) return { tool: 'start_guided_session', args: { kind: 'conflict_navigation', goal: clean } };
   if (/\b(meditation|meditate|breathing|breathwork|calm me|nervous system)\b/.test(clean)) return { tool: 'start_guided_session', args: { kind: 'breathing', goal: clean } };
 
   return null;

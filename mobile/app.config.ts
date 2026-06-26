@@ -1,5 +1,7 @@
 import type { ExpoConfig } from 'expo/config';
 
+const allowCleartextTraffic = process.env.EXPO_PUBLIC_AGA_ALLOW_CLEARTEXT === '1';
+
 const config: ExpoConfig = {
   name: 'AGA Voice Assistant',
   slug: 'aga-voice-assistant',
@@ -15,9 +17,10 @@ const config: ExpoConfig = {
       'MODIFY_AUDIO_SETTINGS',
       'WAKE_LOCK',
       'FOREGROUND_SERVICE',
+      'FOREGROUND_SERVICE_MICROPHONE',
       'POST_NOTIFICATIONS',
     ],
-    usesCleartextTraffic: true,
+    usesCleartextTraffic: allowCleartextTraffic,
   },
   ios: {
     supportsTablet: true,
@@ -32,6 +35,7 @@ const config: ExpoConfig = {
   extra: {
     assistantWebUrl: process.env.EXPO_PUBLIC_ASSISTANT_WEB_URL ?? 'http://localhost:3000',
     wakeWord: process.env.EXPO_PUBLIC_AGA_WAKE_WORD ?? 'aga',
+    displayMode: process.env.EXPO_PUBLIC_AGA_DISPLAY_MODE ?? 'hologram',
   },
 };
 

@@ -6,23 +6,59 @@ export type { AgaAction, AgaMode, AgaTurn };
 
 export type ParsedCommand = AgaTurn & { handledLocally: boolean };
 
+const NUMBER_WORDS: Record<string, number> = {
+  zero: 0,
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+  eleven: 11,
+  twelve: 12,
+  fifteen: 15,
+  twenty: 20,
+  thirty: 30,
+  satu: 1,
+  dua: 2,
+  tiga: 3,
+  empat: 4,
+  lima: 5,
+  enam: 6,
+  tujuh: 7,
+  delapan: 8,
+  sembilan: 9,
+  sepuluh: 10,
+};
+
 export function hasWakeWord(text: string, wakePhrase: string) {
   return detectWake(text, wakePhrase).woke;
 }
 
 function languageFromText(text: string) {
   const lower = normalizeSpeech(text).toLowerCase();
-  if (/(?:indonesian|bahasa|indo)/.test(lower)) return 'Indonesian';
-  if (/(?:russian|русск)/.test(lower)) return 'Russian';
-  if (/(?:spanish|español|espanol)/.test(lower)) return 'Spanish';
-  if (/(?:english)/.test(lower)) return 'English';
-  if (/(?:japanese|nihongo)/.test(lower)) return 'Japanese';
-  if (/(?:chinese|mandarin)/.test(lower)) return 'Chinese';
+  if (/\b(indonesian|bahasa|indo)\b/.test(lower)) return 'Indonesian';
+  if (/\b(russian|русск(?:ий|ая)?)\b/.test(lower)) return 'Russian';
+  if (/\b(spanish|español|espanol)\b/.test(lower)) return 'Spanish';
+  if (/\b(english)\b/.test(lower)) return 'English';
+  if (/\b(japanese|nihongo)\b/.test(lower)) return 'Japanese';
+  if (/\b(chinese|mandarin)\b/.test(lower)) return 'Chinese';
   return 'Indonesian';
 }
 
+function numberFromText(value: string | undefined) {
+  if (!value) return null;
+  const clean = value.trim().toLowerCase();
+  if (/^\d+$/.test(clean)) return Number(clean);
+  return NUMBER_WORDS[clean] ?? null;
+}
+
 function parseClockTime(raw: string) {
-  const match = normalizeSpeech(raw).match(/(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
+  const match = normalizeSpeech(raw).match(/\b(?:at\s*)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/i);
   if (!match) return null;
   let hour = Number(match[1]);
   const minute = Number(match[2] ?? 0);
@@ -38,10 +74,11 @@ function parseReminder(raw: string): { text: string; dueAt: string } | null {
   const cleaned = source.replace(/^remind\s+me\s+(?:to\s+)?/i, '').trim();
   if (!cleaned) return null;
 
-  const inMatch = cleaned.match(/^(.*?)\s+in\s+(\d+)\s*(second|seconds|minute|minutes|hour|hours|day|days)\b/i);
+  const inMatch = cleaned.match(/^(.*?)\s+in\s+(\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|satu|dua|tiga|empat|lima|enam|tujuh|delapan|sembilan|sepuluh)\s*(second|seconds|minute|minutes|hour|hours|day|days)\b/i);
   if (inMatch) {
     const text = inMatch[1].trim();
-    const amount = Number(inMatch[2]);
+    const amount = numberFromText(inMatch[2]);
+    if (amount == null) return null;
     const unit = inMatch[3].toLowerCase();
     const due = new Date();
     if (unit.startsWith('second')) due.setSeconds(due.getSeconds() + amount);
@@ -82,15 +119,13 @@ function friendlyDue(dueAt: string) {
   }).format(new Date(dueAt));
 }
 
-/** Extract a clean media search query from “play X on YouTube” and natural media commands. */
 function parseYouTube(text: string): string | null {
   const lower = text.toLowerCase();
   const explicit =
     lower.match(/(?:play|put\s+on|pull\s+up|show|watch|find|search)\s+(.+?)\s+(?:on\s+|in\s+)?youtube\b/i) ||
-    lower.match(/(?:youtube|the\s+video|a\s+video|video\s+of|play\s+video)\s+(?:for\s+|of\s+|about\s+)?(.+)/i);
+    lower.match(/(?:youtube|the\s+video|a\s+video|videos\s+of|play\s+video)\s+(?:for\s+|of\s+|about\s+)?(.+)/i);
   if (explicit?.[1]) return explicit[1].trim();
 
-  // Generic "play <something>" with no other handler becomes media.
   const generic = lower.match(/^(?:play|put\s+on|pull\s+up)\s+(.+)/i);
   if (generic?.[1]) return generic[1].replace(/\s+(?:please|for\s+me)$/i, '').trim();
   return null;
@@ -106,14 +141,13 @@ export function parseVoiceCommand(rawText: string, wakePhrase = 'hey aga'): Pars
     return { speech, intent: 'system', actions: [{ type: 'speak', text: speech }], handledLocally: true };
   }
 
-  // Media transport first so “stop the video” does not get swallowed as generic stop.
-  if (/(?:stop|close|end)\s+(?:the\s+)?(?:video|music|song|youtube)/.test(lower)) {
+  if (/\b(stop|close|end)\s+(the\s+)?(video|music|song|youtube|player|ambient)\b/.test(lower)) {
     return { speech: 'Stopping playback.', intent: 'media_control', actions: [{ type: 'media_stop' }], handledLocally: true };
   }
-  if (/^(?:pause|hold\s+(?:on|that))\b/.test(lower)) {
+  if (/^(?:pause|hold\s+(?:on|that))(?:\b|$)/.test(lower)) {
     return { speech: 'Paused.', intent: 'media_control', actions: [{ type: 'media_pause' }], handledLocally: true };
   }
-  if (/(?:resume|continue|keep\s+playing|play\s+again|unpause)/.test(lower)) {
+  if (/\b(resume|continue|keep\s+playing|play\s+again|unpause)\b/.test(lower)) {
     return { speech: 'Resuming.', intent: 'media_control', actions: [{ type: 'media_resume' }], handledLocally: true };
   }
 
@@ -130,18 +164,18 @@ export function parseVoiceCommand(rawText: string, wakePhrase = 'hey aga'): Pars
   if (/(?:^|\s)(?:stop|quiet|cancel|shush|be\s+quiet|hush)(?:\s|$)/.test(lower)) {
     return { speech: 'Stopping.', intent: 'system', actions: [{ type: 'stop_speaking' }], handledLocally: true };
   }
-  if (/(?:test\s+voice|voice\s+test|test\s+speech|say\s+something)/.test(lower)) {
+  if (/\b(test\s+voice|voice\s+test|test\s+speech|say\s+something)\b/.test(lower)) {
     return { speech: 'My voice is working.', intent: 'system', actions: [{ type: 'test_voice' }], handledLocally: true };
   }
-  if (/(?:status|setup\s+status|are\s+you\s+(?:there|working)|diagnostic\s+summary)/.test(lower)) {
+  if (/\b(status|setup\s+status|are\s+you\s+(?:there|working)|diagnostic\s+summary|repair\s+yourself)\b/.test(lower)) {
     return { speech: 'Checking status.', intent: 'system', actions: [{ type: 'status' }], handledLocally: true };
   }
-  if (/(?:help|what\s+can\s+i\s+(?:say|ask)|commands|what\s+can\s+you\s+do)/.test(lower)) {
-    const speech = 'I can give advice, play YouTube videos, set reminders, remember things, switch how I sound, translate phrases, and more. Just talk to me — no buttons needed.';
+  if (/\b(help|what\s+can\s+i\s+(?:say|ask)|commands|what\s+can\s+you\s+do)\b/.test(lower)) {
+    const speech = 'I can give advice, play music, set reminders, remember things, switch how I sound, translate phrases, guide meditation, and more. Just talk to me — no buttons needed.';
     return { speech, intent: 'system', actions: [{ type: 'speak', text: speech }], handledLocally: true };
   }
 
-  if (/(?:where\s+are\s+you|are\s+you\s+there|can\s+you\s+hear\s+me|do\s+you\s+hear\s+me|are\s+you\s+listening)/.test(lower)) {
+  if (/\b(where\s+are\s+you|are\s+you\s+there|can\s+you\s+hear\s+me|do\s+you\s+hear\s+me|are\s+you\s+listening)\b/.test(lower)) {
     const speech = 'I am here. I can hear you, and I am ready to help.';
     return { speech, intent: 'system', actions: [{ type: 'speak', text: speech }], handledLocally: true };
   }
@@ -160,17 +194,17 @@ export function parseVoiceCommand(rawText: string, wakePhrase = 'hey aga'): Pars
       handledLocally: true,
     };
   }
-  if (/(?:what\s+are\s+my\s+reminders|list\s+reminders|show\s+reminders|pending\s+reminders)/.test(lower)) {
+  if (/\b(what\s+are\s+my\s+reminders|list\s+reminders|show\s+reminders|pending\s+reminders)\b/.test(lower)) {
     return { speech: 'Checking reminders.', intent: 'reminder', actions: [{ type: 'list_reminders' }], handledLocally: true };
   }
-  if (/(?:clear|delete|remove)\s+(?:all\s+)?reminders/.test(lower)) {
+  if (/\b(clear|delete|remove)\s+(all\s+)?reminders\b/.test(lower)) {
     return { speech: 'Clearing reminders.', intent: 'reminder', actions: [{ type: 'clear_reminders' }], handledLocally: true };
   }
-  if (/(?:enable notifications|turn on notifications|notification permission)/.test(lower)) {
+  if (/\b(enable notifications|turn on notifications|notification permission|request notification permission)\b/.test(lower)) {
     return { speech: 'Checking notification permission.', intent: 'notifications', actions: [{ type: 'request_notifications' }], handledLocally: true };
   }
 
-  const remember = text.match(/(?:remember\s+that|remember\s+this|save\s+(?:a\s+)?memory)\s+(.+)/i);
+  const remember = text.match(/(?:remember\s+that|remember\s+this|save\s+(?:as\s+)?memory)\s+(.+)/i);
   if (remember?.[1]) {
     const memory = remember[1].trim();
     return {
@@ -187,7 +221,7 @@ export function parseVoiceCommand(rawText: string, wakePhrase = 'hey aga'): Pars
   }
 
   const persona = matchPersona(text);
-  if (/(?:change|switch|be|use|sound)/.test(lower) && persona) {
+  if (/\b(change|switch|be|use|sound)\b/.test(lower) && persona) {
     return {
       speech: `Switching to ${persona} mode.`,
       intent: 'persona',
@@ -207,17 +241,17 @@ export function parseVoiceCommand(rawText: string, wakePhrase = 'hey aga'): Pars
     };
   }
 
-  if (/(?:open\s+settings|show\s+settings)/.test(lower)) {
+  if (/\b(open\s+settings|show\s+settings|settings)\b/.test(lower)) {
     return { speech: 'Opening settings.', intent: 'settings', actions: [{ type: 'open_settings' }], handledLocally: true };
   }
   if (/(?:show|hide|toggle)\s+diagnostics|debug\s+mode/.test(lower)) {
     return { speech: 'Toggling diagnostics.', intent: 'system', actions: [{ type: 'show_diagnostics' }], handledLocally: true };
   }
-  if (/(?:reset|clear)\s+(?:the\s+)?conversation/.test(lower)) {
+  if (/\b(reset|clear)\s+(the\s+)?conversation\b/.test(lower)) {
     return { speech: 'Conversation cleared.', intent: 'system', actions: [{ type: 'reset_conversation' }, { type: 'speak', text: 'Conversation cleared.' }], handledLocally: true };
   }
 
-  if (/(?:stop\s+translating|turn\s+off\s+translation|stop\s+translate)/.test(lower)) {
+  if (/\b(stop\s+translating|turn\s+off\s+translation|stop\s+translate)\b/.test(lower)) {
     return { speech: 'Phrase translation is off.', intent: 'translation', actions: [{ type: 'translate_stop' }, { type: 'speak', text: 'Phrase translation is off.' }], handledLocally: true };
   }
   const translate = lower.match(/(?:translate|translation).*?(?:to|into)\s+([a-zа-яё\s]+)/i);
