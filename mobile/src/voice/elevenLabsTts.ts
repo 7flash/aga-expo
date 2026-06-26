@@ -1,7 +1,10 @@
 import { Platform } from 'react-native';
 import { measureAsync, measureMark } from '../observability/measure';
+import { fetchTtsGatewayAudio, getTtsGatewayDiagnostics, isTtsGatewayConfigured } from './ttsGateway';
+import { getCachedVoiceUri, pruneVoiceCache, voiceCacheUri, writeVoiceCacheBase64, type VoiceCacheKey } from './voiceCache';
 
 declare function require(name: string): any;
+declare const __DEV__: boolean;
 
 export type ElevenLabsEmotion = 'neutral' | 'warm' | 'calm' | 'guided' | 'hypnosis' | 'conflict' | 'urgent';
 
@@ -31,7 +34,14 @@ export type ElevenLabsDiagnostics = {
   lastLatencyMs: number | null;
   lastFileUri: string | null;
   nativeStreaming: boolean;
-  transport: 'websocket' | 'http-stream' | 'native';
+  transport: 'gateway' | 'direct-http' | 'native' | 'cache' | 'unavailable';
+  gateway: ReturnType<typeof getTtsGatewayDiagnostics>;
+};
+
+type AudioModule = {
+  Sound?: {
+    createAsync?: (source: { uri: string }, initialStatus?: Record<string, unknown>) => Promise<{ sound: any }>;
+  };
 };
 
 type NativeChunkPlayer = {
@@ -42,8 +52,7 @@ type NativeChunkPlayer = {
 
 let currentSound: any | null = null;
 let speaking = false;
-let cachedFileSystem: any | null | undefined;
-let cachedAudio: any | null | undefined;
+let cachedAudio: AudioModule | null | undefined;
 let cachedNativePlayer: NativeChunkPlayer | null | undefined;
 
 const diagnostics: ElevenLabsDiagnostics = {
@@ -59,14 +68,15 @@ const diagnostics: ElevenLabsDiagnostics = {
   lastLatencyMs: null,
   lastFileUri: null,
   nativeStreaming: false,
-  transport: 'http-stream',
+  transport: 'unavailable',
+  gateway: getTtsGatewayDiagnostics(),
 };
 
 function env(name: string) {
   return process.env?.[name] ?? '';
 }
 
-function apiKey() {
+function directApiKey() {
   return env('EXPO_PUBLIC_ELEVENLABS_API_KEY') || env('ELEVENLABS_API_KEY');
 }
 
@@ -82,8 +92,8 @@ function defaultOutputFormat() {
   return env('EXPO_PUBLIC_ELEVENLABS_OUTPUT_FORMAT') || 'mp3_44100_128';
 }
 
-function preferWebSocket() {
-  return String(env('EXPO_PUBLIC_ELEVENLABS_TRANSPORT') || 'websocket').toLowerCase() !== 'http';
+function allowDirectElevenLabs() {
+  return String(env('EXPO_PUBLIC_AGA_ALLOW_DIRECT_ELEVENLABS') || (__DEV__ ? '1' : '0')) !== '0';
 }
 
 function numberEnv(name: string, fallback: number) {
@@ -91,22 +101,11 @@ function numberEnv(name: string, fallback: number) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-async function importFileSystem() {
-  if (cachedFileSystem !== undefined) return cachedFileSystem;
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    cachedFileSystem = require('expo-file-system');
-  } catch {
-    cachedFileSystem = null;
-  }
-  return cachedFileSystem;
-}
-
 async function importAudio() {
   if (cachedAudio !== undefined) return cachedAudio;
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    cachedAudio = require('expo-av')?.Audio;
+    cachedAudio = require('expo-av')?.Audio ?? null;
   } catch {
     cachedAudio = null;
   }
@@ -116,9 +115,7 @@ async function importAudio() {
 function nativeChunkPlayer(): NativeChunkPlayer | null {
   if (cachedNativePlayer !== undefined) return cachedNativePlayer;
   try {
-    // Optional future native module for true PCM/MP3 chunk playback. If it is
-    // absent, AGA still uses the streaming HTTP endpoint and plays the finished
-    // file through expo-av.
+    // Optional native player. Gateway/direct HTTP still works without it.
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const mod = require('aga-native-audio-stream');
     cachedNativePlayer = mod?.default ?? mod ?? null;
@@ -129,28 +126,24 @@ function nativeChunkPlayer(): NativeChunkPlayer | null {
   return cachedNativePlayer;
 }
 
-export function getElevenLabsDiagnostics() {
-  return { ...diagnostics, speaking };
-}
-
-export function isElevenLabsConfigured() {
-  return Boolean(apiKey() && defaultVoiceId());
-}
-
-export async function isElevenLabsAvailable() {
-  if (!isElevenLabsConfigured()) return false;
-  if (Platform.OS === 'web') return true;
-  const fs = await importFileSystem();
-  const audio = await importAudio();
-  return Boolean(fs?.writeAsStringAsync && audio?.Sound?.createAsync);
+function toBase64(bytes: Uint8Array) {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let out = '';
+  for (let i = 0; i < bytes.length; i += 3) {
+    const a = bytes[i];
+    const b = bytes[i + 1];
+    const c = bytes[i + 2];
+    out += chars[a >> 2];
+    out += chars[((a & 3) << 4) | ((b ?? 0) >> 4)];
+    out += i + 1 < bytes.length ? chars[((b & 15) << 2) | ((c ?? 0) >> 6)] : '=';
+    out += i + 2 < bytes.length ? chars[(c ?? 0) & 63] : '=';
+  }
+  return out;
 }
 
 function emotionText(text: string, emotion: ElevenLabsEmotion) {
   const clean = text.replace(/\s+/g, ' ').trim();
   if (!clean) return clean;
-
-  // Keep tags subtle. They help expressive models, while older models simply
-  // read around them tolerably when the provider supports contextual emotion.
   if (emotion === 'hypnosis') return `[softly, slowly, reassuring] ${clean}`;
   if (emotion === 'guided') return `[calm, spacious, gentle] ${clean}`;
   if (emotion === 'conflict') return `[warm, grounded, steady] ${clean}`;
@@ -174,34 +167,19 @@ function voiceSettingsFor(emotion: ElevenLabsEmotion) {
   return base;
 }
 
-function toBase64(bytes: Uint8Array) {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-  let out = '';
-  for (let i = 0; i < bytes.length; i += 3) {
-    const a = bytes[i];
-    const b = bytes[i + 1];
-    const c = bytes[i + 2];
-    out += chars[a >> 2];
-    out += chars[((a & 3) << 4) | ((b ?? 0) >> 4)];
-    out += i + 1 < bytes.length ? chars[((b & 15) << 2) | ((c ?? 0) >> 6)] : '=';
-    out += i + 2 < bytes.length ? chars[(c ?? 0) & 63] : '=';
-  }
-  return out;
+function cacheKeyFor(text: string, opts: ElevenLabsSpeakOptions): VoiceCacheKey {
+  return {
+    text,
+    voiceId: opts.voiceId || defaultVoiceId() || 'gateway-default',
+    modelId: opts.modelId || defaultModelId(),
+    emotion: opts.emotion || 'neutral',
+    outputFormat: opts.outputFormat || defaultOutputFormat(),
+  };
 }
 
-async function playBase64Mp3(base64: string, cacheKey?: string | null) {
-  const fs = await importFileSystem();
+async function playUri(uri: string) {
   const Audio = await importAudio();
-  if (!fs?.writeAsStringAsync || !Audio?.Sound?.createAsync) {
-    throw new Error('expo-file-system and expo-av are required for ElevenLabs native playback.');
-  }
-  const safeKey = String(cacheKey || `aga-tts-${Date.now()}`).replace(/[^a-z0-9._-]+/gi, '-').slice(0, 80);
-  const dir = fs.cacheDirectory || fs.documentDirectory || '';
-  if (!dir) throw new Error('No writable cache directory is available for ElevenLabs audio.');
-  const uri = `${dir}${safeKey}.mp3`;
-  await fs.writeAsStringAsync(uri, base64, { encoding: fs.EncodingType?.Base64 ?? 'base64' });
-  diagnostics.lastFileUri = uri;
-
+  if (!Audio?.Sound?.createAsync) throw new Error('expo-av is required for expressive TTS playback.');
   await currentSound?.unloadAsync?.().catch?.(() => undefined);
   const created = await Audio.Sound.createAsync({ uri }, { shouldPlay: true, volume: 1.0 });
   currentSound = created?.sound ?? null;
@@ -217,139 +195,89 @@ async function playBase64Mp3(base64: string, cacheKey?: string | null) {
   });
 }
 
-
-async function speakViaElevenLabsWebSocket(text: string, opts: ElevenLabsSpeakOptions) {
-  const key = apiKey();
-  const voiceId = opts.voiceId || defaultVoiceId();
-  const modelId = opts.modelId || defaultModelId();
-  const outputFormat = opts.outputFormat || defaultOutputFormat();
-  if (!key) throw new Error('Missing EXPO_PUBLIC_ELEVENLABS_API_KEY.');
-  if (!voiceId) throw new Error('Missing EXPO_PUBLIC_ELEVENLABS_VOICE_ID.');
-  if (typeof WebSocket === 'undefined') return false;
-
+async function playBytes(buffer: ArrayBuffer, key: VoiceCacheKey) {
   const native = nativeChunkPlayer();
-  if (!native?.playBase64Chunk) return false;
-  const started = Date.now();
-  const url = `wss://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream-input?model_id=${encodeURIComponent(modelId)}&output_format=${encodeURIComponent(outputFormat)}`;
-  diagnostics.transport = 'native';
-
-  await new Promise<void>((resolve, reject) => {
-    let settled = false;
-    const done = (error?: Error) => {
-      if (settled) return;
-      settled = true;
-      if (error) reject(error);
-      else resolve();
-    };
-    const timer = setTimeout(() => done(new Error('ElevenLabs WebSocket timed out.')), opts.timeoutMs ?? 22_000);
-    const ws = new WebSocket(url);
-    ws.onopen = () => {
-      ws.send(JSON.stringify({
-        text: ' ',
-        xi_api_key: key,
-        voice_settings: voiceSettingsFor(opts.emotion || 'neutral'),
-        generation_config: { chunk_length_schedule: [80, 120, 180, 260] },
-      }));
-      ws.send(JSON.stringify({ text: emotionText(text, opts.emotion || 'neutral'), try_trigger_generation: true }));
-      ws.send(JSON.stringify({ text: '' }));
-    };
-    ws.onmessage = async (event: any) => {
-      try {
-        const data = JSON.parse(String(event?.data ?? '{}'));
-        if (data.audio) {
-          await native.playBase64Chunk(String(data.audio), { outputFormat, voiceId, modelId });
-        }
-        if (data.isFinal) {
-          clearTimeout(timer);
-          try { ws.close(); } catch { /* ignore */ }
-          done();
-        }
-      } catch (error) {
-        clearTimeout(timer);
-        try { ws.close(); } catch { /* ignore */ }
-        done(error instanceof Error ? error : new Error(String(error ?? 'ElevenLabs WebSocket parse failed')));
-      }
-    };
-    ws.onerror = () => {
-      clearTimeout(timer);
-      done(new Error('ElevenLabs WebSocket connection failed.'));
-    };
-    ws.onclose = () => {
-      clearTimeout(timer);
-      if (!settled) done();
-    };
-  });
-
-  if (native.finish) await native.finish();
-  diagnostics.lastLatencyMs = Date.now() - started;
-  return true;
+  const base64 = toBase64(new Uint8Array(buffer));
+  if (native?.playBase64Chunk) {
+    diagnostics.transport = 'native';
+    await native.playBase64Chunk(base64, { outputFormat: key.outputFormat, voiceId: key.voiceId, modelId: key.modelId });
+    await native.finish?.();
+    return;
+  }
+  const uri = await writeVoiceCacheBase64(key, base64);
+  if (!uri) throw new Error('Could not write voice cache for playback.');
+  diagnostics.lastFileUri = uri;
+  await playUri(uri);
 }
 
-async function fetchElevenLabsAudio(text: string, opts: ElevenLabsSpeakOptions) {
-  if (preferWebSocket()) {
-    try {
-      const ok = await speakViaElevenLabsWebSocket(text, opts);
-      if (ok) return;
-    } catch (error) {
-      measureMark('voice.tts.elevenlabs.websocket.fallback', { message: error instanceof Error ? error.message : String(error ?? 'websocket failed') });
-    }
-  }
-  diagnostics.transport = 'http-stream';
-  const key = apiKey();
+async function fetchDirectElevenLabs(text: string, opts: ElevenLabsSpeakOptions) {
+  const key = directApiKey();
   const voiceId = opts.voiceId || defaultVoiceId();
   const modelId = opts.modelId || defaultModelId();
   const outputFormat = opts.outputFormat || defaultOutputFormat();
-  if (!key) throw new Error('Missing EXPO_PUBLIC_ELEVENLABS_API_KEY.');
-  if (!voiceId) throw new Error('Missing EXPO_PUBLIC_ELEVENLABS_VOICE_ID.');
+  if (!allowDirectElevenLabs()) throw new Error('Direct ElevenLabs calls are disabled. Configure EXPO_PUBLIC_AGA_TTS_GATEWAY_URL.');
+  if (!key) throw new Error('Missing ElevenLabs API key.');
+  if (!voiceId) throw new Error('Missing ElevenLabs voice id.');
 
   const latency = env('EXPO_PUBLIC_ELEVENLABS_OPTIMIZE_STREAMING_LATENCY') || '3';
   const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream?output_format=${encodeURIComponent(outputFormat)}&optimize_streaming_latency=${encodeURIComponent(latency)}`;
   const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
   const timer = controller ? setTimeout(() => controller.abort(), opts.timeoutMs ?? 18_000) : null;
-  const started = Date.now();
   try {
     const response = await fetch(url, {
       method: 'POST',
-      headers: {
-        'xi-api-key': key,
-        'content-type': 'application/json',
-        accept: 'audio/mpeg',
-      },
-      body: JSON.stringify({
-        text: emotionText(text, opts.emotion || 'neutral'),
-        model_id: modelId,
-        voice_settings: voiceSettingsFor(opts.emotion || 'neutral'),
-      }),
+      headers: { 'xi-api-key': key, 'content-type': 'application/json', accept: 'audio/mpeg' },
+      body: JSON.stringify({ text: emotionText(text, opts.emotion || 'neutral'), model_id: modelId, voice_settings: voiceSettingsFor(opts.emotion || 'neutral') }),
       signal: controller?.signal,
     } as RequestInit);
     if (!response.ok) {
-      const message = await response.text().catch(() => 'ElevenLabs request failed');
-      throw new Error(`ElevenLabs TTS failed: ${message.slice(0, 240)}`);
+      const message = await response.text().catch(() => 'ElevenLabs direct request failed');
+      throw new Error(`ElevenLabs direct TTS failed: ${message.slice(0, 240)}`);
     }
-
-    // True incremental playback is delegated to an optional native chunk player.
-    // React Native fetch implementations commonly expose arrayBuffer but not a
-    // browser ReadableStream; this still uses ElevenLabs' low-latency stream API
-    // and avoids expo-speech as the primary voice.
-    const native = nativeChunkPlayer();
-    if (native?.playBase64Chunk && response.body && typeof (response.body as any).getReader === 'function') {
-      const reader = (response.body as any).getReader();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (value?.length) await native.playBase64Chunk(toBase64(value), { outputFormat, voiceId, modelId });
-      }
-      await native.finish?.();
-      diagnostics.lastLatencyMs = Date.now() - started;
-      return;
-    }
-
-    const buffer = await response.arrayBuffer();
-    diagnostics.lastLatencyMs = Date.now() - started;
-    await playBase64Mp3(toBase64(new Uint8Array(buffer)), opts.cacheKey);
+    diagnostics.transport = 'direct-http';
+    return response.arrayBuffer();
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+async function synthesizeAudio(text: string, opts: ElevenLabsSpeakOptions) {
+  const voiceId = opts.voiceId || defaultVoiceId();
+  const modelId = opts.modelId || defaultModelId();
+  const outputFormat = opts.outputFormat || defaultOutputFormat();
+  const emotion = opts.emotion || 'neutral';
+  const key = cacheKeyFor(text, opts);
+  const cached = await getCachedVoiceUri(key);
+  if (cached) {
+    diagnostics.transport = 'cache';
+    diagnostics.lastFileUri = cached;
+    return { uri: cached, buffer: null as ArrayBuffer | null, cacheKey: key };
+  }
+
+  if (isTtsGatewayConfigured()) {
+    diagnostics.transport = 'gateway';
+    const buffer = await fetchTtsGatewayAudio({ text, voiceId, modelId, outputFormat, emotion, voiceSettings: voiceSettingsFor(emotion), timeoutMs: opts.timeoutMs });
+    return { uri: null, buffer, cacheKey: key };
+  }
+
+  const buffer = await fetchDirectElevenLabs(text, opts);
+  return { uri: null, buffer, cacheKey: key };
+}
+
+export function getElevenLabsDiagnostics() {
+  diagnostics.gateway = getTtsGatewayDiagnostics();
+  return { ...diagnostics, speaking };
+}
+
+export function isElevenLabsConfigured() {
+  return Boolean((isTtsGatewayConfigured() || (allowDirectElevenLabs() && directApiKey())) && (defaultVoiceId() || isTtsGatewayConfigured()));
+}
+
+export async function isElevenLabsAvailable() {
+  if (!isElevenLabsConfigured()) return false;
+  if (Platform.OS === 'web') return true;
+  const Audio = await importAudio();
+  return Boolean(Audio?.Sound?.createAsync);
 }
 
 export async function stopElevenLabsSpeech() {
@@ -371,26 +299,25 @@ export async function speakWithElevenLabs(text: string, opts: ElevenLabsSpeakOpt
     if (!(await isElevenLabsAvailable())) return false;
 
     await stopElevenLabsSpeech();
+    const started = Date.now();
     diagnostics.available = true;
     diagnostics.speaking = true;
     diagnostics.starts += 1;
     diagnostics.lastError = null;
     diagnostics.lastChars = clean.length;
-    diagnostics.lastVoiceId = opts.voiceId || defaultVoiceId() || null;
+    diagnostics.lastVoiceId = opts.voiceId || defaultVoiceId() || (isTtsGatewayConfigured() ? 'gateway-default' : null);
     diagnostics.lastModelId = opts.modelId || defaultModelId();
     speaking = true;
     opts.onStart?.();
-    measureMark('voice.tts.elevenlabs.start', {
-      chars: clean.length,
-      model: diagnostics.lastModelId,
-      voiceId: diagnostics.lastVoiceId,
-      platform: Platform.OS,
-      nativeStreaming: diagnostics.nativeStreaming,
-    });
+    measureMark('voice.tts.elevenlabs.start', { chars: clean.length, model: diagnostics.lastModelId, voiceId: diagnostics.lastVoiceId, platform: Platform.OS });
 
     try {
-      await fetchElevenLabsAudio(clean, opts);
+      const result = await synthesizeAudio(clean, opts);
+      if (result.uri) await playUri(result.uri);
+      else if (result.buffer) await playBytes(result.buffer, result.cacheKey);
       diagnostics.finishes += 1;
+      diagnostics.lastLatencyMs = Date.now() - started;
+      pruneVoiceCache().catch(() => undefined);
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error ?? 'ElevenLabs TTS failed');
@@ -410,24 +337,19 @@ export async function speakWithElevenLabs(text: string, opts: ElevenLabsSpeakOpt
 export async function prefetchElevenLabsAudio(text: string, opts: ElevenLabsSpeakOptions = {}) {
   const clean = String(text || '').replace(/\s+/g, ' ').trim();
   if (!clean || !(await isElevenLabsAvailable())) return null;
-  const fs = await importFileSystem();
-  if (!fs?.writeAsStringAsync) return null;
-  const key = apiKey();
-  const voiceId = opts.voiceId || defaultVoiceId();
-  const modelId = opts.modelId || defaultModelId();
-  const outputFormat = opts.outputFormat || defaultOutputFormat();
-  if (!key || !voiceId) return null;
-  const latency = env('EXPO_PUBLIC_ELEVENLABS_OPTIMIZE_STREAMING_LATENCY') || '3';
-  const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream?output_format=${encodeURIComponent(outputFormat)}&optimize_streaming_latency=${encodeURIComponent(latency)}`;
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'xi-api-key': key, 'content-type': 'application/json', accept: 'audio/mpeg' },
-    body: JSON.stringify({ text: emotionText(clean, opts.emotion || 'guided'), model_id: modelId, voice_settings: voiceSettingsFor(opts.emotion || 'guided') }),
-  });
-  if (!response.ok) return null;
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  const safeKey = String(opts.cacheKey || `aga-prefetch-${Date.now()}`).replace(/[^a-z0-9._-]+/gi, '-').slice(0, 80);
-  const uri = `${fs.cacheDirectory || fs.documentDirectory}${safeKey}.mp3`;
-  await fs.writeAsStringAsync(uri, toBase64(bytes), { encoding: fs.EncodingType?.Base64 ?? 'base64' });
-  return uri;
+  const key = cacheKeyFor(clean, { ...opts, emotion: opts.emotion || 'guided' });
+  const cached = await getCachedVoiceUri(key);
+  if (cached) return cached;
+  try {
+    const result = await synthesizeAudio(clean, { ...opts, emotion: opts.emotion || 'guided' });
+    if (result.uri) return result.uri;
+    if (!result.buffer) return null;
+    const uri = await voiceCacheUri(key);
+    if (!uri) return null;
+    await writeVoiceCacheBase64(key, toBase64(new Uint8Array(result.buffer)));
+    return uri;
+  } catch (error) {
+    measureMark('voice.tts.elevenlabs.prefetch.error', { message: error instanceof Error ? error.message : String(error ?? 'prefetch failed') });
+    return null;
+  }
 }

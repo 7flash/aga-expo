@@ -57,3 +57,7 @@ export function releaseCommandSpeech() {
 export function buildCommandSpeech() {
   return `Build commands: ${BUILD_COMMANDS.join('; ')}.`;
 }
+
+export function voiceGatewaySpeech() {
+  return 'Production voice path: set ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID on the TradJS/backend server, expose only EXPO_PUBLIC_AGA_TTS_GATEWAY_URL to the Android app, and set EXPO_PUBLIC_AGA_ALLOW_DIRECT_ELEVENLABS=0 for release builds.';
+}
