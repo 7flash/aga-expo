@@ -6,3 +6,4 @@ bun.lock
 data
 android
 .env
+.aga-cache
