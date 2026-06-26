@@ -1,17 +1,22 @@
 import React from 'react';
 import type { AgaMode } from '../aga/turn';
 import { AgaAvatarZen } from '../ui/AgaAvatarZen';
-import { HologramAngel } from './HologramAngel';
+import { TactileHologramAngel } from './TactileHologramAngel';
 
 type Props = {
   mode: AgaMode;
   audioLevel?: number;
   compact?: boolean;
   size?: number;
+  wear?: number;
 };
 
 function displayMode() {
   return String(process.env?.EXPO_PUBLIC_AGA_DISPLAY_MODE ?? '').trim().toLowerCase();
+}
+
+function visualEngine() {
+  return String(process.env?.EXPO_PUBLIC_AGA_VISUAL_ENGINE ?? '').trim().toLowerCase();
 }
 
 function envFlag(name: string, fallback = false) {
@@ -23,13 +28,22 @@ function envFlag(name: string, fallback = false) {
 /**
  * Single avatar surface.
  *
- * Hologram builds get a black, emissive GL surface for behind-glass/Pepper's
- * ghost setups. The SVG Zen avatar remains the fallback for web harnesses,
- * devices without expo-gl, and debug builds.
+ * Tactile hologram builds use a GPU shader that keeps breathing/halo/neural
+ * motion off the JS thread. The SVG Zen avatar remains the compatibility
+ * fallback for web harnesses, old APKs, or builds without expo-gl.
  */
 export function AngelVisual(props: Props) {
-  if (displayMode() === 'hologram' && !envFlag('EXPO_PUBLIC_AGA_FORCE_SVG_AVATAR', false)) {
-    return <HologramAngel {...props} mirror={envFlag('EXPO_PUBLIC_AGA_HOLOGRAM_MIRROR', false)} />;
+  const mode = displayMode();
+  const engine = visualEngine();
+  const tactile = mode === 'tactile_hologram' || engine === 'tactile_gl' || engine === 'gl';
+  if (tactile && !envFlag('EXPO_PUBLIC_AGA_FORCE_SVG_AVATAR', false)) {
+    return (
+      <TactileHologramAngel
+        {...props}
+        mirror={envFlag('EXPO_PUBLIC_AGA_HOLOGRAM_MIRROR', false)}
+        lowPower={envFlag('EXPO_PUBLIC_AGA_LOW_POWER_VISUALS', false)}
+      />
+    );
   }
   return <AgaAvatarZen {...props} />;
 }

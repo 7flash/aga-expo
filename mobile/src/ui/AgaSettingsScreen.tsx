@@ -1,118 +1,84 @@
 import React, { useEffect, useState } from 'react';
-import { Pressable, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { Link } from 'expo-router';
-import { colors, radius, spacing } from './theme';
-import { PERSONAS } from '../aga/personas';
-import { loadPreferences, savePreferences, type Preferences } from '../db/localStore';
+import { SafeAreaView, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { loadPreferences, type Preferences } from '../db/localStore';
+import { EmbossedPanel, GaugeStatus, MechanicalSwitch, TactileButton } from './tactile/TactilePrimitives';
+import { tactile } from './tactile/tokens';
 
+/**
+ * Behind-glass settings display.
+ *
+ * No direct-manipulation controls. Settings are changed by voice
+ * commands or remote config; this screen only visualizes the current state as a
+ * tactile control panel so a kiosk/glass build remains 100% voice-first.
+ */
 export function AgaSettingsScreen() {
   const [prefs, setPrefs] = useState<Preferences | null>(null);
-  const [saved, setSaved] = useState(false);
 
-  useEffect(() => { void loadPreferences().then(setPrefs); }, []);
+  useEffect(() => {
+    let alive = true;
+    loadPreferences().then((next) => { if (alive) setPrefs(next); }).catch(() => undefined);
+    const timer = setInterval(() => {
+      loadPreferences().then((next) => { if (alive) setPrefs(next); }).catch(() => undefined);
+    }, 5000);
+    return () => { alive = false; clearInterval(timer); };
+  }, []);
 
-  async function update(next: Partial<Preferences>) {
-    const savedPrefs = await savePreferences(next);
-    setPrefs(savedPrefs);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 1200);
-  }
-
-  if (!prefs) {
-    return <SafeAreaView style={styles.safe}><Text style={styles.loading}>Loading settings…</Text></SafeAreaView>;
-  }
+  const listeningMode = prefs?.realtimeListenMode ?? 'strict';
+  const wakePhrase = prefs?.wakePhrase ?? 'aga';
+  const voice = prefs?.realtimeVoice || 'default';
+  const persona = prefs?.persona || 'warm';
+  const remoteRevision = prefs?.remoteConfigRevision || 'local';
 
   return (
-    <SafeAreaView style={styles.safe}>
-      <ScrollView contentContainerStyle={styles.scroll}>
-        <View style={styles.header}>
-          <View>
-            <Text style={styles.title}>AGA Settings</Text>
-            <Text style={styles.sub}>Stored locally inside the APK. No backend required.</Text>
+    <SafeAreaView style={styles.root} pointerEvents="none">
+      <ScrollView contentContainerStyle={styles.content} pointerEvents="none">
+        <Text style={styles.kicker}>AGA MECHANICAL CONTROL BAY</Text>
+        <Text style={styles.title}>Voice-only settings</Text>
+        <Text style={styles.subtitle}>Say “AGA settings”, “AGA change voice”, “AGA listening mode”, or manage this unit from remote config. There are no touch controls in the behind-glass build.</Text>
+
+        <View style={styles.gauges}>
+          <GaugeStatus label="Wake" value={wakePhrase} mode="listening" active />
+          <GaugeStatus label="Voice" value={voice} mode="speaking" active />
+          <GaugeStatus label="Config" value={remoteRevision} mode="thinking" active />
+        </View>
+
+        <EmbossedPanel title="listening hardware" mode="listening" active style={styles.panel}>
+          <MechanicalSwitch label="Wake phrase gate" value mode="listening" />
+          <MechanicalSwitch label="Barge-in / interruption" value={!!prefs?.allowBargeIn} mode="speaking" style={styles.rowGap} />
+          <MechanicalSwitch label="Media ducking" value={prefs?.mediaDuckingEnabled !== false} mode="media" style={styles.rowGap} />
+        </EmbossedPanel>
+
+        <EmbossedPanel title="spoken selector bank" mode="speaking" active style={styles.panel}>
+          <View style={styles.grid}>
+            <TactileButton index="1" label="Persona" sublabel={persona} active mode="speaking" />
+            <TactileButton index="2" label="Listen mode" sublabel={listeningMode} active mode="listening" />
+            <TactileButton index="3" label="Diagnostics" sublabel={prefs?.showDiagnostics ? 'visible' : 'hidden'} active={!!prefs?.showDiagnostics} mode="thinking" />
+            <TactileButton index="4" label="Remote skill bay" sublabel="synced by config server" active mode="guided" />
           </View>
-          <Link href="/" asChild><Pressable style={styles.back}><Text style={styles.backText}>Back</Text></Pressable></Link>
-        </View>
+        </EmbossedPanel>
 
-        {saved && <Text style={styles.saved}>Saved.</Text>}
-
-        <Field label="Wake phrase" value={prefs.wakePhrase} onChangeText={(wakePhrase) => update({ wakePhrase })} />
-        <Field label="Voice locale" value={prefs.voiceLocale} onChangeText={(voiceLocale) => update({ voiceLocale })} />
-        <Field label="OpenAI API key" value={prefs.openaiApiKey} onChangeText={(openaiApiKey) => update({ openaiApiKey })} secureTextEntry />
-        <Field label="Gemini API key" value={prefs.geminiApiKey} onChangeText={(geminiApiKey) => update({ geminiApiKey })} secureTextEntry />
-
-        <Text style={styles.sectionTitle}>Brain mode</Text>
-        <View style={styles.choiceRow}>
-          {(['offline', 'openai', 'gemini'] as const).map((brainMode) => (
-            <Pressable key={brainMode} onPress={() => update({ brainMode })} style={[styles.choice, prefs.brainMode === brainMode && styles.choiceActive]}>
-              <Text style={styles.choiceText}>{brainMode}</Text>
-            </Pressable>
-          ))}
-        </View>
-
-        <Text style={styles.sectionTitle}>Proactive reminders</Text>
-        <View style={styles.choiceRow}>
-          {[true, false].map((enabled) => (
-            <Pressable key={String(enabled)} onPress={() => update({ proactiveReminders: enabled })} style={[styles.choice, prefs.proactiveReminders === enabled && styles.choiceActive]}>
-              <Text style={styles.choiceText}>{enabled ? 'on' : 'off'}</Text>
-            </Pressable>
-          ))}
-        </View>
-
-        <Text style={styles.sectionTitle}>Persona</Text>
-        <View style={styles.personaGrid}>
-          {Object.values(PERSONAS).map((persona) => (
-            <Pressable key={persona.id} onPress={() => update({ persona: persona.id })} style={[styles.personaCard, prefs.persona === persona.id && styles.choiceActive]}>
-              <Text style={styles.personaTitle}>{persona.label}</Text>
-              <Text style={styles.personaDesc}>{persona.description}</Text>
-            </Pressable>
-          ))}
-        </View>
+        <EmbossedPanel title="voice commands" mode="guided" style={styles.panel}>
+          <Text style={styles.command}>“AGA open settings menu”</Text>
+          <Text style={styles.command}>“AGA choose one”</Text>
+          <Text style={styles.command}>“AGA switch to hands-free mode”</Text>
+          <Text style={styles.command}>“AGA refresh remote config”</Text>
+        </EmbossedPanel>
       </ScrollView>
     </SafeAreaView>
   );
 }
 
-function Field({ label, value, onChangeText, secureTextEntry }: { label: string; value: string; onChangeText: (v: string) => void; secureTextEntry?: boolean }) {
-  const [draft, setDraft] = useState(value);
-  useEffect(() => setDraft(value), [value]);
-  return (
-    <View style={styles.field}>
-      <Text style={styles.label}>{label}</Text>
-      <TextInput
-        value={draft}
-        onChangeText={setDraft}
-        onBlur={() => onChangeText(draft)}
-        onSubmitEditing={() => onChangeText(draft)}
-        secureTextEntry={secureTextEntry}
-        placeholderTextColor={colors.faint}
-        style={styles.input}
-      />
-    </View>
-  );
-}
-
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.bg },
-  scroll: { padding: spacing.lg, paddingBottom: 80, gap: spacing.md },
-  loading: { color: colors.text, padding: spacing.xl },
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.md, backgroundColor: colors.panel, borderColor: colors.border, borderWidth: 1, padding: spacing.lg, borderRadius: radius.lg },
-  title: { color: colors.text, fontSize: 28, fontWeight: '900' },
-  sub: { color: colors.muted, marginTop: 4 },
-  back: { borderColor: colors.border, borderWidth: 1, borderRadius: radius.pill, paddingHorizontal: 16, paddingVertical: 10, backgroundColor: colors.panelStrong },
-  backText: { color: colors.text, fontWeight: '900' },
-  saved: { color: colors.good, fontWeight: '900' },
-  field: { backgroundColor: colors.panel, borderColor: colors.border, borderWidth: 1, padding: spacing.md, borderRadius: radius.lg },
-  label: { color: colors.cyan, fontSize: 12, letterSpacing: 1.4, fontWeight: '900', marginBottom: 8, textTransform: 'uppercase' },
-  input: { color: colors.text, minHeight: 48, borderRadius: radius.md, backgroundColor: 'rgba(255,255,255,0.07)', paddingHorizontal: spacing.md },
-  sectionTitle: { color: colors.gold, fontWeight: '900', fontSize: 18, marginTop: spacing.sm },
-  choiceRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
-  choice: { paddingHorizontal: spacing.lg, paddingVertical: spacing.md, borderRadius: radius.pill, backgroundColor: colors.panel, borderWidth: 1, borderColor: colors.border },
-  choiceActive: { borderColor: colors.cyan, backgroundColor: 'rgba(103,232,249,0.18)' },
-  choiceText: { color: colors.text, fontWeight: '900' },
-  personaGrid: { gap: spacing.md },
-  personaCard: { backgroundColor: colors.panel, borderColor: colors.border, borderWidth: 1, padding: spacing.lg, borderRadius: radius.lg },
-  personaTitle: { color: colors.text, fontSize: 17, fontWeight: '900' },
-  personaDesc: { color: colors.muted, marginTop: 5 },
+  root: { flex: 1, backgroundColor: '#000' },
+  content: { padding: 22, gap: 16 },
+  kicker: { color: tactile.colors.amber, fontSize: 11, fontWeight: '900', letterSpacing: 2.6, textTransform: 'uppercase' },
+  title: { color: tactile.colors.text, fontSize: 32, fontWeight: '900', letterSpacing: 0.4 },
+  subtitle: { color: tactile.colors.etched, fontSize: 15, lineHeight: 22, maxWidth: 720 },
+  gauges: { flexDirection: 'row', gap: 10, flexWrap: 'wrap' },
+  panel: { marginTop: 4 },
+  rowGap: { marginTop: 10 },
+  grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
+  command: { color: tactile.colors.text, fontSize: 15, lineHeight: 24, fontWeight: '700' },
 });
 
 export default AgaSettingsScreen;

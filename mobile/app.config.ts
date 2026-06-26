@@ -1,7 +1,5 @@
 import type { ExpoConfig } from 'expo/config';
 
-const allowCleartextTraffic = process.env.EXPO_PUBLIC_AGA_ALLOW_CLEARTEXT === '1';
-
 const config: ExpoConfig = {
   name: 'AGA Voice Assistant',
   slug: 'aga-voice-assistant',
@@ -20,13 +18,13 @@ const config: ExpoConfig = {
       'FOREGROUND_SERVICE_MICROPHONE',
       'POST_NOTIFICATIONS',
     ],
-    usesCleartextTraffic: allowCleartextTraffic,
+    usesCleartextTraffic: process.env.EXPO_PUBLIC_AGA_ALLOW_CLEARTEXT === '1',
   },
   ios: {
     supportsTablet: true,
     infoPlist: {
-      NSMicrophoneUsageDescription: 'AGA listens for your wake word and voice commands.',
-      NSSpeechRecognitionUsageDescription: 'AGA converts your speech into commands and translations.',
+      NSMicrophoneUsageDescription: 'AGA listens locally for the wake word and voice commands.',
+      NSSpeechRecognitionUsageDescription: 'AGA converts your speech into commands and translations after wake activation.',
     },
   },
   web: {
@@ -35,7 +33,10 @@ const config: ExpoConfig = {
   extra: {
     assistantWebUrl: process.env.EXPO_PUBLIC_ASSISTANT_WEB_URL ?? 'http://localhost:3000',
     wakeWord: process.env.EXPO_PUBLIC_AGA_WAKE_WORD ?? 'aga',
-    displayMode: process.env.EXPO_PUBLIC_AGA_DISPLAY_MODE ?? 'hologram',
+    displayMode: process.env.EXPO_PUBLIC_AGA_DISPLAY_MODE ?? 'tactile_hologram',
+    visualEngine: process.env.EXPO_PUBLIC_AGA_VISUAL_ENGINE ?? 'tactile_gl',
+    pureDisplay: process.env.EXPO_PUBLIC_AGA_PURE_DISPLAY ?? '1',
+    edgeWake: process.env.EXPO_PUBLIC_AGA_EDGE_WAKE ?? 'optional_native',
   },
 };
 
