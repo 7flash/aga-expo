@@ -2,8 +2,11 @@ import { Platform } from 'react-native';
 import { PorcupineWakeEngine, isPorcupineWakeAvailable, type PorcupineDetection } from './porcupineWakeEngine';
 import { PorcupineWebWakeEngine } from './porcupineWebWakeEngine';
 import { DevKeywordInjectorWakeEngine } from './devKeywordInjectorWakeEngine';
+import { createSherpaKeywordEngine } from './sherpaKeywordEngine';
+import { wakeKeywords } from './sherpaKeywordPhrases';
+import type { KeywordEngine, KeywordEvent } from './keywordEngine';
 
-export type WakeKeywordSource = 'porcupine' | 'porcupine_web' | 'dev_keyword';
+export type WakeKeywordSource = 'sherpa_native' | 'sherpa_wasm' | 'porcupine' | 'porcupine_web' | 'dev_keyword';
 
 export type WakeEngineEvent =
   | { type: 'wake'; label: 'aga' | string; source: WakeKeywordSource }
@@ -26,18 +29,26 @@ function env(name: string) {
 }
 
 function wakeEngineName() {
-  return String(env('EXPO_PUBLIC_AGA_WAKE_ENGINE') || 'porcupine').toLowerCase();
+  return String(env('EXPO_PUBLIC_AGA_KEYWORD_ENGINE') || env('EXPO_PUBLIC_AGA_WAKE_ENGINE') || 'sherpa').toLowerCase();
 }
 
 function webWakeEngineName() {
-  return String(env('EXPO_PUBLIC_AGA_WEB_WAKE_ENGINE') || '').toLowerCase();
+  return String(env('EXPO_PUBLIC_AGA_BROWSER_KEYWORD_ENGINE') || env('EXPO_PUBLIC_AGA_WEB_WAKE_ENGINE') || '').toLowerCase();
 }
 
-function labelToEvent(event: PorcupineDetection, source: WakeKeywordSource): WakeEngineEvent {
+function porcupineToEvent(event: PorcupineDetection, source: WakeKeywordSource): WakeEngineEvent {
   const label = String(event.label || '').toLowerCase();
   if (event.index === 1 || label === 'stop') return { type: 'control', command: 'stop', source };
   if (event.index === 2 || label === 'pause') return { type: 'control', command: 'pause', source };
   return { type: 'wake', label: label || 'aga', source };
+}
+
+function sherpaToEvent(event: KeywordEvent): WakeEngineEvent {
+  const source = event.provider as WakeKeywordSource;
+  if (event.intent === 'control.stop') return { type: 'control', command: 'stop', source };
+  if (event.intent === 'control.pause') return { type: 'control', command: 'pause', source };
+  if (event.intent === 'control.resume') return { type: 'control', command: 'resume', source };
+  return { type: 'wake', label: event.value || event.phrase || 'aga', source };
 }
 
 function createDevEngine(callbacks: WakeEngineCallbacks, reason: string): WakeEngine {
@@ -49,16 +60,44 @@ function createDevEngine(callbacks: WakeEngineCallbacks, reason: string): WakeEn
   }, reason);
 }
 
+class SherpaWakeEngine implements WakeEngine {
+  private engine: KeywordEngine;
+  private callbacks: WakeEngineCallbacks;
+  private provider: 'sherpa_native' | 'sherpa_wasm' | 'dev_keyword';
+
+  constructor(callbacks: WakeEngineCallbacks, provider?: 'sherpa_native' | 'sherpa_wasm' | 'dev_keyword') {
+    this.callbacks = callbacks;
+    this.provider = provider || (Platform.OS === 'web' ? 'sherpa_wasm' : 'sherpa_native');
+    this.engine = createSherpaKeywordEngine({
+      onKeyword: (event) => this.callbacks.onEvent(sherpaToEvent(event)),
+      onStatus: (status) => this.callbacks.onEvent({ type: 'status', status }),
+      onError: (message) => this.callbacks.onEvent({ type: 'error', message }),
+      onNoMatch: (reason) => this.callbacks.onEvent({ type: 'status', status: `sherpa wake no-match: ${reason}` }),
+    }, this.provider);
+  }
+
+  getDiagnostics() {
+    return { provider: this.provider, diagnostics: this.engine.getDiagnostics?.() };
+  }
+
+  start() {
+    return this.engine.start({ mode: 'wake', provider: this.provider, keywords: wakeKeywords(), timeoutMs: 0, allowTextFallback: false });
+  }
+
+  stop() {
+    return this.engine.stop('wake_stop');
+  }
+}
+
 /**
  * Wake engine factory.
  *
- * Important contract:
- * - Android/iOS appliance hot mic is Porcupine keyword spotting only.
- * - Browser preview does not use SpeechRecognition by default.
- * - Browser preview uses Porcupine Web/WASM when configured, or an explicit dev
- *   keyword injector when EXPO_PUBLIC_AGA_WEB_WAKE_ENGINE=dev.
- * - Full utterances, menu choices, numbers, and language names are handled only
- *   by the post-wake command layer or live Gemini/OpenAI session.
+ * Product contract:
+ * - No Android SpeechRecognizer hot-mic path.
+ * - Sherpa native is the preferred Android keyword engine.
+ * - Sherpa WASM is the preferred browser preview keyword engine.
+ * - Porcupine remains a fallback for fixed aga/stop/pause keyword files.
+ * - Dev injection is explicit fallback only.
  */
 export function createWakeEngine(callbacks: WakeEngineCallbacks): WakeEngine {
   const requested = wakeEngineName();
@@ -69,26 +108,31 @@ export function createWakeEngine(callbacks: WakeEngineCallbacks): WakeEngine {
   }
 
   if (requested === 'speech' || requested === 'web_speech' || requestedWeb === 'speech' || requestedWeb === 'web_speech') {
-    return createDevEngine(callbacks, 'speech hot-mic disabled; use dev keyword injector or Porcupine Web');
+    return createDevEngine(callbacks, 'speech hot-mic disabled; use Sherpa, Porcupine, or explicit dev injection');
   }
 
   if (Platform.OS === 'web') {
-    if (requestedWeb === 'porcupine' || requestedWeb === 'porcupine_web' || requested === 'porcupine' || requested === 'auto') {
+    if (requestedWeb === 'sherpa' || requestedWeb === 'sherpa_wasm' || requested === 'sherpa' || requested === 'auto') {
+      return new SherpaWakeEngine(callbacks, 'sherpa_wasm');
+    }
+    if (requestedWeb === 'porcupine' || requestedWeb === 'porcupine_web' || requested === 'porcupine') {
       return new PorcupineWebWakeEngine({
-        onDetected: (detected) => callbacks.onEvent(labelToEvent(detected, 'porcupine_web')),
+        onDetected: (detected) => callbacks.onEvent(porcupineToEvent(detected, 'porcupine_web')),
         onStatus: (status) => callbacks.onEvent({ type: 'status', status }),
         onError: (message) => callbacks.onEvent({ type: 'error', message }),
       });
     }
-    return createDevEngine(callbacks, 'web wake engine not configured');
+    return createDevEngine(callbacks, 'web keyword engine not configured');
   }
 
-  if (requested === 'porcupine' || requested === 'auto') {
-    if (requested === 'auto' && !isPorcupineWakeAvailable()) {
-      return createDevEngine(callbacks, 'Porcupine native unavailable in auto mode');
-    }
+  if (requested === 'sherpa' || requested === 'sherpa_native' || requested === 'auto') {
+    return new SherpaWakeEngine(callbacks, 'sherpa_native');
+  }
+
+  if (requested === 'porcupine') {
+    if (!isPorcupineWakeAvailable()) return createDevEngine(callbacks, 'Porcupine native unavailable');
     return new PorcupineWakeEngine({
-      onDetected: (detected) => callbacks.onEvent(labelToEvent(detected, 'porcupine')),
+      onDetected: (detected) => callbacks.onEvent(porcupineToEvent(detected, 'porcupine')),
       onStatus: (status) => callbacks.onEvent({ type: 'status', status }),
       onError: (message) => callbacks.onEvent({ type: 'error', message }),
     });

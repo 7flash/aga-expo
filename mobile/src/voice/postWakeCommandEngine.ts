@@ -1,11 +1,15 @@
 import { Platform } from 'react-native';
 import { choicePromptHint, resolveChoicePhrase, type ChoiceLike } from './multilingualChoiceAliases';
 import { normalizeSpeech } from '../aga/text';
+import { createSherpaKeywordEngine, DevSherpaKeywordInjector } from './sherpaKeywordEngine';
+import { postWakeKeywords } from './sherpaKeywordPhrases';
+import type { KeywordEngine, KeywordEvent } from './keywordEngine';
 
 export type PostWakeCommandResult =
-  | { type: 'text'; text: string; source: 'dev' | 'rhino' | 'cheetah' }
-  | { type: 'choice'; text: string; choice: ReturnType<typeof resolveChoicePhrase>; source: 'dev' | 'rhino' | 'cheetah' }
-  | { type: 'control'; command: 'stop' | 'pause' | 'resume'; source: 'dev' | 'rhino' | 'cheetah' };
+  | { type: 'text'; text: string; source: 'dev' | 'sherpa_native' | 'sherpa_wasm' }
+  | { type: 'choice'; text: string; choice: ReturnType<typeof resolveChoicePhrase>; source: 'dev' | 'sherpa_native' | 'sherpa_wasm' }
+  | { type: 'control'; command: 'stop' | 'pause' | 'resume'; source: 'dev' | 'sherpa_native' | 'sherpa_wasm' }
+  | { type: 'no_match'; reason: string; source: 'dev' | 'sherpa_native' | 'sherpa_wasm' };
 
 export type PostWakeCommandCallbacks = {
   onResult: (result: PostWakeCommandResult) => void;
@@ -18,6 +22,10 @@ declare global {
   // Browser/dev command window helper. It exists only while AGA is awake.
   // eslint-disable-next-line no-var
   var __AGA_SAY: undefined | ((text: string) => void);
+  // eslint-disable-next-line no-var
+  var __AGA_CHOOSE: undefined | ((choice: string | number) => void);
+  // eslint-disable-next-line no-var
+  var __AGA_REPEAT: undefined | (() => void);
 }
 
 function env(name: string) {
@@ -25,7 +33,7 @@ function env(name: string) {
 }
 
 function engineName() {
-  return String(env('EXPO_PUBLIC_AGA_POST_WAKE_COMMAND_ENGINE') || 'auto').toLowerCase();
+  return String(env('EXPO_PUBLIC_AGA_POST_WAKE_COMMAND_ENGINE') || 'sherpa').toLowerCase();
 }
 
 function numberEnv(name: string, fallback: number) {
@@ -33,18 +41,23 @@ function numberEnv(name: string, fallback: number) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
-async function optionalImport(specifier: string): Promise<any | null> {
-  try {
-    return await (Function('s', 'return import(s)') as any)(specifier);
-  } catch {
-    return null;
-  }
+function sourceFromProvider(provider: string): 'dev' | 'sherpa_native' | 'sherpa_wasm' {
+  if (provider === 'dev_keyword') return 'dev';
+  if (provider === 'sherpa_wasm') return 'sherpa_wasm';
+  return 'sherpa_native';
+}
+
+function controlFromIntent(intent: string, value?: string): 'stop' | 'pause' | 'resume' | null {
+  if (intent === 'control.stop' || value === 'stop') return 'stop';
+  if (intent === 'control.pause' || value === 'pause') return 'pause';
+  if (intent === 'control.resume' || value === 'resume') return 'resume';
+  return null;
 }
 
 function controlFromText(text: string): 'stop' | 'pause' | 'resume' | null {
-  if (/\b(stop|quiet|cancel|shush|hush)\b/i.test(text)) return 'stop';
-  if (/\b(pause|hold)\b/i.test(text)) return 'pause';
-  if (/\b(resume|continue|unpause)\b/i.test(text)) return 'resume';
+  if (/\b(stop|quiet|cancel|shush|hush|berhenti|стоп)\b/i.test(text)) return 'stop';
+  if (/\b(pause|hold|jeda|пауза)\b/i.test(text)) return 'pause';
+  if (/\b(resume|continue|unpause|lanjut|продолжить)\b/i.test(text)) return 'resume';
   return null;
 }
 
@@ -54,81 +67,62 @@ function root(): any {
 
 class DevPostWakeCommandEngine {
   private callbacks: PostWakeCommandCallbacks;
+  private engine: KeywordEngine;
   private running = false;
 
   constructor(callbacks: PostWakeCommandCallbacks) {
     this.callbacks = callbacks;
+    this.engine = new DevSherpaKeywordInjector({
+      onKeyword: (event) => this.routeKeyword(event),
+      onText: (text) => this.routeText(text, 'dev'),
+      onNoMatch: (reason) => this.callbacks.onResult({ type: 'no_match', reason, source: 'dev' }),
+      onStatus: (status) => this.callbacks.onStatus?.(status),
+      onError: (message) => this.callbacks.onError?.(message),
+    });
   }
 
   getDiagnostics() {
-    return { provider: 'dev-post-wake-command', command: '__AGA_SAY("two")', running: this.running };
+    return { provider: 'dev-post-wake-command', command: '__AGA_SAY("two") / __AGA_CHOOSE(2)', running: this.running, engine: this.engine.getDiagnostics?.() };
   }
 
   async start() {
     if (this.running) return;
     this.running = true;
-    root().__AGA_SAY = (text: string) => this.accept(text, 'dev');
+    await this.engine.start({
+      mode: 'menu',
+      provider: 'dev_keyword',
+      keywords: postWakeKeywords(this.callbacks.getChoices?.() || []),
+      timeoutMs: postWakeWindowMs(),
+      allowTextFallback: true,
+    });
+    root().__AGA_CHOOSE = (choice: string | number) => root().__AGA_SAY?.(`choose ${choice}`);
+    root().__AGA_REPEAT = () => root().__AGA_SAY?.('repeat options');
     this.callbacks.onStatus?.(`post-wake dev command window ready. ${choicePromptHint(this.callbacks.getChoices?.() || [])}`);
   }
 
   async stop() {
     this.running = false;
-    if (root().__AGA_SAY) root().__AGA_SAY = undefined;
+    await this.engine.stop('post_wake_dev_stop');
+    if (root().__AGA_CHOOSE) root().__AGA_CHOOSE = undefined;
+    if (root().__AGA_REPEAT) root().__AGA_REPEAT = undefined;
     this.callbacks.onStatus?.('post-wake command window closed');
   }
 
-  private accept(text: string, source: 'dev') {
-    if (!this.running) return;
-    const clean = normalizeSpeech(text).trim();
-    if (!clean) return;
-    const control = controlFromText(clean);
-    if (control) {
-      this.callbacks.onResult({ type: 'control', command: control, source });
-      return;
+  private routeKeyword(event: KeywordEvent) {
+    const source = sourceFromProvider(event.provider);
+    const control = controlFromIntent(String(event.intent), event.value);
+    if (control) return this.callbacks.onResult({ type: 'control', command: control, source });
+    if (event.intent === 'choice.select') {
+      const choice = resolveChoicePhrase(String(event.value || event.phrase), this.callbacks.getChoices?.() || []);
+      return this.callbacks.onResult({ type: 'choice', text: String(event.value || event.phrase), choice, source });
     }
-    const choice = resolveChoicePhrase(clean, this.callbacks.getChoices?.() || []);
-    if (choice) {
-      this.callbacks.onResult({ type: 'choice', text: clean, choice, source });
-      return;
-    }
-    this.callbacks.onResult({ type: 'text', text: clean, source });
-  }
-}
-
-class OptionalPicovoiceCommandEngine {
-  private callbacks: PostWakeCommandCallbacks;
-  private provider: 'rhino' | 'cheetah';
-  private manager: any | null = null;
-  private running = false;
-
-  constructor(provider: 'rhino' | 'cheetah', callbacks: PostWakeCommandCallbacks) {
-    this.provider = provider;
-    this.callbacks = callbacks;
+    if (event.intent === 'menu.repeat') return this.routeText('repeat options', source);
+    if (event.intent === 'menu.close') return this.routeText('close menu', source);
+    if (event.intent === 'menu.back') return this.routeText('back', source);
+    this.routeText(String(event.value || event.phrase), source);
   }
 
-  getDiagnostics() {
-    return { provider: this.provider, running: this.running, manager: !!this.manager };
-  }
-
-  async start() {
-    if (this.running) return;
-    const accessKey = env('EXPO_PUBLIC_PICOVOICE_ACCESS_KEY');
-    if (!accessKey) throw new Error(`Missing EXPO_PUBLIC_PICOVOICE_ACCESS_KEY for ${this.provider}.`);
-    if (this.provider === 'rhino') await this.startRhino(accessKey);
-    else await this.startCheetah(accessKey);
-    this.running = true;
-    this.callbacks.onStatus?.(`${this.provider} post-wake command window listening`);
-  }
-
-  async stop() {
-    this.running = false;
-    try { await this.manager?.delete?.(); } catch { /* ignore */ }
-    try { await this.manager?.stop?.(); } catch { /* ignore */ }
-    this.manager = null;
-    this.callbacks.onStatus?.(`${this.provider} command window closed`);
-  }
-
-  private routeText(text: string, source: 'rhino' | 'cheetah') {
+  private routeText(text: string, source: 'dev' | 'sherpa_native' | 'sherpa_wasm') {
     const clean = normalizeSpeech(text).trim();
     if (!clean) return;
     const control = controlFromText(clean);
@@ -137,42 +131,87 @@ class OptionalPicovoiceCommandEngine {
     if (choice) return this.callbacks.onResult({ type: 'choice', text: clean, choice, source });
     this.callbacks.onResult({ type: 'text', text: clean, source });
   }
+}
 
-  private async startRhino(accessKey: string) {
-    const mod = await optionalImport('@picovoice/rhino-react-native');
-    if (!mod?.RhinoManager?.fromContextPaths) throw new Error('Missing @picovoice/rhino-react-native or RhinoManager.fromContextPaths.');
-    const contexts = String(env('EXPO_PUBLIC_AGA_RHINO_CONTEXTS') || '').split(',').map((s) => s.trim()).filter(Boolean);
-    if (!contexts.length) throw new Error('Missing EXPO_PUBLIC_AGA_RHINO_CONTEXTS for post-wake command menus.');
-    this.manager = await mod.RhinoManager.fromContextPaths(accessKey, contexts, (inference: any) => {
-      const text = String(inference?.intent || inference?.slots?.choice || inference?.slots?.text || '');
-      this.routeText(text, 'rhino');
-    });
-    await this.manager?.start?.();
+class SherpaPostWakeCommandEngine {
+  private callbacks: PostWakeCommandCallbacks;
+  private engine: KeywordEngine;
+  private provider: 'sherpa_native' | 'sherpa_wasm';
+  private running = false;
+
+  constructor(callbacks: PostWakeCommandCallbacks, provider: 'sherpa_native' | 'sherpa_wasm') {
+    this.callbacks = callbacks;
+    this.provider = provider;
+    this.engine = createSherpaKeywordEngine({
+      onKeyword: (event) => this.routeKeyword(event),
+      onText: (text, providerName) => this.routeText(text, sourceFromProvider(providerName)),
+      onNoMatch: (reason) => this.callbacks.onResult({ type: 'no_match', reason, source: sourceFromProvider(this.provider) }),
+      onStatus: (status) => this.callbacks.onStatus?.(status),
+      onError: (message) => this.callbacks.onError?.(message),
+    }, provider);
   }
 
-  private async startCheetah(accessKey: string) {
-    const mod = await optionalImport('@picovoice/cheetah-react-native');
-    const CheetahManager = mod?.CheetahManager || mod?.default;
-    if (!CheetahManager?.create && !CheetahManager?.fromBuiltInLanguage) throw new Error('Missing @picovoice/cheetah-react-native.');
-    const callback = (partial: string, isEndpoint?: boolean) => {
-      if (isEndpoint || /\S/.test(String(partial || ''))) this.routeText(String(partial || ''), 'cheetah');
-    };
-    this.manager = CheetahManager.create
-      ? await CheetahManager.create(accessKey, callback)
-      : await CheetahManager.fromBuiltInLanguage(accessKey, env('EXPO_PUBLIC_AGA_CHEETAH_LANGUAGE') || 'en', callback);
-    await this.manager?.start?.();
+  getDiagnostics() {
+    return { provider: this.provider, running: this.running, engine: this.engine.getDiagnostics?.() };
+  }
+
+  async start() {
+    if (this.running) return;
+    this.running = true;
+    await this.engine.start({
+      mode: 'menu',
+      provider: this.provider,
+      keywords: postWakeKeywords(this.callbacks.getChoices?.() || []),
+      timeoutMs: postWakeWindowMs(),
+      allowTextFallback: true,
+    });
+    this.callbacks.onStatus?.(`${this.provider} post-wake command window listening. ${choicePromptHint(this.callbacks.getChoices?.() || [])}`);
+  }
+
+  async stop() {
+    this.running = false;
+    await this.engine.stop('post_wake_stop');
+    this.callbacks.onStatus?.(`${this.provider} command window closed`);
+  }
+
+  private routeKeyword(event: KeywordEvent) {
+    const source = sourceFromProvider(event.provider);
+    const control = controlFromIntent(String(event.intent), event.value);
+    if (control) return this.callbacks.onResult({ type: 'control', command: control, source });
+    if (event.intent === 'choice.select') {
+      const choice = resolveChoicePhrase(String(event.value || event.phrase), this.callbacks.getChoices?.() || []);
+      return this.callbacks.onResult({ type: 'choice', text: String(event.value || event.phrase), choice, source });
+    }
+    if (event.intent === 'menu.repeat') return this.routeText('repeat options', source);
+    if (event.intent === 'menu.close') return this.routeText('close menu', source);
+    if (event.intent === 'menu.back') return this.routeText('back', source);
+    this.routeText(String(event.value || event.phrase), source);
+  }
+
+  private routeText(text: string, source: 'dev' | 'sherpa_native' | 'sherpa_wasm') {
+    const clean = normalizeSpeech(text).trim();
+    if (!clean) return;
+    const control = controlFromText(clean);
+    if (control) return this.callbacks.onResult({ type: 'control', command: control, source });
+    const choice = resolveChoicePhrase(clean, this.callbacks.getChoices?.() || []);
+    if (choice) return this.callbacks.onResult({ type: 'choice', text: clean, choice, source });
+    this.callbacks.onResult({ type: 'text', text: clean, source });
   }
 }
 
 export function createPostWakeCommandEngine(callbacks: PostWakeCommandCallbacks) {
   const requested = engineName();
-  const devAllowed = requested === 'dev' || (requested === 'auto' && Platform.OS === 'web');
-  if (devAllowed) return new DevPostWakeCommandEngine(callbacks);
-  if (requested === 'rhino') return new OptionalPicovoiceCommandEngine('rhino', callbacks);
-  if (requested === 'cheetah') return new OptionalPicovoiceCommandEngine('cheetah', callbacks);
-  if (requested === 'none' || requested === 'live') return null;
-  if (requested === 'auto') return null;
-  return new DevPostWakeCommandEngine(callbacks);
+  if (requested === 'dev') return new DevPostWakeCommandEngine(callbacks);
+  if (requested === 'none' || requested === 'off') return null;
+  if (requested === 'speech' || requested === 'web_speech' || requested === 'android_speech') {
+    return new DevPostWakeCommandEngine(callbacks);
+  }
+  if (requested === 'sherpa_wasm') return new SherpaPostWakeCommandEngine(callbacks, 'sherpa_wasm');
+  if (requested === 'sherpa_native') return new SherpaPostWakeCommandEngine(callbacks, 'sherpa_native');
+  if (requested === 'sherpa' || requested === 'auto') {
+    return new SherpaPostWakeCommandEngine(callbacks, Platform.OS === 'web' ? 'sherpa_wasm' : 'sherpa_native');
+  }
+  return new SherpaPostWakeCommandEngine(callbacks, Platform.OS === 'web' ? 'sherpa_wasm' : 'sherpa_native');
 }
 
 export function postWakeWindowMs() {

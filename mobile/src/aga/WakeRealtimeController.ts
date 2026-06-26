@@ -1,10 +1,13 @@
 import { createWakeEngine, type WakeEngine, type WakeEngineEvent } from '../voice/wakeEngine';
+import { createCapabilityRunner } from './capabilityRunner';
+import { parseVoiceMenuCommand } from './voiceFirstMenuCommands';
+import { selectedChoiceSpeech, spokenChoicePrompt } from '../voice/spokenMenuPrompts';
 import { createPostWakeCommandEngine, postWakeWindowMs } from '../voice/postWakeCommandEngine';
 import { speakShortReply, stopSpeaking } from '../voice/speechOut';
 import { classifyTurnForVoicePath } from '../voice/liveEscalation';
+import { answerShortTextWithGpt5, ShortReasoningAudioTurn } from './shortReasoningTurn';
 import { DeterministicGuidedRunner } from '../sessions/deterministicGuidedRunner';
 import { guidedKindFromText } from '../sessions/guidedPhaseScripts';
-import { subconsciousRecall } from '../memory/subconsciousRag';
 import { initializeLocalStore, listMessages, listPendingReminders, loadPreferences, logEvent, startNewConversationSession, type Preferences } from '../db/localStore';
 import { normalizeSpeech } from './text';
 import { agaEngineDiagnostics, getAgaEngine } from './engine';
@@ -50,9 +53,9 @@ function postWakeReply() {
 /**
  * Appliance runtime controller.
  *
- * Always-on mic: Porcupine keyword indexes only (aga/stop/pause by default).
- * Post-wake: short TTS for simple confirmations; deterministic runner for guided
- * sessions; OpenAI/Gemini live session only when interaction truly needs it.
+ * Always-on mic: Sherpa native/WASM keyword spotting by default, with Porcupine only as an optional fallback for aga/stop/pause.
+ * Post-wake: local Sherpa command recognition first; then short OpenAI STT → GPT-5 tools → ElevenLabs TTS.
+ * OpenAI/Gemini live session opens only for explicit live/practice/conversation modes.
  */
 export class WakeRealtimeController {
   private listeners = new Set<Listener>();
@@ -66,6 +69,8 @@ export class WakeRealtimeController {
   private guidedUnsub: (() => void) | null = null;
   private postWakeCommand: { start(): Promise<void> | void; stop(): Promise<void> | void; getDiagnostics?(): unknown } | null = null;
   private postWakeTimer: ReturnType<typeof setTimeout> | null = null;
+  private capabilities: ReturnType<typeof createCapabilityRunner> | null = null;
+  private shortAudioTurn: ShortReasoningAudioTurn | null = null;
 
   private snapshot: RealtimeSnapshot = {
     ready: false,
@@ -100,11 +105,12 @@ export class WakeRealtimeController {
   }
 
   async start() {
-    return measureAsync('wakeRealtime.porcupine.start', async () => {
+    return measureAsync('wakeRealtime.keyword.start', async () => {
       if (this.started) return;
       this.started = true;
       await initializeLocalStore();
       this.prefs = await loadPreferences();
+      this.ensureCapabilities();
       if (envFlag('EXPO_PUBLIC_AGA_CLEAR_TRANSIENT_ON_BOOT', true)) {
         await startNewConversationSession('app_boot', { clearTranscript: true, endActiveSession: false }).catch(() => undefined);
       }
@@ -129,6 +135,7 @@ export class WakeRealtimeController {
     this.guidedUnsub?.();
     this.guidedUnsub = null;
     await this.guided.stop('controller_stop').catch(() => undefined);
+    await this.cancelShortAudioTurn('controller_stop').catch(() => undefined);
     await this.stopPostWakeCommandWindow('controller_stop');
     await this.stopWakeScout('controller_stop');
     await this.stopRealtime('controller_stop');
@@ -154,6 +161,24 @@ export class WakeRealtimeController {
     void this.startWakeScout('manual_rearm');
   }
 
+
+  private ensureCapabilities() {
+    if (this.capabilities) return this.capabilities;
+    this.capabilities = createCapabilityRunner({
+      getPrefs: () => this.prefs,
+      setPrefs: (prefs) => { this.prefs = prefs; },
+      publish: (patch) => this.publish(patch as any),
+      setMode: (mode) => this.setMode(mode),
+      refresh: () => this.refresh(),
+      updateRealtimeSession: () => undefined,
+      applyRemoteConfig: async (reason: string) => { await logEvent('remote_config.apply_skipped', reason).catch(() => undefined); },
+      requestReconnect: (reason: string) => { void logEvent('voice_runtime.reconnect_requested', reason).catch(() => undefined); },
+      getActiveChoiceMenu: () => (this.snapshot as any).activeChoiceMenu ?? null,
+      defaultVoice: env('EXPO_PUBLIC_AGA_REALTIME_VOICE') || env('EXPO_PUBLIC_OPENAI_REALTIME_VOICE') || 'guardian',
+    });
+    return this.capabilities;
+  }
+
   private async refresh() {
     const [messages, reminders] = await Promise.all([
       listMessages(12).catch(() => []),
@@ -174,14 +199,14 @@ export class WakeRealtimeController {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error || 'wake engine failed');
       this.publish({ mode: 'recovering', speechStatus: 'wake engine failed', error: message, heardText: '' } as any);
-      await logEvent('wake.porcupine.error', message).catch(() => undefined);
+      await logEvent('wake.keyword.error', message).catch(() => undefined);
     }
   }
 
   private async stopWakeScout(reason: string) {
     const engine = this.wakeEngine;
     this.wakeEngine = null;
-    if (engine) await engine.stop().catch(() => undefined);
+    if (engine) await Promise.resolve(engine.stop()).catch(() => undefined);
     await logEvent('wake.keyword.stop', reason).catch(() => undefined);
   }
 
@@ -237,24 +262,24 @@ export class WakeRealtimeController {
     }
     const commandWindowOpened = await this.openPostWakeCommandWindow(source);
     if (!commandWindowOpened) {
-      await this.activateLiveSession('The user said AGA. Listen for their next request and reply briefly.');
+      await this.captureShortUtteranceAndReason('no_post_wake_command_engine');
     }
   }
 
   private async handleTurnText(text: string, source: 'wake' | 'replay' | 'command_window') {
     await this.stopPostWakeCommandWindow('turn_text').catch(() => undefined);
+    await this.cancelShortAudioTurn('text_arrived').catch(() => undefined);
     this.publish({ heardText: text, interim: text, speechStatus: source === 'replay' ? `replay: ${text.slice(0, 54)}` : `heard: ${text.slice(0, 54)}` } as any);
-    const activeOptions = ((this.snapshot as any).activeChoiceMenu?.options || []) as any[];
-    if (activeOptions.length) {
-      const { resolveChoicePhrase } = await import('../voice/multilingualChoiceAliases');
-      const choice = resolveChoicePhrase(text, activeOptions);
-      if (choice) {
-        this.publish({ speechStatus: `selected ${choice.label}`, heardText: `selected: ${choice.label}`, selectedChoiceKey: choice.key } as any);
-        if (this.realtime) this.realtime.replay(`choose option ${choice.key}`);
-        else await this.activateLiveSession(`choose option ${choice.key}`);
-        return;
-      }
+
+    const activeMenu = (this.snapshot as any).activeChoiceMenu ?? null;
+    if (activeMenu?.options?.length) {
+      const applied = await this.applyChoiceText(text);
+      if (applied) return;
     }
+
+    const menuCommand = parseVoiceMenuCommand(text, activeMenu);
+    if (menuCommand && await this.handleVoiceMenuCommand(menuCommand)) return;
+
     if (this.guided && await this.guided.acceptUserResponse(text).catch(() => false)) return;
     const kind = guidedKindFromText(text);
     const route = classifyTurnForVoicePath(text);
@@ -265,31 +290,121 @@ export class WakeRealtimeController {
       await this.startWakeScout('guided_controls').catch(() => undefined);
       return;
     }
-    if (route === 'short_tts') {
-      await this.handleShortTextCommand(text);
-      return;
-    }
-    await this.activateLiveSession(text);
-  }
-
-  private async handleShortTextCommand(text: string) {
-    const lower = text.toLowerCase();
-    const context = await subconsciousRecall(text).catch(() => null);
-    await logEvent('turn.short_tts', `${text.slice(0, 180)} memories=${context?.memories.length || 0}`).catch(() => undefined);
-    if (/\b(status|diagnostic|are you there)\b/i.test(lower)) {
-      await speakShortReply('I am here. Wake words are local. Short replies use expressive TTS. Live sessions open only when needed.', 'warm');
-    } else if (/\b(thank you|thanks)\b/i.test(lower)) {
-      await speakShortReply('Always.', 'warm');
-    } else if (/\b(stop|quiet|cancel)\b/i.test(lower)) {
-      await this.handleKeywordControl('stop');
-    } else if (/\b(pause|hold)\b/i.test(lower)) {
-      await this.handleKeywordControl('pause');
-    } else {
+    if (route === 'live_audio') {
       await this.activateLiveSession(text);
       return;
     }
+    await this.handleReasonedShortTextCommand(text);
+  }
+
+  private async applyChoiceText(text: string) {
+    const runner = this.ensureCapabilities();
+    const result = await runner.chooseFromText(text).catch((error: unknown) => error instanceof Error ? error.message : String(error || 'choice failed'));
+    if (!result) return false;
+    const activeMenu = (this.snapshot as any).activeChoiceMenu ?? null;
+    const spoken = String(result || selectedChoiceSpeech(text));
+    this.publish({ speechStatus: spoken.slice(0, 96), heardText: `selected: ${text}`, interim: '', mode: 'speaking' } as any);
+    await speakShortReply(spoken, activeMenu?.id === 'voice' ? 'bright' : 'warm').catch(() => undefined);
     await this.refresh();
-    await this.startWakeScout('short_tts_done').catch(() => undefined);
+    const nextMenu = (this.snapshot as any).activeChoiceMenu ?? null;
+    if (nextMenu?.options?.length) {
+      await speakShortReply(spokenChoicePrompt(nextMenu), 'warm').catch(() => undefined);
+      await this.openPostWakeCommandWindow('choice_followup').catch(() => undefined);
+    } else {
+      await this.startWakeScout('choice_done').catch(() => undefined);
+    }
+    return true;
+  }
+
+  private async handleVoiceMenuCommand(command: NonNullable<ReturnType<typeof parseVoiceMenuCommand>>) {
+    const activeMenu = (this.snapshot as any).activeChoiceMenu ?? null;
+    if (command.type === 'repeat_menu') {
+      await speakShortReply(spokenChoicePrompt(activeMenu), 'warm').catch(() => undefined);
+      await this.openPostWakeCommandWindow('repeat_menu').catch(() => undefined);
+      return true;
+    }
+    if (command.type === 'close_menu') {
+      this.publish({ activeChoiceMenu: null, heardText: 'menu closed', speechStatus: 'menu closed', mode: 'listening' } as any);
+      await speakShortReply('Menu closed.', 'warm').catch(() => undefined);
+      await this.startWakeScout('menu_closed').catch(() => undefined);
+      return true;
+    }
+    const runner = this.ensureCapabilities();
+    const response = await runner.run('show_settings_menu', { category: command.category });
+    this.publish({ speechStatus: response.slice(0, 96), heardText: `${command.category} menu`, mode: 'speaking' } as any);
+    await speakShortReply(spokenChoicePrompt((this.snapshot as any).activeChoiceMenu), 'warm').catch(() => undefined);
+    await this.openPostWakeCommandWindow(`menu:${command.category}`).catch(() => undefined);
+    return true;
+  }
+
+  private async handleReasonedShortTextCommand(text: string) {
+    const lower = text.toLowerCase();
+    await logEvent('turn.short_reasoning', text.slice(0, 180)).catch(() => undefined);
+    if (/\b(stop|quiet|cancel)\b/i.test(lower)) {
+      await this.handleKeywordControl('stop');
+      return;
+    }
+    if (/\b(pause|hold)\b/i.test(lower)) {
+      await this.handleKeywordControl('pause');
+      return;
+    }
+    try {
+      const runner = this.ensureCapabilities();
+      await answerShortTextWithGpt5(text, {
+        getPrefs: () => this.prefs,
+        runCapability: (name, args) => runner.run(name, args),
+        publish: (patch) => this.publish(patch as any),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error || 'short reasoning failed');
+      this.publish({ error: message, speechStatus: 'short reasoning failed' } as any);
+      await speakShortReply('I had trouble thinking through that. Please say AGA and try again.', 'warm').catch(() => undefined);
+    }
+    await this.refresh();
+    await this.startWakeScout('short_reasoning_done').catch(() => undefined);
+  }
+
+  private async captureShortUtteranceAndReason(reason: string) {
+    await this.cancelShortAudioTurn('replace_short_audio').catch(() => undefined);
+    const runner = this.ensureCapabilities();
+    const turn = new ShortReasoningAudioTurn({
+      getPrefs: () => this.prefs,
+      runCapability: (name, args) => runner.run(name, args),
+      publish: (patch) => this.publish(patch as any),
+    });
+    this.shortAudioTurn = turn;
+    try {
+      await turn.start();
+      const ms = numberEnv('EXPO_PUBLIC_AGA_SHORT_UTTERANCE_CAPTURE_MS', 6500);
+      setTimeout(() => {
+        if (this.shortAudioTurn === turn) {
+          void turn.stopAndAnswer()
+            .catch((error: unknown) => {
+              const message = error instanceof Error ? error.message : String(error || 'short utterance failed');
+              this.publish({ error: message, speechStatus: 'short utterance failed' } as any);
+              return speakShortReply('I did not catch that clearly. Please say AGA and try again.', 'warm').catch(() => undefined);
+            })
+            .finally(() => {
+              if (this.shortAudioTurn === turn) this.shortAudioTurn = null;
+              void this.refresh();
+              void this.startWakeScout(`short_utterance_done:${reason}`);
+            });
+        }
+      }, ms);
+    } catch (error) {
+      this.shortAudioTurn = null;
+      const message = error instanceof Error ? error.message : String(error || 'short capture unavailable');
+      this.publish({ error: message, speechStatus: 'short capture unavailable' } as any);
+      await logEvent('short_utterance.capture_error', message).catch(() => undefined);
+      await this.startWakeScout(`short_capture_failed:${reason}`).catch(() => undefined);
+    }
+  }
+
+  private async cancelShortAudioTurn(reason: string) {
+    const turn = this.shortAudioTurn;
+    this.shortAudioTurn = null;
+    if (turn) await turn.cancel().catch(() => undefined);
+    if (turn) await logEvent('short_utterance.cancel', reason).catch(() => undefined);
   }
 
   private async activateLiveSession(initialText: string) {
@@ -298,6 +413,7 @@ export class WakeRealtimeController {
       this.armIdleTimer();
       return;
     }
+    await this.cancelShortAudioTurn('live_session').catch(() => undefined);
     await this.stopPostWakeCommandWindow('live_session');
     await this.stopWakeScout('live_session');
     if (envFlag('EXPO_PUBLIC_AGA_FRESH_CONTEXT_PER_WAKE', true)) {
@@ -316,7 +432,7 @@ export class WakeRealtimeController {
       this.armIdleTimer();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error || 'live session failed');
-      this.publish({ mode: 'recovering', speechStatus: 'live session failed; returning to Porcupine', error: message });
+      this.publish({ mode: 'recovering', speechStatus: 'live session failed; returning to keyword wake', error: message });
       await logEvent('realtime.start.error', message).catch(() => undefined);
       await this.stopRealtime('start_error').catch(() => undefined);
       await this.startWakeScout('live_start_failed').catch(() => undefined);
@@ -346,11 +462,15 @@ export class WakeRealtimeController {
           return;
         }
         if (result.type === 'choice' && result.choice) {
-          void this.handleTurnText(`choose option ${result.choice.key}`, 'command_window');
+          void this.applyChoiceText(String(result.choice.key));
           return;
         }
         if (result.type === 'text') {
           void this.handleTurnText(result.text, 'command_window');
+          return;
+        }
+        if (result.type === 'no_match') {
+          void this.captureShortUtteranceAndReason(result.reason);
         }
       },
     });
@@ -359,9 +479,10 @@ export class WakeRealtimeController {
     try {
       await engine.start();
       const diagnostics = engine.getDiagnostics?.();
-      this.publish({ mode: 'listening', speechStatus: 'post-wake command window open', voiceCapability: { ...(this.snapshot as any).voiceCapability, postWakeCommand: diagnostics } } as any);
+      const prompt = spokenChoicePrompt((this.snapshot as any).activeChoiceMenu);
+      this.publish({ mode: 'listening', speechStatus: (this.snapshot as any).activeChoiceMenu ? prompt : 'post-wake command window open', voiceCapability: { ...(this.snapshot as any).voiceCapability, postWakeCommand: diagnostics } } as any);
       this.postWakeTimer = setTimeout(() => {
-        void this.stopPostWakeCommandWindow('timeout').then(() => this.startWakeScout('post_wake_timeout'));
+        void this.stopPostWakeCommandWindow('timeout').then(() => this.captureShortUtteranceAndReason('post_wake_timeout'));
       }, postWakeWindowMs());
       await logEvent('post_wake_command.start', source).catch(() => undefined);
       return true;
@@ -379,7 +500,7 @@ export class WakeRealtimeController {
     this.postWakeTimer = null;
     const engine = this.postWakeCommand;
     this.postWakeCommand = null;
-    if (engine) await engine.stop().catch(() => undefined);
+    if (engine) await Promise.resolve(engine.stop()).catch(() => undefined);
     if (engine) await logEvent('post_wake_command.stop', reason).catch(() => undefined);
   }
 
@@ -398,13 +519,14 @@ export class WakeRealtimeController {
   }
 
   private async stopRealtime(reason: string) {
+    await this.cancelShortAudioTurn(`stop_realtime:${reason}`).catch(() => undefined);
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
     const session = this.realtime;
     this.realtime = null;
     this.realtimeUnsubscribe?.();
     this.realtimeUnsubscribe = null;
-    if (session) await session.stop().catch(() => undefined);
+    if (session) await Promise.resolve(session.stop()).catch(() => undefined);
     await logEvent('realtime.sleep', reason).catch(() => undefined);
     await this.refresh();
     if (this.started) await this.startWakeScout(reason).catch(() => undefined);
