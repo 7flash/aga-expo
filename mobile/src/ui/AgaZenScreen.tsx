@@ -16,7 +16,18 @@ import { YouTubePlayer } from './YouTubePlayer';
 import { colors, radius, spacing } from './theme';
 import { AGA_APP_VERSION } from '../config/appVersion';
 
+function envFlag(name: string, fallback = false) {
+  const raw = String(process.env?.[name] ?? '').trim().toLowerCase();
+  if (!raw) return fallback;
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+}
+
+function displayMode() {
+  return String(process.env?.EXPO_PUBLIC_AGA_DISPLAY_MODE ?? '').trim().toLowerCase();
+}
+
 export function AgaZenScreen() {
+  const brain = useAgaBrain() as any;
   const {
     mode,
     messages,
@@ -29,12 +40,14 @@ export function AgaZenScreen() {
     lastMeasure,
     ttsStatus,
     voiceSummary,
+    voiceCapability,
     activeChoiceMenu,
     sessionLabel,
     replay,
     closeMedia,
     onMediaEvent,
-  } = useAgaBrain();
+  } = brain;
+  const snapshotGeminiCost = brain.geminiCost;
 
   const avatarShift = useRef(new Animated.Value(0)).current;
   const hasConversation = messages.length > 0 || !!activeMedia || !!activeChoiceMenu;
@@ -69,9 +82,12 @@ export function AgaZenScreen() {
         : mode;
   const media: any = activeMedia;
   const menu = activeChoiceMenu as any;
+  const debugUi = envFlag('EXPO_PUBLIC_AGA_DEBUG_UI', false);
+  const hologramMode = displayMode() === 'hologram';
+  const geminiCost = snapshotGeminiCost ?? (voiceCapability as any)?.geminiCost ?? (voiceCapability as any)?.cost ?? (voiceCapability as any)?.budget;
 
   return (
-    <SafeAreaView style={styles.safe}>
+    <SafeAreaView style={[styles.safe, hologramMode && styles.safeHologram]}>
       <View style={styles.backgroundOrbOne} />
       <View style={styles.backgroundOrbTwo} />
 
@@ -95,6 +111,13 @@ export function AgaZenScreen() {
           <Text style={styles.statusText}>{status}</Text>
         </View>
       </View>
+
+      {!!geminiCost && (
+        <View style={styles.costPill}>
+          <Text style={styles.costLabel}>Gemini</Text>
+          <Text style={styles.costText}>{geminiCost.label ?? `${geminiCost.transport ?? 'text'} · ${geminiCost.turns ?? 0} turns`}</Text>
+        </View>
+      )}
 
       <Animated.View
         pointerEvents="box-none"
@@ -171,10 +194,16 @@ export function AgaZenScreen() {
               <Text style={styles.emptyTitle}>Say “Hey AGA”</Text>
               <Text style={styles.emptyText}>Ask for advice, reminders, memory, translation, YouTube, or a skill — all by voice.</Text>
               <Text style={styles.versionText}>v{AGA_APP_VERSION}</Text>
-              <Text style={styles.speechStatus}>{speechStatus}</Text>
-              {!!voiceSummary && <Text style={styles.measureStatus}>{voiceSummary}</Text>}
-              {!!ttsStatus && <Text style={styles.measureStatus}>TTS {ttsStatus}</Text>}
-              {!!lastMeasure && <Text style={styles.measureStatus}>{lastMeasure}</Text>}
+              {debugUi ? (
+                <>
+                  <Text style={styles.speechStatus}>{speechStatus}</Text>
+                  {!!voiceSummary && <Text style={styles.measureStatus}>{voiceSummary}</Text>}
+                  {!!ttsStatus && <Text style={styles.measureStatus}>TTS {ttsStatus}</Text>}
+                  {!!lastMeasure && <Text style={styles.measureStatus}>{lastMeasure}</Text>}
+                </>
+              ) : (
+                <Text style={styles.speechStatus}>{voiceUnavailable ? 'Voice standby' : 'Listening locally'}</Text>
+              )}
             </View>
           }
         />
@@ -209,6 +238,7 @@ export function AgaZenScreen() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.bg, overflow: 'hidden' },
+  safeHologram: { backgroundColor: '#000005' },
   backgroundOrbOne: {
     position: 'absolute',
     width: 360,
@@ -269,6 +299,21 @@ const styles = StyleSheet.create({
   statusDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.faint },
   statusDotLive: { backgroundColor: colors.cyan, shadowColor: colors.cyan, shadowOpacity: 0.85, shadowRadius: 10 },
   statusText: { color: colors.text, fontSize: 12, fontWeight: '900', textTransform: 'capitalize' },
+  costPill: {
+    position: 'absolute',
+    top: 70,
+    right: spacing.lg,
+    zIndex: 45,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 7,
+    borderRadius: radius.pill,
+    backgroundColor: 'rgba(0,0,0,0.36)',
+    borderWidth: 1,
+    borderColor: 'rgba(103,232,249,0.25)',
+    alignItems: 'flex-end',
+  },
+  costLabel: { color: colors.cyan, fontSize: 9, fontWeight: '900', letterSpacing: 1.4, textTransform: 'uppercase' },
+  costText: { color: colors.text, fontSize: 10, fontWeight: '800', marginTop: 1 },
   avatarWrap: { position: 'absolute', top: '23%', left: 0, right: 0, zIndex: 5, alignItems: 'center' },
   interimPill: {
     position: 'absolute',

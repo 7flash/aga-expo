@@ -502,6 +502,10 @@ export class RealtimeSession {
   }
 
   private async exchangeSdp(offerSdp: string) {
+    if (isOpenAiRealtimeBlocked()) {
+      const info = agaEngineDiagnostics();
+      throw new Error(`OpenAI Realtime fetch blocked before SDP exchange. Selected engine: ${info.engine}.`);
+    }
     const sdpRelayUrl = env('EXPO_PUBLIC_AGA_REALTIME_SDP_URL');
     if (sdpRelayUrl) {
       const response = await fetch(sdpRelayUrl, {
@@ -543,6 +547,12 @@ export class RealtimeSession {
 
   private async connect() {
     return measureAsync('realtime.connect', async () => {
+      if (isOpenAiRealtimeBlocked()) {
+        const info = agaEngineDiagnostics();
+        this.publish({ ready: true, mode: 'offline', speechStatus: `OpenAI realtime blocked; selected engine is ${info.engine}`, error: null, voiceSummary: JSON.stringify(info), voiceCapability: info });
+        measureMark('openai.realtime.connect.blocked', info);
+        return;
+      }
       const root = getRoot();
       const pc = new root.RTCPeerConnection();
       this.pc = pc;

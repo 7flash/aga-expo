@@ -1,5 +1,11 @@
 export type AgaEngine = 'gemini' | 'openai' | 'local';
 
+type EngineDecision = {
+  engine: AgaEngine;
+  source: string;
+  raw: string | null;
+};
+
 function env(name: string) {
   return String(process.env?.[name] ?? '').trim();
 }
@@ -19,6 +25,12 @@ function parseEngine(raw: string): AgaEngine | null {
   return null;
 }
 
+function decisionFrom(name: string): EngineDecision | null {
+  const raw = env(name);
+  const engine = parseEngine(raw);
+  return engine ? { engine, source: name, raw } : null;
+}
+
 /**
  * Canonical engine selector.
  *
@@ -26,29 +38,23 @@ function parseEngine(raw: string): AgaEngine | null {
  * older env flags such as EXPO_PUBLIC_AGA_REALTIME_DIRECT=1 or a stale
  * EXPO_PUBLIC_AGA_PROVIDER=openai must not start OpenAI Realtime.
  */
+export function getAgaEngineDecision(): EngineDecision {
+  return decisionFrom('EXPO_PUBLIC_AGA_ENGINE')
+    ?? decisionFrom('EXPO_PUBLIC_AGA_RUNTIME_ENGINE')
+    ?? decisionFrom('EXPO_PUBLIC_AGA_BRAIN_PROVIDER')
+    ?? decisionFrom('EXPO_PUBLIC_AGA_PROVIDER')
+    ?? decisionFrom('EXPO_PUBLIC_AGA_VOICE_ENGINE')
+    ?? (() => {
+      const hasGemini = !!(env('EXPO_PUBLIC_GEMINI_API_KEY') || env('EXPO_PUBLIC_GOOGLE_API_KEY'));
+      const hasOpenAI = !!(env('EXPO_PUBLIC_OPENAI_API_KEY') || env('EXPO_PUBLIC_AGA_REALTIME_TOKEN_URL') || env('EXPO_PUBLIC_AGA_REALTIME_SDP_URL'));
+      if (hasGemini && !hasOpenAI) return { engine: 'gemini', source: 'auto:gemini_key_without_openai', raw: null } as EngineDecision;
+      if (envFlag('EXPO_PUBLIC_AGA_PREFER_GEMINI', false) && hasGemini) return { engine: 'gemini', source: 'EXPO_PUBLIC_AGA_PREFER_GEMINI', raw: '1' } as EngineDecision;
+      return { engine: 'openai', source: 'auto:default_openai', raw: null } as EngineDecision;
+    })();
+}
+
 export function getAgaEngine(): AgaEngine {
-  const explicit = parseEngine(env('EXPO_PUBLIC_AGA_ENGINE'));
-  if (explicit) return explicit;
-
-  const runtimeEngine = parseEngine(env('EXPO_PUBLIC_AGA_RUNTIME_ENGINE'));
-  if (runtimeEngine) return runtimeEngine;
-
-  const brainProvider = parseEngine(env('EXPO_PUBLIC_AGA_BRAIN_PROVIDER'));
-  if (brainProvider) return brainProvider;
-
-  const provider = parseEngine(env('EXPO_PUBLIC_AGA_PROVIDER'));
-  if (provider) return provider;
-
-  const voiceEngine = parseEngine(env('EXPO_PUBLIC_AGA_VOICE_ENGINE'));
-  if (voiceEngine) return voiceEngine;
-
-  // Cost-safe auto default: if Gemini is configured and OpenAI is not, use Gemini.
-  const hasGemini = !!(env('EXPO_PUBLIC_GEMINI_API_KEY') || env('EXPO_PUBLIC_GOOGLE_API_KEY'));
-  const hasOpenAI = !!(env('EXPO_PUBLIC_OPENAI_API_KEY') || env('EXPO_PUBLIC_AGA_REALTIME_TOKEN_URL') || env('EXPO_PUBLIC_AGA_REALTIME_SDP_URL'));
-  if (hasGemini && !hasOpenAI) return 'gemini';
-  if (envFlag('EXPO_PUBLIC_AGA_PREFER_GEMINI', false) && hasGemini) return 'gemini';
-
-  return 'openai';
+  return getAgaEngineDecision().engine;
 }
 
 export function isGeminiEngine() {
@@ -68,14 +74,25 @@ export function shouldUseDirectOpenAiRealtime() {
   return getAgaEngine() === 'openai' && envFlag('EXPO_PUBLIC_AGA_REALTIME_DIRECT', false);
 }
 
+export function shouldLoadOpenAiRealtimeModule() {
+  return getAgaEngine() === 'openai';
+}
+
 export function agaEngineDiagnostics() {
+  const decision = getAgaEngineDecision();
   return {
-    engine: getAgaEngine(),
+    engine: decision.engine,
+    source: decision.source,
+    raw: decision.raw,
     EXPO_PUBLIC_AGA_ENGINE: env('EXPO_PUBLIC_AGA_ENGINE') || null,
     EXPO_PUBLIC_AGA_REALTIME_DIRECT: env('EXPO_PUBLIC_AGA_REALTIME_DIRECT') || null,
+    EXPO_PUBLIC_AGA_PROVIDER: env('EXPO_PUBLIC_AGA_PROVIDER') || null,
+    EXPO_PUBLIC_AGA_BRAIN_PROVIDER: env('EXPO_PUBLIC_AGA_BRAIN_PROVIDER') || null,
+    EXPO_PUBLIC_AGA_DISABLE_OPENAI: env('EXPO_PUBLIC_AGA_DISABLE_OPENAI') || null,
     hasGeminiKey: !!(env('EXPO_PUBLIC_GEMINI_API_KEY') || env('EXPO_PUBLIC_GOOGLE_API_KEY')),
     hasOpenAiKey: !!env('EXPO_PUBLIC_OPENAI_API_KEY'),
     hasRealtimeTokenUrl: !!env('EXPO_PUBLIC_AGA_REALTIME_TOKEN_URL'),
     openAiRealtimeBlocked: isOpenAiRealtimeBlocked(),
+    openAiModuleShouldLoad: shouldLoadOpenAiRealtimeModule(),
   };
 }

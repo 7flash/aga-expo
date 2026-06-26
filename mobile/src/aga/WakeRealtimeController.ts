@@ -2,8 +2,7 @@ import { NativeSpeechLoop } from '../voice/nativeSpeech';
 import { loadPreferences, initializeLocalStore, listMessages, listPendingReminders, logEvent, startNewConversationSession, type Preferences } from '../db/localStore';
 import { detectWake, removeWakePhrase, normalizeSpeech } from './text';
 import { measureAsync, measureMark } from '../observability/measure';
-import { RealtimeSession, type RealtimeSnapshot } from '../realtime/RealtimeSession';
-import { GeminiLiveSession } from '../gemini/GeminiLiveSession';
+import type { RealtimeSnapshot } from '../realtime/RealtimeSession';
 import { agaEngineDiagnostics, getAgaEngine } from './engine';
 
 const DEFAULT_WAKE_IDLE_MS = 45_000;
@@ -30,19 +29,29 @@ function selectedVoiceEngine() {
 
 type Listener = (snapshot: RealtimeSnapshot) => void;
 
+type VoiceSessionLike = {
+  start(): Promise<void> | void;
+  stop(): Promise<void> | void;
+  subscribe(listener: (snapshot: RealtimeSnapshot) => void): () => void;
+  replay(text: string): void;
+  closeMedia?(): void;
+  onMediaEvent?(event: string): void;
+  rearmMic?(): void;
+};
+
 /**
  * Product voice lifecycle:
  * 1. Always-on local wake scout listens only for “AGA” / configured wake phrase.
- * 2. After wake, start a full-duplex gpt-realtime session.
+ * 2. After wake, start the selected post-wake engine: Gemini turn mode or OpenAI Realtime.
  * 3. Keep it open while the user is talking, choosing menus, or controlling media.
- * 4. When idle for a while, close Realtime and return to the local wake scout.
+ * 4. When idle / turn complete, close the active engine and return to local wake scout.
  *
- * This preserves privacy/cost/battery while still giving natural duplex speech once summoned.
+ * This preserves privacy/cost/battery and prevents the wake scout from billing cloud models until summoned.
  */
 export class WakeRealtimeController {
   private listeners = new Set<Listener>();
   private wakeLoop: NativeSpeechLoop | null = null;
-  private realtime: RealtimeSession | GeminiLiveSession | null = null;
+  private realtime: VoiceSessionLike | null = null;
   private realtimeUnsubscribe: (() => void) | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private prefs: Preferences | null = null;
@@ -293,6 +302,21 @@ export class WakeRealtimeController {
     measureMark('realtime.idleTimer.arm', { delay, mediaOpen });
   }
 
+  private async createSelectedVoiceSession(selectedEngine: ReturnType<typeof selectedVoiceEngine>): Promise<VoiceSessionLike> {
+    // Engine firewall: when Gemini is selected, this file must not load or
+    // construct the OpenAI Realtime implementation. Dynamic imports keep the
+    // OpenAI transport out of the execution path unless selectedEngine=openai.
+    if (selectedEngine === 'gemini') {
+      const mod = await import('../gemini/GeminiLiveSession');
+      return new mod.GeminiLiveSession({ onTurnDone: () => { void this.sleepRealtime('gemini_turn_done'); } });
+    }
+    if (selectedEngine === 'openai') {
+      const mod = await import('../realtime/RealtimeSession');
+      return new mod.RealtimeSession();
+    }
+    throw new Error(`Unsupported wake voice engine: ${selectedEngine}`);
+  }
+
   private async activateRealtime(initialText: string) {
     return measureAsync('wakeRealtime.activate', async () => {
       if (this.realtime) {
@@ -321,9 +345,7 @@ export class WakeRealtimeController {
         voiceCapability: agaEngineDiagnostics(),
       });
 
-      const session = selectedEngine === 'gemini'
-        ? new GeminiLiveSession({ onTurnDone: () => { void this.sleepRealtime('gemini_turn_done'); } })
-        : new RealtimeSession();
+      const session = await this.createSelectedVoiceSession(selectedEngine);
       this.realtime = session;
       this.realtimeUnsubscribe = session.subscribe((next) => {
         this.publish({ ...next, speechStatus: next.speechStatus || 'realtime active' });

@@ -55,8 +55,10 @@ async function importVoice(): Promise<VoiceModule | null> {
 }
 
 function getWebSpeechCtor(): any | null {
-  if (Platform.OS !== 'web') return null;
   const root: any = globalThis as any;
+  // Web, PWA, Android WebView, and some kiosk shells expose browser SpeechRecognition
+  // even when React Native's Platform.OS is not exactly 'web'. Prefer it as a
+  // fallback when the native @react-native-voice module is missing.
   return root.SpeechRecognition ?? root.webkitSpeechRecognition ?? null;
 }
 
@@ -177,12 +179,19 @@ export class NativeSpeechLoop {
       }
 
       this.voice = await importVoice();
+      if (!this.voice && getWebSpeechCtor()) {
+        this.callbacks.onStatus?.('native speech missing; using browser speech fallback');
+        measureMark('voice.native.missing_web_fallback');
+        await this.startWebSpeech();
+        return;
+      }
+
       this.diagnostics.provider = this.voice ? 'native' : 'none';
       this.diagnostics.available = !!this.voice;
       if (!this.voice) {
-        const message = '@react-native-voice/voice is not available in this build.';
+        const message = '@react-native-voice/voice is not available in this build and browser speech fallback is unavailable.';
         this.diagnostics.lastError = message;
-        this.callbacks.onStatus?.('voice unavailable: native module missing');
+        this.callbacks.onStatus?.('wake standby: voice module missing');
         return;
       }
 
@@ -262,9 +271,9 @@ export class NativeSpeechLoop {
       this.diagnostics.available = !!SpeechCtor;
 
       if (!SpeechCtor) {
-        const message = 'Browser speech recognition is not supported here. Use a native dev build/APK for always-on voice.';
+        const message = 'Speech recognition is not available in this runtime. Rebuild the APK with @react-native-voice/voice, or run the web/PWA build in a browser that supports SpeechRecognition.';
         this.diagnostics.lastError = message;
-        this.callbacks.onStatus?.('voice unavailable: browser speech recognition unsupported');
+        this.callbacks.onStatus?.('wake standby: speech recognition unavailable');
         return;
       }
 
@@ -302,7 +311,7 @@ export class NativeSpeechLoop {
             this.lastFinalFingerprint = fingerprint;
             this.diagnostics.lastFinal = final;
             this.callbacks.onFinal?.(final);
-            measureMark('voice.web.final', { chars: final.length, text: final.slice(0, 100) });
+            measureMark('voice.web.final', { chars: final.length });
           }
         }
       };
