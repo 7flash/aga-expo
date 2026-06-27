@@ -304,8 +304,7 @@ export function buildTurnContextBlock(prefs: Preferences | null) {
   } else {
     parts.push('No home weather coordinates are configured; get_weather may request browser/device geolocation when available.');
   }
-  return parts.join('
-');
+  return parts.join('\n');
 }
 
 export async function runGetTimeCapability(args: JsonObject = {}) {

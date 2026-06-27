@@ -38,6 +38,14 @@ export function getRuntimeContractIssues(): RuntimeContractIssue[] {
     issues.push({ severity: 'warning', code: 'security.public_keys_present', message: 'Direct EXPO_PUBLIC API keys are present while direct keys are disabled. Production builds should use secureSecrets or gateway endpoints.' });
   }
 
+  if (config.brain.liveEngine === 'elevenlabs_agent' && !config.elevenLabsAgent.agentId && !config.elevenLabsAgent.signedUrlEndpoint) {
+    issues.push({ severity: 'error', code: 'live.elevenlabs_agent_missing', message: 'ElevenLabs Agent live mode needs EXPO_PUBLIC_ELEVENLABS_AGENT_ID for a public agent or EXPO_PUBLIC_ELEVENLABS_AGENT_SIGNED_URL_ENDPOINT for a private agent.' });
+  }
+
+  if (config.brain.liveEngine === 'elevenlabs_agent' && !config.elevenLabsAgent.signedUrlEndpoint && !config.security.allowDirectKeys) {
+    issues.push({ severity: 'info', code: 'live.elevenlabs_public_agent', message: 'ElevenLabs Agent is using a public agent_id directly. Private agents should use a server signed URL endpoint; never expose xi-api-key in the client.' });
+  }
+
   if (!['true_hologram', 'tactile_relic', 'tactile_aga'].includes(config.display.mode)) {
     issues.push({ severity: 'warning', code: 'display.not_holographic', message: `Display mode is ${config.display.mode}. Behind-glass builds should use true_hologram or tactile_relic.` });
   }

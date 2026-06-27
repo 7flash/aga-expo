@@ -154,8 +154,7 @@ function buildGeminiInstructions(prefs: Preferences | null) {
     prefs?.personalityPrompt ? `Custom personality overlay: ${prefs.personalityPrompt}` : '',
     remoteConfigPromptBlock(),
     buildTurnContextBlock(prefs),
-  ].filter(Boolean).join('
-');
+  ].filter(Boolean).join('\n');
 }
 
 

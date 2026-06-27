@@ -55,7 +55,7 @@ export async function voiceCacheDir() {
   const fs = await fsModule();
   const root = fs?.cacheDirectory || fs?.documentDirectory;
   if (!fs || !root) return null;
-  const dir = `${root.replace(//$/, '')}/aga-voice-cache/`;
+  const dir = `${root.replace(/\/$/, '')}/aga-voice-cache/`;
   try { await fs.makeDirectoryAsync?.(dir, { intermediates: true }); } catch { /* directory may exist */ }
   return dir;
 }

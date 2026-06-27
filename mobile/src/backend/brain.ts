@@ -15,11 +15,9 @@ function env(name: string) {
 function buildPrompt(input: BrainInput) {
   const persona = getPersona(input.prefs.persona);
   const memories = input.memories.length
-    ? input.memories.map((memory) => `- ${memory.text}`).join('
-')
+    ? input.memories.map((memory) => `- ${memory.text}`).join('\n')
     : 'none';
-  const history = input.history.slice(-12).map((message) => `${message.role}: ${message.content}`).join('
-');
+  const history = input.history.slice(-12).map((message) => `${message.role}: ${message.content}`).join('\n');
   return `${persona.systemPrompt}
 
 Known memories:
@@ -48,8 +46,7 @@ function extractOpenAIText(data: any) {
   const text = data?.output
     ?.flatMap((item: any) => item?.content ?? [])
     ?.map((content: any) => content?.text ?? content?.transcript ?? '')
-    ?.join('
-')
+    ?.join('\n')
     ?.trim();
   return text || '';
 }
@@ -87,8 +84,7 @@ async function askGemini(input: BrainInput) {
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data?.error?.message || 'Gemini request failed.');
-  return data?.candidates?.[0]?.content?.parts?.map((part: any) => part?.text ?? '').join('
-').trim() || fallbackReply(input.text);
+  return data?.candidates?.[0]?.content?.parts?.map((part: any) => part?.text ?? '').join('\n').trim() || fallbackReply(input.text);
 }
 
 export async function askBrain(input: BrainInput) {

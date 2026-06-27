@@ -603,6 +603,10 @@ ${hint.detail}` : ''}`,
 
   private async createSelectedVoiceSession(): Promise<VoiceTransport> {
     const engine = selectedEngine();
+    if (engine === 'elevenlabs_agent') {
+      const mod = await import('../elevenlabs/ElevenLabsAgentSession');
+      return new mod.ElevenLabsAgentSession({ onTurnDone: () => this.armIdleTimer() } as any);
+    }
     if (engine === 'gemini') {
       const mod = await import('../gemini/GeminiLiveSession');
       return new mod.GeminiLiveSession({ onTurnDone: () => this.armIdleTimer() } as any);

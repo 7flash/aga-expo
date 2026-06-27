@@ -38,10 +38,10 @@ export function extractYouTubeVideoId(raw: string): string | null {
   const direct = value.match(/^[a-zA-Z0-9_-]{11}$/)?.[0];
   if (direct) return safeYouTubeVideoId(direct);
   const patterns = [
-    /(?:youtube.com/watch?v=)([a-zA-Z0-9_-]{11})/i,
-    /(?:youtu.be/)([a-zA-Z0-9_-]{11})/i,
-    /(?:youtube.com/embed/)([a-zA-Z0-9_-]{11})/i,
-    /(?:youtube.com/shorts/)([a-zA-Z0-9_-]{11})/i,
+    /youtube\.com\/watch\?(?:.*&)?v=([a-zA-Z0-9_-]{11})/i,
+    /youtu\.be\/([a-zA-Z0-9_-]{11})/i,
+    /youtube\.com\/embed\/([a-zA-Z0-9_-]{11})/i,
+    /youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/i,
   ];
   for (const pattern of patterns) {
     const id = value.match(pattern)?.[1];
@@ -186,7 +186,7 @@ function remoteBackendConfig() {
   const token =
     env('EXPO_PUBLIC_AGA_YOUTUBE_BACKEND_TOKEN') ||
     env('EXPO_PUBLIC_AGA_REMOTE_BACKEND_TOKEN');
-  return { base: base.replace(//$/, ''), token };
+  return { base: base.replace(/\/$/, ''), token };
 }
 
 async function searchRemoteYouTube(query: string): Promise<YouTubeResult | null> {

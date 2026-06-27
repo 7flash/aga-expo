@@ -246,8 +246,7 @@ function realtimeSessionConfig(prefs: Preferences | null, forUpdate = false) {
     'Hot-mic policy: in wake-word mode, unless AGA has just asked a question or a choice menu is visible, only respond to user speech that begins with “AGA”, “Hey AGA”, “OK AGA”, or “Angel”. Ignore background laughter, side conversations, music lyrics, and room noise silently.',
     'If background music is playing, keep listening with echo cancellation and speak over it briefly. Do not stop music unless the user explicitly asks.',
     'If the user says be less sensitive, change listening sensitivity, stop interrupting, or listen hands-free, call show_settings_menu with category listening.',
-  ].filter(Boolean).join('
-');
+  ].filter(Boolean).join('\n');
 
   const audio: Record<string, unknown> = {};
   const transcription = inputTranscriptionConfig(prefs);

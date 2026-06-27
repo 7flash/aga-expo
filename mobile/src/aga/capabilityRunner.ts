@@ -378,9 +378,7 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
           skill.instructions,
           goal ? `User goal/theme for this run: ${String(goal)}.` : '',
           'Run this as a voice-only skill. Speak one short segment or question at a time, then wait.',
-        ].filter(Boolean).join('
-
-'),
+        ].filter(Boolean).join('\n\n'),
         targetLanguage: skill.targetLanguage ?? null,
         theme: goal ? String(goal) : skill.theme ?? null,
         iconUrl: skill.iconUrl ?? null,
@@ -441,9 +439,7 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
         goal ? `User goal/theme for this run: ${String(goal)}.` : '',
         durationMinutes ? `Target duration: about ${Number(durationMinutes)} minutes.` : '',
         profilePromptBlock(await getUserProfile()),
-      ].filter(Boolean).join('
-
-');
+      ].filter(Boolean).join('\n\n');
       const activeSession = {
         kind: 'remote' as SessionKind,
         label: preset.label,

@@ -1,7 +1,7 @@
 export type AgaWakeEngineKind = 'sherpa' | 'sherpa_wasm' | 'sherpa_native' | 'porcupine' | 'dev' | 'disabled';
 export type AgaShortTtsProvider = 'elevenlabs' | 'openai' | 'system' | 'silent';
 export type AgaLiveSessionPolicy = 'never' | 'explicit_only' | 'casual_by_default' | 'most_requests' | 'always';
-export type AgaLiveEngine = 'gemini' | 'openai' | 'local';
+export type AgaLiveEngine = 'gemini' | 'elevenlabs_agent' | 'openai' | 'local';
 export type AgaDisplayMode = 'true_hologram' | 'tactile_relic' | 'tactile_aga' | 'hologram' | 'zen' | 'debug';
 
 function rawEnv(name: string, fallback = '') {
@@ -53,7 +53,11 @@ function browserWakeEngine(wake: AgaWakeEngineKind) {
 }
 
 function liveEngine() {
-  return oneOf<AgaLiveEngine>(rawEnv('EXPO_PUBLIC_AGA_ENGINE', 'gemini'), ['gemini', 'openai', 'local'], 'gemini');
+  return oneOf<AgaLiveEngine>(
+    rawEnv('EXPO_PUBLIC_AGA_ENGINE', 'elevenlabs_agent'),
+    ['gemini', 'elevenlabs_agent', 'openai', 'local'],
+    'elevenlabs_agent',
+  );
 }
 
 const selectedWakeEngine = wakeEngine();
@@ -109,6 +113,18 @@ export const AGA_CONFIG = Object.freeze({
     elevenLabsApiKeyPresent: Boolean(rawEnv('EXPO_PUBLIC_ELEVENLABS_API_KEY', '')),
     openAiApiKeyPresent: Boolean(rawEnv('EXPO_PUBLIC_OPENAI_API_KEY', '')),
   }),
+  elevenLabsAgent: Object.freeze({
+    agentId: rawEnv('EXPO_PUBLIC_ELEVENLABS_AGENT_ID', ''),
+    signedUrlEndpoint: rawEnv('EXPO_PUBLIC_ELEVENLABS_AGENT_SIGNED_URL_ENDPOINT', rawEnv('EXPO_PUBLIC_AGA_ELEVENLABS_AGENT_SIGNED_URL_ENDPOINT', '')),
+    environment: rawEnv('EXPO_PUBLIC_ELEVENLABS_AGENT_ENVIRONMENT', 'production'),
+    branchId: rawEnv('EXPO_PUBLIC_ELEVENLABS_AGENT_BRANCH_ID', ''),
+    language: rawEnv('EXPO_PUBLIC_ELEVENLABS_AGENT_LANGUAGE', ''),
+    firstMessage: rawEnv('EXPO_PUBLIC_ELEVENLABS_AGENT_FIRST_MESSAGE', ''),
+    allowPromptOverride: flag('EXPO_PUBLIC_ELEVENLABS_AGENT_PROMPT_OVERRIDE', false),
+    websocketAudio: flag('EXPO_PUBLIC_ELEVENLABS_AGENT_WEBSOCKET_AUDIO', true),
+    inputSampleRate: numberEnv('EXPO_PUBLIC_ELEVENLABS_AGENT_INPUT_SAMPLE_RATE', 16000),
+    outputSampleRate: numberEnv('EXPO_PUBLIC_ELEVENLABS_AGENT_OUTPUT_SAMPLE_RATE', 16000),
+  }),
   appliance: Object.freeze({
     requireNativeAec: flag('EXPO_PUBLIC_AGA_REQUIRE_NATIVE_AEC', true),
     wakeForegroundService: flag('EXPO_PUBLIC_AGA_WAKE_FOREGROUND_SERVICE', true),
@@ -134,8 +150,10 @@ export function summarizeAgaConfig(config = AGA_CONFIG) {
     `browserWake=${config.wake.browserEngine}`,
     `keywords=${config.wake.sherpaKeywords.join('/')}`,
     `live=${config.brain.liveEngine}:${config.brain.liveSessionPolicy}`,
+    config.brain.liveEngine === 'elevenlabs_agent' ? `agent=${config.elevenLabsAgent.agentId ? 'configured' : config.elevenLabsAgent.signedUrlEndpoint ? 'signed-url' : 'missing'}` : null,
     `tts=${config.tts.provider}`,
     `display=${config.display.mode}`,
     `directKeys=${config.security.allowDirectKeys ? 'allowed' : 'blocked'}`,
-  ].join(' ');
+  ].filter(Boolean).join(' ');
 }
+

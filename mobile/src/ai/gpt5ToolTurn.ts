@@ -35,8 +35,7 @@ function toolDefs() {
 function systemText(opts: Gpt5ToolTurnOptions) {
   const memoryBlock = opts.memories?.length
     ? `Relevant long-term context:
-${opts.memories.map((m) => `- ${m}`).join('
-')}`
+${opts.memories.map((m) => `- ${m}`).join('\n')}`
     : 'No relevant long-term context was retrieved.';
   return [
     'You are AGA, the Artificial Guardian Angel running on a no-touch Android appliance.',
@@ -46,9 +45,7 @@ ${opts.memories.map((m) => `- ${m}`).join('
     'Use tools for time, weather, reminders, memory, media, settings, guided sessions, and profile updates.',
     buildTurnContextBlock(opts.prefs),
     memoryBlock,
-  ].join('
-
-');
+  ].join('\n\n');
 }
 
 function extractText(data: any): string {

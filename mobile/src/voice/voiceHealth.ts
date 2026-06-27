@@ -14,6 +14,8 @@ export type VoiceCapability = {
   openAiTtsConfigured: boolean;
   liveEngine: string;
   liveSessionPolicy: string;
+  elevenLabsAgentConfigured: boolean;
+  elevenLabsAgentSignedUrl: boolean;
   nativeSpeechFallback: boolean;
   directPublicKeysAllowed: boolean;
 };
@@ -42,6 +44,8 @@ export function getVoiceCapability(): VoiceCapability {
     openAiTtsConfigured: config.tts.openAiApiKeyPresent,
     liveEngine: config.brain.liveEngine,
     liveSessionPolicy: config.brain.liveSessionPolicy,
+    elevenLabsAgentConfigured: !!(config.elevenLabsAgent.agentId || config.elevenLabsAgent.signedUrlEndpoint),
+    elevenLabsAgentSignedUrl: !!config.elevenLabsAgent.signedUrlEndpoint,
     nativeSpeechFallback: !/sherpa/i.test(config.wake.engine),
     directPublicKeysAllowed: config.security.allowDirectKeys,
   };
@@ -50,5 +54,6 @@ export function getVoiceCapability(): VoiceCapability {
 export function summarizeVoiceCapability(cap = getVoiceCapability()) {
   const wake = cap.sherpaConfigured ? `Sherpa ${cap.sherpaModelDir} [${cap.wakeKeywords.join(', ')}]` : `Wake ${cap.wakeEngine}`;
   const tts = cap.elevenLabsConfigured ? (cap.ttsGatewayConfigured ? 'ElevenLabs gateway ready' : 'ElevenLabs direct ready') : cap.openAiTtsConfigured ? 'OpenAI TTS ready' : 'system TTS fallback only';
-  return `${wake}; ${tts}; live ${cap.liveEngine}/${cap.liveSessionPolicy}.`;
+  const agent = cap.liveEngine === 'elevenlabs_agent' ? `; ElevenLabs Agent ${cap.elevenLabsAgentConfigured ? (cap.elevenLabsAgentSignedUrl ? 'signed-url' : 'public-id') : 'missing'}` : '';
+  return `${wake}; ${tts}; live ${cap.liveEngine}/${cap.liveSessionPolicy}${agent}.`;
 }

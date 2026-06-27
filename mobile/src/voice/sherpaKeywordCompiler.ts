@@ -43,8 +43,7 @@ export function compileSherpaKeywords(keywords: KeywordPhrase[]): CompiledSherpa
     lines.push(sherpaKeywordLine(clean, keyword));
   }
 
-  const keywordText = lines.join('
-');
+  const keywordText = lines.join('\n');
   return {
     phrases,
     entries: keywords,
