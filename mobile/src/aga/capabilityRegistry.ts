@@ -201,6 +201,18 @@ export const BUILTIN_CAPABILITY_TOOLS: readonly RealtimeToolDefinition[] = [
   },
   {
     type: 'function',
+    name: 'accept_routine',
+    description: 'Accept the most recent proposed learned routine after the user says make that a routine or similar voice consent.',
+    parameters: schema({ id: { type: 'number', description: 'Optional routine id. Omit to accept the latest proposed routine.' } }),
+  },
+  {
+    type: 'function',
+    name: 'dismiss_routine',
+    description: 'Dismiss the most recent proposed learned routine after the user rejects it by voice.',
+    parameters: schema({ id: { type: 'number', description: 'Optional routine id. Omit to dismiss the latest proposed routine.' } }),
+  },
+  {
+    type: 'function',
     name: 'start_guided_session',
     description: 'Start a structured guided session such as breathing, body scan, self-hypnosis, conflict navigation, meditation, bedtime, or imagination work.',
     parameters: schema({
@@ -292,7 +304,8 @@ export function buildTurnContextBlock(prefs: Preferences | null) {
   } else {
     parts.push('No home weather coordinates are configured; get_weather may request browser/device geolocation when available.');
   }
-  return parts.join('\n');
+  return parts.join('
+');
 }
 
 export async function runGetTimeCapability(args: JsonObject = {}) {

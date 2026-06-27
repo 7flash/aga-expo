@@ -14,24 +14,28 @@ export function getRuntimeContractIssues(): RuntimeContractIssue[] {
   const issues: RuntimeContractIssue[] = [];
   const f = AGA_ARCHITECTURE_FLAGS;
 
-  if (f.wakeEngine !== 'porcupine') {
+  if (f.wakeEngine === 'porcupine') {
     issues.push({
-      severity: f.wakeEngine === 'android_speech_fallback' ? 'warning' : 'error',
-      code: 'wake.not_porcupine',
-      message: `Wake engine is ${f.wakeEngine}. Appliance mode expects Porcupine keyword spotting, not continuous speech recognition.`,
+      severity: 'warning',
+      code: 'wake.legacy_porcupine',
+      message: 'Porcupine is configured as a fallback. Production appliance mode should use Sherpa KWS for aga/stop/pause.',
     });
   }
 
-  if (f.shortTtsProvider === 'elevenlabs' && !has('EXPO_PUBLIC_ELEVENLABS_API_KEY') && !has('EXPO_PUBLIC_AGA_TTS_GATEWAY_URL')) {
+  if (f.wakeEngine === 'disabled') {
+    issues.push({ severity: 'error', code: 'wake.disabled', message: 'Wake engine is disabled. A no-touch appliance needs Sherpa KWS.' });
+  }
+
+  if (f.shortTtsProvider === 'elevenlabs' && !has('EXPO_PUBLIC_AGA_TTS_GATEWAY_URL') && !has('EXPO_PUBLIC_ELEVENLABS_API_KEY')) {
     issues.push({ severity: 'error', code: 'tts.elevenlabs_missing', message: 'ElevenLabs is selected but no API key or TTS gateway URL is configured.' });
   }
 
-  if (f.shortTtsProvider === 'openai' && !has('EXPO_PUBLIC_OPENAI_API_KEY') && !has('EXPO_PUBLIC_AGA_TTS_GATEWAY_URL')) {
+  if (f.shortTtsProvider === 'openai' && !has('EXPO_PUBLIC_AGA_TTS_GATEWAY_URL') && !has('EXPO_PUBLIC_OPENAI_API_KEY')) {
     issues.push({ severity: 'error', code: 'tts.openai_missing', message: 'OpenAI TTS is selected but no API key or TTS gateway URL is configured.' });
   }
 
-  if (f.displayMode !== 'tactile_AGA') {
-    issues.push({ severity: 'warning', code: 'display.not_tactile_AGA', message: `Display mode is ${f.displayMode}. The current product direction is tactile_AGA.` });
+  if (!['true_hologram', 'tactile_relic', 'tactile_aga'].includes(f.displayMode)) {
+    issues.push({ severity: 'warning', code: 'display.not_holographic', message: `Display mode is ${f.displayMode}. Behind-glass builds should use true_hologram or tactile_relic.` });
   }
 
   if (!f.pureDisplay) {

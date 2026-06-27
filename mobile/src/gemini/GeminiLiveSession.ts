@@ -108,7 +108,7 @@ function isWakeOnlyPrompt(text: string) {
 function cleanAssistantText(text: string) {
   return String(text || '')
     .replace(/\s+/g, ' ')
-    .replace(/\[(?:sound|music|pause|breath).*?\]/gi, '')
+    .replace(/[(?:sound|music|pause|breath).*?]/gi, '')
     .trim();
 }
 
@@ -153,7 +153,8 @@ function buildGeminiInstructions(prefs: Preferences | null) {
     prefs?.personalityPrompt ? `Custom personality overlay: ${prefs.personalityPrompt}` : '',
     remoteConfigPromptBlock(),
     buildTurnContextBlock(prefs),
-  ].filter(Boolean).join('\n');
+  ].filter(Boolean).join('
+');
 }
 
 
@@ -622,8 +623,8 @@ export class GeminiLiveSession {
       const inline = part?.inlineData ?? part?.inline_data;
       const mime = String(inline?.mimeType ?? inline?.mime_type ?? '');
       const data = inline?.data;
-      if (data && /audio\/pcm/i.test(mime)) {
-        const match = mime.match(/rate=(\d+)/i);
+      if (data && /audio/pcm/i.test(mime)) {
+        const match = mime.match(/rate=(d+)/i);
         return { data: String(data), rate: match ? Number(match[1]) || 24000 : 24000 };
       }
     }

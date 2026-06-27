@@ -17,6 +17,7 @@ type Props = {
   lowPower?: boolean;
   wear?: number;
   interactionPulse?: number;
+  trueHologram?: boolean;
 };
 
 function modeNumber(mode: AgaMode) {
@@ -77,27 +78,31 @@ export const TactileRelicAngel = memo(function TactileRelicAngel({
   lowPower,
   wear = 0.22,
   interactionPulse = 0,
+  trueHologram = false,
 }: Props) {
   const GLView = useMemo(() => getGlView(), []);
   const audioRef = useRef(audioLevel);
   const modeRef = useRef(modeNumber(mode));
-  const wearRef = useRef(wear);
+  const wearRef = useRef(trueHologram ? 0 : wear);
   const interactRef = useRef(interactionPulse);
+  const trueHologramRef = useRef(trueHologram ? 1 : 0);
   const alive = useRef(true);
   const scan = useRef(new Animated.Value(0)).current;
 
   useEffect(() => { audioRef.current = Math.max(0, Math.min(1, Number(audioLevel) || 0)); }, [audioLevel]);
   useEffect(() => { modeRef.current = modeNumber(mode); }, [mode]);
-  useEffect(() => { wearRef.current = Math.max(0, Math.min(1, Number(wear) || 0)); }, [wear]);
+  useEffect(() => { wearRef.current = trueHologram ? 0 : Math.max(0, Math.min(1, Number(wear) || 0)); }, [wear, trueHologram]);
   useEffect(() => { interactRef.current = Math.max(0, Math.min(1, Number(interactionPulse) || 0)); }, [interactionPulse]);
+  useEffect(() => { trueHologramRef.current = trueHologram ? 1 : 0; }, [trueHologram]);
   useEffect(() => () => { alive.current = false; }, []);
   useEffect(() => {
-    const loop = Animated.loop(Animated.timing(scan, { toValue: 1, duration: 4200, easing: Easing.linear, useNativeDriver: true }));
+    if (mode === 'sleeping') return undefined;
+    const loop = Animated.loop(Animated.timing(scan, { toValue: 1, duration: trueHologram ? 6800 : 4200, easing: Easing.linear, useNativeDriver: true }));
     loop.start();
     return () => loop.stop();
-  }, [scan]);
+  }, [scan, mode, trueHologram]);
 
-  const stage = size * (lowPower ? 1.18 : 1.55);
+  const stage = size * (trueHologram ? 1.28 : lowPower ? 1.18 : 1.55);
   if (!GLView) return <AgaAvatarZen mode={mode} audioLevel={audioLevel} compact={compact} size={size} />;
 
   const onContextCreate = (gl: any) => {
@@ -119,6 +124,7 @@ export const TactileRelicAngel = memo(function TactileRelicAngel({
       const uAccent = gl.getUniformLocation(program, 'uAccent');
       const uWear = gl.getUniformLocation(program, 'uWear');
       const uInteraction = gl.getUniformLocation(program, 'uInteraction');
+      const uTrueHologram = gl.getUniformLocation(program, 'uTrueHologram');
       const started = Date.now();
       let smoothAudio = 0;
       let smoothInteraction = 0;
@@ -141,10 +147,14 @@ export const TactileRelicAngel = memo(function TactileRelicAngel({
         gl.uniform3f(uAccent, 0.30, 0.94, 1.0);
         gl.uniform1f(uWear, wearRef.current);
         gl.uniform1f(uInteraction, smoothInteraction);
+        gl.uniform1f(uTrueHologram, trueHologramRef.current);
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
         gl.flush();
         gl.endFrameEXP?.();
-        frame = requestAnimationFrame(draw);
+        const modeNow = modeRef.current;
+        if (modeNow <= 0.1) return;
+        const targetFps = lowPower || modeNow < 1.5 ? 12 : modeNow > 3.5 ? 60 : 24;
+        setTimeout(() => { frame = requestAnimationFrame(draw); }, 1000 / targetFps);
       };
       draw();
     } catch (error) {
@@ -158,16 +168,17 @@ export const TactileRelicAngel = memo(function TactileRelicAngel({
   return (
     <View style={[styles.root, NO_POINTER_EVENTS, { width: stage, height: stage }, mirror && styles.mirror]}>
       <GLView style={StyleSheet.absoluteFill} onContextCreate={onContextCreate} />
-      <Animated.View style={[styles.scanPass, { transform: [{ translateY: scanY }] }]} />
-      <View style={styles.horizontalScanlines} />
-      <View style={styles.chromaCyan} />
-      <View style={styles.chromaMagenta} />
+      {!trueHologram && <Animated.View style={[styles.scanPass, { transform: [{ translateY: scanY }] }]} />}
+      <View style={[styles.horizontalScanlines, trueHologram && styles.sparseScanlines]} />
+      {!trueHologram && <View style={styles.chromaCyan} />}
+      {!trueHologram && <View style={styles.chromaMagenta} />}
     </View>
   );
 });
 
 const styles = StyleSheet.create({
   root: { backgroundColor: 'transparent', overflow: 'hidden' },
+  sparseScanlines: { opacity: 0.035, borderWidth: 0 },
   horizontalScanlines: {
     ...StyleSheet.absoluteFillObject,
     opacity: 0.065,

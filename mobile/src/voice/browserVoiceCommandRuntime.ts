@@ -12,7 +12,7 @@ function clean(text: string) {
 
 function stripWakeWords(text: string) {
   return clean(text)
-    .replace(/^(aga|hey aga|okay aga|ok aga|guardian|angel|hey|hi|hello)[,.\s]+/i, '')
+    .replace(/^(aga|hey aga|okay aga|ok aga|guardian|angel|hey|hi|hello)[,.s]+/i, '')
     .trim();
 }
 

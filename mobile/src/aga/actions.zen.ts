@@ -1,2 +1,2 @@
-export { hasWakeWord, parseVoiceCommand } from './actions';
-export type { AgaAction, AgaMode, AgaTurn, ParsedCommand } from './actions';
+export { hasWakeWord, parseVoiceCommand, sanitizeAction, sanitizeTurn } from './actions';
+export type { AgaAction, AgaIntent, AgaMode, AgaTurn, ParsedCommand } from './actions';

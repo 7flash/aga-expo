@@ -62,7 +62,7 @@ export const AGA_TOOLS: AgaToolSchema[] = [
   },
   {
     name: 'save_memory',
-    description: "Save a useful, non-sensitive memory fact at the user\'s request.",
+    description: "Save a useful, non-sensitive memory fact at the user's request.",
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -106,7 +106,7 @@ export const AGA_TOOLS: AgaToolSchema[] = [
   },
   {
     name: 'set_persona',
-    description: "Change AGA\'s voice/persona mode.",
+    description: "Change AGA's voice/persona mode.",
     parameters: {
       type: 'object',
       additionalProperties: false,

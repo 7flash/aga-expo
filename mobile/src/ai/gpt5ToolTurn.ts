@@ -34,17 +34,21 @@ function toolDefs() {
 
 function systemText(opts: Gpt5ToolTurnOptions) {
   const memoryBlock = opts.memories?.length
-    ? `Relevant long-term context:\n${opts.memories.map((m) => `- ${m}`).join('\n')}`
+    ? `Relevant long-term context:
+${opts.memories.map((m) => `- ${m}`).join('
+')}`
     : 'No relevant long-term context was retrieved.';
   return [
     'You are AGA, the Artificial Guardian Angel running on a no-touch Android appliance.',
     'Default path is short OpenAI STT, GPT-5 tool reasoning, then expressive ElevenLabs/OpenAI TTS.',
-    'Do not start a live audio session unless the user explicitly asks for practice, live, hands-free, or continuous conversation mode.',
+    'The router, not this prompt, decides whether this request is a short GPT-5 tool turn or a Gemini/OpenAI live session.',
     'Keep replies short, warm, and voice-first. Never mention buttons, tapping, typing, or touch controls.',
     'Use tools for time, weather, reminders, memory, media, settings, guided sessions, and profile updates.',
     buildTurnContextBlock(opts.prefs),
     memoryBlock,
-  ].join('\n\n');
+  ].join('
+
+');
 }
 
 function extractText(data: any): string {

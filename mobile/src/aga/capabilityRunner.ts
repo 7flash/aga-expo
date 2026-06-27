@@ -12,7 +12,9 @@ import {
   addEpisodicReflection,
   addMemory,
   addReminder,
+  acceptRoutine,
   clearReminders,
+  dismissRoutine,
   getForgetConfirmation,
   listPendingReminders,
   loadPreferences,
@@ -376,7 +378,9 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
           skill.instructions,
           goal ? `User goal/theme for this run: ${String(goal)}.` : '',
           'Run this as a voice-only skill. Speak one short segment or question at a time, then wait.',
-        ].filter(Boolean).join('\n\n'),
+        ].filter(Boolean).join('
+
+'),
         targetLanguage: skill.targetLanguage ?? null,
         theme: goal ? String(goal) : skill.theme ?? null,
         iconUrl: skill.iconUrl ?? null,
@@ -416,6 +420,19 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
       return `I noticed a possible routine: ${title}. Say AGA make that a routine if you want me to remember it.`;
     },
 
+    accept_routine: async ({ id }) => {
+      const routine = await acceptRoutine(typeof id === 'number' ? id : null);
+      if (!routine) return 'I do not have a proposed routine to accept yet.';
+      await logEvent('routine.accepted', `${(routine as any).id}: ${(routine as any).title}`);
+      return `Routine saved: ${(routine as any).title}.`;
+    },
+    dismiss_routine: async ({ id }) => {
+      const routine = await dismissRoutine(typeof id === 'number' ? id : null);
+      if (!routine) return 'I do not have a proposed routine to dismiss.';
+      await logEvent('routine.dismissed', `${(routine as any).id}: ${(routine as any).title}`);
+      return 'Okay, I dismissed that routine.';
+    },
+
     start_guided_session: async ({ kind, goal, durationMinutes }) => {
       const preset = findGuidedSession(kind) ?? findGuidedSession(goal) ?? findGuidedSession('breathing');
       if (!preset) return 'I could not find that guided session.';
@@ -424,7 +441,9 @@ export function createCapabilityRunner(ctx: CapabilityRunnerContext) {
         goal ? `User goal/theme for this run: ${String(goal)}.` : '',
         durationMinutes ? `Target duration: about ${Number(durationMinutes)} minutes.` : '',
         profilePromptBlock(await getUserProfile()),
-      ].filter(Boolean).join('\n\n');
+      ].filter(Boolean).join('
+
+');
       const activeSession = {
         kind: 'remote' as SessionKind,
         label: preset.label,

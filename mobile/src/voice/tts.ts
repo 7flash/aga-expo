@@ -1,5 +1,6 @@
 import { Platform } from 'react-native';
 import { measureAsync, measureMark } from '../observability/measure';
+import { speakWithElevenLabs as speakWithCachedElevenLabs, stopElevenLabsSpeech } from './elevenLabsTts';
 
 async function agaV13TryBrowserAudioTts(text: string, options?: any) {
   // aga:v13-browser-audio-tts
@@ -94,6 +95,7 @@ async function responseArrayBufferToBase64(response: Response) {
 }
 
 export async function stopTts() {
+  await stopElevenLabsSpeech().catch(() => undefined);
   const root: any = globalThis as any;
   try { root?.speechSynthesis?.cancel?.(); } catch { /* ignore */ }
   try {
@@ -103,7 +105,7 @@ export async function stopTts() {
   } catch { /* ignore */ }
 }
 
-async function speakWithElevenLabs(text: string, opts: SpeakOptions) {
+async function speakWithDirectElevenLabs(text: string, opts: SpeakOptions) {
   const apiKey = env('EXPO_PUBLIC_ELEVENLABS_API_KEY') || env('ELEVENLABS_API_KEY');
   const voiceId = voiceIdForEmotion(opts.emotion || 'warm');
   if (!apiKey) throw new Error('Missing EXPO_PUBLIC_ELEVENLABS_API_KEY.');
@@ -198,7 +200,10 @@ export async function speakText(text: string, opts: SpeakOptions = {}) {
     let lastError = '';
     for (const candidate of order) {
       try {
-        if (candidate === 'elevenlabs') await speakWithElevenLabs(clean, opts);
+        if (candidate === 'elevenlabs') {
+          const ok = await speakWithCachedElevenLabs(clean, { emotion: opts.emotion || 'warm', cacheKey: opts.cacheKey, onError: opts.onError });
+          if (!ok) await speakWithDirectElevenLabs(clean, opts);
+        }
         else if (candidate === 'openai') await speakWithOpenAiTts(clean, opts);
         else if (candidate === 'web-speech') await speakWithWebSpeech(clean, opts);
         else if (candidate === 'expo-speech') await speakWithExpoSpeech(clean, opts);

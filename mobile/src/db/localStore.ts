@@ -316,10 +316,10 @@ export async function initializeLocalStore() {
   return { sqliteAvailable: ok, fallback: ok ? 'sqlite-relational' : 'memory-fallback' };
 }
 
-export async function loadPreferences(): Promise<Preferences> {
+export async function loadPreferences(options: { forceReload?: boolean } = {}): Promise<Preferences> {
   await ensureReady();
   if (!sqliteAvailable) return { ...memory.preferences };
-  currentPrefs = await readPreferencesFromSqlite();
+  if (options.forceReload) currentPrefs = await readPreferencesFromSqlite();
   return { ...currentPrefs };
 }
 

@@ -83,8 +83,8 @@ const OPEN_WORDS = [
 function clean(raw: string) {
   return normalizeSpeech(String(raw ?? ''))
     .toLowerCase()
-    .replace(/[\u2018\u2019]/g, "'")
-    .replace(/[^a-z0-9а-яё'\s-]/gi, ' ')
+    .replace(/[‘’]/g, "'")
+    .replace(/[^a-z0-9а-яё's-]/gi, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }

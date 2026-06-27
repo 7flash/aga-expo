@@ -190,7 +190,7 @@ function normalizeKeywordResult(result: any, manifest: WakeAliasManifest | null)
 }
 
 function looksRawKeywordFile(text: string) {
-  return /\b(hey|hi|hello|yo|ok|okay|yes|go|start|wake|listen|aga|guardian|angel|stop|cancel|abort|quiet|pause|wait|hold)\b\s+@/i.test(text);
+  return /\b(hey|hi|hello|yo|ok|okay|yes|go|start|wake|listen|aga|guardian|angel|stop|cancel|abort|quiet|pause|wait|hold)\bs+@/i.test(text);
 }
 
 function createConfig(paths: typeof PRELOADED_PATH_SETS[number], expectedSampleRate: number, keywordsText: string) {

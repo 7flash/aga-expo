@@ -16,7 +16,7 @@ export function normalizeSpeech(text: string) {
     .replace(/[“”]/g, '"')
     .replace(/[‘’]/g, "'")
     .replace(/[.,!?;:]+/g, ' ')
-    .replace(/[\u200b-\u200d\ufeff]/g, '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
 }

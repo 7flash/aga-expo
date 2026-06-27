@@ -41,8 +41,8 @@ const config: ExpoConfig = {
   extra: {
     assistantWebUrl: process.env.EXPO_PUBLIC_ASSISTANT_WEB_URL ?? 'http://localhost:3000',
     wakeWord: process.env.EXPO_PUBLIC_AGA_WAKE_WORD ?? 'aga',
-    wakeEngine: process.env.EXPO_PUBLIC_AGA_WAKE_ENGINE ?? 'porcupine',
-    displayMode: process.env.EXPO_PUBLIC_AGA_DISPLAY_MODE ?? 'tactile_relic',
+    wakeEngine: process.env.EXPO_PUBLIC_AGA_KEYWORD_ENGINE ?? process.env.EXPO_PUBLIC_AGA_WAKE_ENGINE ?? 'sherpa',
+    displayMode: process.env.EXPO_PUBLIC_AGA_DISPLAY_MODE ?? 'true_hologram',
     eas: {
       projectId: 'b20cd053-234f-474b-8e23-22fa961a6d59',
     },

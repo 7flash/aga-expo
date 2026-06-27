@@ -6,6 +6,8 @@ import { createPostWakeCommandEngine, postWakeWindowMs } from '../voice/postWake
 import { speakShortReply, stopSpeaking } from '../voice/speechOut';
 import { enterTier3DuplexAudio, exitTier3DuplexAudio, ensureWakeForegroundService, releaseWakeForegroundService, tier3AudioDiagnostics } from '../voice/tier3DuplexAudio';
 import { classifyTurnForVoicePath } from '../voice/liveEscalation';
+import { canonicalWakePhrase } from '../voice/wakePhraseAliases';
+import { localControlIntent } from './localControls';
 import { answerShortTextWithGpt5, ShortReasoningAudioTurn } from './shortReasoningTurn';
 import { DeterministicGuidedRunner } from '../sessions/deterministicGuidedRunner';
 import { guidedKindFromText } from '../sessions/guidedPhaseScripts';
@@ -93,6 +95,7 @@ function wakeRepairHint(message: string) {
 export class WakeRealtimeController {
   private listeners = new Set<Listener>();
   private wakeEngine: WakeEngine | null = null;
+  private wakeUnsubscribe: (() => void) | null = null;
   private realtime: VoiceSessionLike | null = null;
   private realtimeUnsubscribe: (() => void) | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -232,12 +235,13 @@ export class WakeRealtimeController {
 
   private async startWakeScout(reason: string) {
     if (!this.started || this.wakeEngine) return;
-    const engine = createWakeEngine({ onEvent: (event) => this.onWakeEvent(event) });
+    const engine = createWakeEngine();
     this.wakeEngine = engine;
+    this.wakeUnsubscribe = engine.subscribe((event) => this.onWakeEvent(event));
     try {
       await ensureWakeForegroundService(reason).catch(() => undefined);
       await engine.start();
-      const wakeDiagnostics = engine.getDiagnostics?.() as any;
+      const wakeDiagnostics = (engine as any).getDiagnostics?.() as any;
       const provider = String(wakeDiagnostics?.provider || (wakeDiagnostics?.diagnostics?.provider) || 'wake');
       this.publish({ mode: 'listening', speechStatus: `${provider} listening (${reason})`, error: null, wakeProvider: provider, voiceCapability: { ...(this.snapshot as any).voiceCapability, wakeProvider: provider, wakeDiagnostics } } as any);
       await logEvent('wake.keyword.start', reason).catch(() => undefined);
@@ -247,12 +251,15 @@ export class WakeRealtimeController {
       // rearm/startWakeScout returns early forever and it looks like AGA is
       // “not even trying.”
       if (this.wakeEngine === engine) this.wakeEngine = null;
+      this.wakeUnsubscribe?.();
+      this.wakeUnsubscribe = null;
       await Promise.resolve(engine.stop?.()).catch(() => undefined);
       const hint = wakeRepairHint(message);
       this.publish({
         mode: 'recovering',
         speechStatus: hint.short,
-        error: `${message}${hint.detail ? `\n${hint.detail}` : ''}`,
+        error: `${message}${hint.detail ? `
+${hint.detail}` : ''}`,
         heardText: '',
         wakeProvider: hint.provider,
         voiceCapability: { ...(this.snapshot as any).voiceCapability, wakeStartError: message, wakeRepair: hint },
@@ -264,6 +271,8 @@ export class WakeRealtimeController {
   private async stopWakeScout(reason: string) {
     const engine = this.wakeEngine;
     this.wakeEngine = null;
+    this.wakeUnsubscribe?.();
+    this.wakeUnsubscribe = null;
     if (engine) await Promise.resolve(engine.stop()).catch(() => undefined);
     await releaseWakeForegroundService(reason).catch(() => undefined);
     await logEvent('wake.keyword.stop', reason).catch(() => undefined);
@@ -271,21 +280,25 @@ export class WakeRealtimeController {
 
   private onWakeEvent(event: WakeEngineEvent) {
     if (event.type === 'status') {
-      this.publish({ speechStatus: event.status } as any);
+      this.publish({ speechStatus: event.message || 'wake status', wakeProvider: event.provider } as any);
       return;
     }
     if (event.type === 'error') {
-      this.publish({ error: event.message, speechStatus: 'wake error' } as any);
+      this.publish({ error: event.message, speechStatus: 'wake error', wakeProvider: event.provider } as any);
       return;
     }
-    if (event.type === 'control') {
-      this.publish({ heardText: event.command, wakeProvider: event.source } as any);
-      void this.handleKeywordControl(event.command);
+    if (event.type !== 'keyword') return;
+
+    const keyword = String(event.keyword || '').trim();
+    const canonical = canonicalWakePhrase(keyword);
+    this.publish({ heardText: `keyword detected: ${keyword || canonical}`, wakeProvider: event.provider } as any);
+
+    if (canonical === 'stop' || canonical === 'pause') {
+      void this.handleKeywordControl(canonical);
       return;
     }
-    if (event.type === 'wake') {
-      this.publish({ heardText: `keyword detected: ${event.label || 'aga'}`, interim: '', wakeProvider: event.source } as any);
-      void this.handleWake('', event.source);
+    if (canonical === 'aga') {
+      void this.handleWake('', String(event.provider || 'keyword'));
     }
   }
 
@@ -321,17 +334,21 @@ export class WakeRealtimeController {
       void speakShortReply(postWakeReply(), 'warm').catch(() => undefined);
     }
 
-    // Start buffering immediately after wake. Sherpa KWS may not emit unknown text,
-    // so waiting until "no match" would lose the user's actual utterance.
+    // Use exactly one capture path after wake. Browser/dev can use a text command
+    // window; native/appliance falls back to the buffered short-audio recorder.
+    const shouldTryTextWindow = typeof window !== 'undefined' || !!(this.snapshot as any).activeChoiceMenu?.options?.length;
+    if (shouldTryTextWindow) {
+      const commandWindowOpened = await this.openPostWakeCommandWindow(source);
+      if (commandWindowOpened) return;
+    }
+
     await this.startBufferedShortAudio(`post_wake:${source}`).catch((error) => {
       const message = error instanceof Error ? error.message : String(error || 'short buffer unavailable');
       this.publish({ error: message, speechStatus: 'short request buffer unavailable' } as any);
     });
-
-    const commandWindowOpened = await this.openPostWakeCommandWindow(source);
-    if (!commandWindowOpened) {
-      await this.finishBufferedShortAudio('no_post_wake_command_engine');
-    }
+    this.postWakeTimer = setTimeout(() => {
+      void this.finishBufferedShortAudio('short_audio_timeout');
+    }, postWakeWindowMs());
   }
 
   private async handleTurnText(text: string, source: 'wake' | 'replay' | 'command_window') {
@@ -347,6 +364,17 @@ export class WakeRealtimeController {
 
     const menuCommand = parseVoiceMenuCommand(text, activeMenu);
     if (menuCommand && await this.handleVoiceMenuCommand(menuCommand)) return;
+
+    const local = localControlIntent(text);
+    if (local) {
+      const runner = this.ensureCapabilities();
+      const response = await runner.run(local.tool, local.args || {}).catch((error: unknown) => error instanceof Error ? error.message : String(error || 'local control failed'));
+      this.publish({ speechStatus: response.slice(0, 96), heardText: text, mode: 'speaking' } as any);
+      if (local.userVisible !== false) await speakShortReply(response, 'warm').catch(() => undefined);
+      await this.refresh();
+      await this.startWakeScout('local_control_done').catch(() => undefined);
+      return;
+    }
 
     if (this.guided && await this.guided.acceptUserResponse(text).catch(() => false)) return;
     const kind = guidedKindFromText(text);
@@ -542,32 +570,26 @@ export class WakeRealtimeController {
     await this.stopWakeScout('post_wake_command');
     await this.stopPostWakeCommandWindow('replace').catch(() => undefined);
     const engine = createPostWakeCommandEngine({
-      getChoices: () => this.getActiveChoices(),
-      onStatus: (status) => this.publish({ speechStatus: status, mode: 'listening' } as any),
-      onError: (message) => this.publish({ error: message, speechStatus: 'post-wake command error' } as any),
-      onResult: (result) => {
-        if (result.type === 'control') {
-          void this.cancelShortAudioTurn('post_wake_control').finally(() => this.handleKeywordControl(result.command));
+      onEvent: (event) => {
+        if (event.type === 'status') this.publish({ speechStatus: event.message, mode: 'listening' } as any);
+        if (event.type === 'partial') this.publish({ interim: event.text, speechStatus: `hearing: ${event.text.slice(0, 54)}` } as any);
+        if (event.type === 'timeout') void this.finishBufferedShortAudio('post_wake_timeout');
+        if (event.type === 'error') this.publish({ error: event.message, speechStatus: 'post-wake command error' } as any);
+      },
+      onFinalText: (text) => {
+        const control = localControlIntent(text);
+        if (control?.tool === 'media_control' && ['stop', 'pause', 'resume'].includes(String(control.args?.command || ''))) {
+          void this.cancelShortAudioTurn('post_wake_control').finally(() => this.handleKeywordControl(String(control.args?.command) as any));
           return;
         }
-        if (result.type === 'choice' && result.choice) {
-          void this.applyChoiceText(String(result.choice.key));
-          return;
-        }
-        if (result.type === 'text') {
-          void this.handleTurnText(result.text, 'command_window');
-          return;
-        }
-        if (result.type === 'no_match') {
-          void this.finishBufferedShortAudio(result.reason);
-        }
+        void this.handleTurnText(text, 'command_window');
       },
     });
     if (!engine) return false;
     this.postWakeCommand = engine;
     try {
       await engine.start();
-      const diagnostics = engine.getDiagnostics?.();
+      const diagnostics = (engine as any).getDiagnostics?.();
       const prompt = spokenChoicePrompt((this.snapshot as any).activeChoiceMenu);
       this.publish({ mode: 'listening', speechStatus: (this.snapshot as any).activeChoiceMenu ? prompt : 'post-wake command window open', voiceCapability: { ...(this.snapshot as any).voiceCapability, postWakeCommand: diagnostics } } as any);
       this.postWakeTimer = setTimeout(() => {

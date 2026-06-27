@@ -162,7 +162,7 @@ function looksLikeShortAnswer(text: string) {
 
 function looksLikeUserPrompt(text: string) {
   const clean = String(text ?? '').trim();
-  return /[?？]\s*$/.test(clean) || /\b(which|what|where|when|who|how|choose|pick|say|tell me|which path|which option)\b/i.test(clean);
+  return /[?？]s*$/.test(clean) || /\b(which|what|where|when|who|how|choose|pick|say|tell me|which path|which option)\b/i.test(clean);
 }
 
 function realtimeTurnDetectionForUpdate(prefs: Preferences | null) {
@@ -245,7 +245,8 @@ function realtimeSessionConfig(prefs: Preferences | null, forUpdate = false) {
     'Hot-mic policy: in wake-word mode, unless AGA has just asked a question or a choice menu is visible, only respond to user speech that begins with “AGA”, “Hey AGA”, “OK AGA”, or “Angel”. Ignore background laughter, side conversations, music lyrics, and room noise silently.',
     'If background music is playing, keep listening with echo cancellation and speak over it briefly. Do not stop music unless the user explicitly asks.',
     'If the user says be less sensitive, change listening sensitivity, stop interrupting, or listen hands-free, call show_settings_menu with category listening.',
-  ].filter(Boolean).join('\n');
+  ].filter(Boolean).join('
+');
 
   const audio: Record<string, unknown> = {};
   const transcription = inputTranscriptionConfig(prefs);

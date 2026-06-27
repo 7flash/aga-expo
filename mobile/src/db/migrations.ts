@@ -112,6 +112,18 @@ export async function migrate() {
       updatedAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
 
+
+    CREATE TABLE IF NOT EXISTS subconscious_facts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind TEXT NOT NULL DEFAULT 'semantic',
+      text TEXT NOT NULL,
+      tagsJson TEXT NOT NULL DEFAULT '[]',
+      weight REAL NOT NULL DEFAULT 0.5,
+      source TEXT NOT NULL DEFAULT 'reflection',
+      createdAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updatedAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
     CREATE TABLE IF NOT EXISTS episodic_reflections (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       sessionId TEXT,
@@ -205,6 +217,7 @@ export async function migrate() {
     CREATE INDEX IF NOT EXISTS idx_media_queue_status ON media_queue(status, sortOrder, id);
     CREATE INDEX IF NOT EXISTS idx_memory_facts_updated ON memory_facts(updatedAt);
     CREATE INDEX IF NOT EXISTS idx_memory_facts_kind ON memory_facts(kind, updatedAt);
+    CREATE INDEX IF NOT EXISTS idx_subconscious_kind ON subconscious_facts(kind, weight, updatedAt);
     CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(status, dueAt);
     CREATE INDEX IF NOT EXISTS idx_proactive_status ON proactive_events(status, id);
     CREATE INDEX IF NOT EXISTS idx_media_favorites_updated ON media_favorites(updatedAt);

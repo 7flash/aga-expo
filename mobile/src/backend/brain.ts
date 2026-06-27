@@ -15,10 +15,21 @@ function env(name: string) {
 function buildPrompt(input: BrainInput) {
   const persona = getPersona(input.prefs.persona);
   const memories = input.memories.length
-    ? input.memories.map((memory) => `- ${memory.text}`).join('\n')
+    ? input.memories.map((memory) => `- ${memory.text}`).join('
+')
     : 'none';
-  const history = input.history.slice(-12).map((message) => `${message.role}: ${message.content}`).join('\n');
-  return `${persona.systemPrompt}\n\nKnown memories:\n${memories}\n\nRecent conversation:\n${history || 'none'}\n\nUser: ${input.text}\nAGA:`;
+  const history = input.history.slice(-12).map((message) => `${message.role}: ${message.content}`).join('
+');
+  return `${persona.systemPrompt}
+
+Known memories:
+${memories}
+
+Recent conversation:
+${history || 'none'}
+
+User: ${input.text}
+AGA:`;
 }
 
 function fallbackReply(text: string) {
@@ -37,7 +48,8 @@ function extractOpenAIText(data: any) {
   const text = data?.output
     ?.flatMap((item: any) => item?.content ?? [])
     ?.map((content: any) => content?.text ?? content?.transcript ?? '')
-    ?.join('\n')
+    ?.join('
+')
     ?.trim();
   return text || '';
 }
@@ -75,7 +87,8 @@ async function askGemini(input: BrainInput) {
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data?.error?.message || 'Gemini request failed.');
-  return data?.candidates?.[0]?.content?.parts?.map((part: any) => part?.text ?? '').join('\n').trim() || fallbackReply(input.text);
+  return data?.candidates?.[0]?.content?.parts?.map((part: any) => part?.text ?? '').join('
+').trim() || fallbackReply(input.text);
 }
 
 export async function askBrain(input: BrainInput) {
@@ -91,7 +104,9 @@ export async function askBrain(input: BrainInput) {
 
 export async function translatePhrase(text: string, target: string, prefs: Preferences) {
   const reply = await askBrain({
-    text: `Translate this phrase to ${target}. Return only the translation.\n\n${text}`,
+    text: `Translate this phrase to ${target}. Return only the translation.
+
+${text}`,
     prefs,
     history: [],
     memories: [],

@@ -21,8 +21,13 @@ function numberEnv(name: string, fallback: number) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
-function truncateForVoice(text: string) {
-  const max = numberEnv('EXPO_PUBLIC_AGA_SHORT_REPLY_MAX_CHARS', 420);
+function isCreativeLongFormRequest(input: string) {
+  return /\b(tell me|make up|generate|write|create)\b.*\b(story|poem|lullaby|script|affirmation)\b|\b(story time|bedtime story)\b/i.test(input);
+}
+
+function truncateForVoice(text: string, userText = '') {
+  const fallbackMax = isCreativeLongFormRequest(userText) ? 1800 : 420;
+  const max = numberEnv(isCreativeLongFormRequest(userText) ? 'EXPO_PUBLIC_AGA_GENERATIVE_REPLY_MAX_CHARS' : 'EXPO_PUBLIC_AGA_SHORT_REPLY_MAX_CHARS', fallbackMax);
   const clean = String(text || '').replace(/\s+/g, ' ').trim();
   if (clean.length <= max) return clean;
   return `${clean.slice(0, max - 1).trim()}…`;
@@ -41,7 +46,7 @@ export async function answerShortTextWithGpt5(text: string, ctx: ShortReasoningT
     memories,
     runTool: ctx.runCapability,
   });
-  const spoken = truncateForVoice(reply);
+  const spoken = truncateForVoice(reply, clean);
   ctx.publish?.({ mode: 'speaking', speechStatus: spoken.slice(0, 96), interim: '', heardText: clean });
   await speakShortReply(spoken, 'warm');
   await logEvent('turn.gpt5_tools.reply', spoken.slice(0, 240)).catch(() => undefined);

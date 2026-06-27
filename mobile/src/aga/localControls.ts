@@ -38,6 +38,12 @@ export function localControlIntent(text: string): LocalControlIntent {
   if (/\b(start\s+over|new\s+session|fresh\s+session|reset\s+context|clear\s+context|clean\s+slate)\b/.test(clean)) {
     return { tool: 'start_new_conversation_session', args: { reason: 'local_voice_command', endActiveSkill: true } };
   }
+  if (/\b(make\s+that\s+a\s+routine|accept\s+routine|save\s+that\s+routine|yes\s+routine)\b/.test(clean)) {
+    return { tool: 'accept_routine', args: {} };
+  }
+  if (/\b(dismiss\s+routine|forget\s+that\s+routine|not\s+a\s+routine|no\s+routine)\b/.test(clean)) {
+    return { tool: 'dismiss_routine', args: {} };
+  }
 
   const language = detectLanguageRequest(clean);
   if (language) return { tool: 'set_ui_language', args: { locale: language.locale, label: language.label } };
@@ -86,8 +92,8 @@ export function localControlIntent(text: string): LocalControlIntent {
   if (/\b(resume|continue)\b(?:.*\b(video|youtube|music|song|player|ambient)\b)?/.test(clean)) {
     return { tool: 'media_control', args: { command: 'resume' } };
   }
-  if (/\b(play|put on|start|search)\b.*\b(music|youtube|song|ambient|lofi|lo-fi|calm|meditation music|relaxing|piano)\b|^music$|^calm music$/.test(clean)) {
-    return { tool: 'play_youtube', args: { query: clean || 'calm music', forceYouTube: /youtube|youtu.be/.test(clean) } };
+  if (/\b(play|put on|start|search|pull up|show)\b.*\b(music|youtube|video|song|ambient|lofi|lo-fi|calm|meditation music|relaxing|piano)\b|^music$|^calm music$/.test(clean)) {
+    return { tool: 'play_youtube', args: { query: clean || 'calm music', forceYouTube: /youtube|youtu.be|video/.test(clean) } };
   }
 
   if (/\bbody\s+scan\b/.test(clean)) return { tool: 'start_guided_session', args: { kind: 'body_scan', goal: 'body scan' } };

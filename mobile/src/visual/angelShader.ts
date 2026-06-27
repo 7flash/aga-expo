@@ -25,6 +25,7 @@ uniform float uMode;
 uniform vec3 uAccent;
 uniform float uWear;
 uniform float uInteraction;
+uniform float uTrueHologram;
 
 float sat(float x) { return clamp(x, 0.0, 1.0); }
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123); }
@@ -87,7 +88,8 @@ void main() {
   uv.x *= uResolution.x / max(uResolution.y, 1.0);
   float t = uTime;
   float audio = sat(uAudio);
-  float wear = sat(uWear);
+  float hologram = sat(uTrueHologram);
+  float wear = sat(uWear) * (1.0 - hologram);
   float interact = sat(uInteraction);
   vec3 accent = modeColor(uMode, uAccent);
   vec3 cyan = vec3(0.30, 0.96, 1.0);
@@ -174,15 +176,16 @@ void main() {
   float chroma = 0.004 * sin(t * 0.75 + p.y * 5.0);
 
   vec3 color = vec3(0.0);
-  color += deck * (gunmetal + bevelHi + grain);
-  color += deck * corrosion * patina * 0.32;
-  color -= deck * bevelLo * 0.34;
-  color += innerBay * raisedGun * 0.45;
-  color -= seams * vec3(0.018, 0.018, 0.016);
-  color += ringMount * copper * (0.46 + wear * 0.26);
-  color += (clampL + clampR) * (raisedGun + vec3(0.030, 0.025, 0.020));
-  color += rivets * vec3(0.50, 0.57, 0.55);
-  color += cables * vec3(0.010, 0.018, 0.017);
+  float hardware = 1.0 - hologram;
+  color += deck * (gunmetal + bevelHi + grain) * hardware;
+  color += deck * corrosion * patina * 0.32 * hardware;
+  color -= deck * bevelLo * 0.34 * hardware;
+  color += innerBay * raisedGun * 0.45 * hardware;
+  color -= seams * vec3(0.018, 0.018, 0.016) * hardware;
+  color += ringMount * copper * (0.46 + wear * 0.26) * hardware;
+  color += (clampL + clampR) * (raisedGun + vec3(0.030, 0.025, 0.020)) * hardware;
+  color += rivets * vec3(0.50, 0.57, 0.55) * hardware;
+  color += cables * vec3(0.010, 0.018, 0.017) * hardware;
   color += neuralGlow * mix(cyan, magenta, 0.16) * 1.42;
   color += aura * accent;
   color += (wingL + wingR) * accent * 0.74;
@@ -192,7 +195,7 @@ void main() {
   color += edge * vec3(0.50, 0.94, 1.0);
   color += scan;
 
-  float alpha = sat(deck * 0.90 + innerBay * 0.24 + ringMount * 0.65 + rivets * 0.58 + (clampL + clampR) * 0.58 + cables * 0.52 + neuralGlow * 0.92 + aura + body + core + wingL * 0.62 + wingR * 0.62 + halo);
+  float alpha = sat((deck * 0.90 + innerBay * 0.24 + ringMount * 0.65 + rivets * 0.58 + (clampL + clampR) * 0.58 + cables * 0.52) * hardware + neuralGlow * 0.92 + aura + body + core + wingL * 0.62 + wingR * 0.62 + halo);
   gl_FragColor = vec4(max(color, 0.0), alpha);
 }
 `;
