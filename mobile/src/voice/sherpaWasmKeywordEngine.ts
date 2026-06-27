@@ -1,5 +1,6 @@
 import type { KeywordEngine, KeywordEngineConfig, WakeEngineEvent } from './wakeEngine';
 import { startSherpaWasmKwsRuntime } from './sherpaWasmKwsRuntime';
+import { emitWakeDebug } from './wakeDebugBus';
 
 type StopHandle = {
   stop: () => Promise<void>;
@@ -52,14 +53,25 @@ export class SherpaWasmKeywordEngine implements KeywordEngine {
         onKeyword: (event) => {
           const keyword = normalizeKeyword(event.phrase || event.id);
           const index = keywords.findIndex((candidate) => keyword.includes(candidate.toLowerCase()));
-          this.emit({
+          const wakeEvent: WakeEngineEvent = {
             type: 'keyword',
             provider: 'sherpa-wasm',
             keyword,
             index: index >= 0 ? index : undefined,
             confidence: event.confidence,
             raw: event.raw,
+          };
+
+          emitWakeDebug({
+            type: 'keyword',
+            provider: 'sherpa-wasm',
+            keyword,
+            index: wakeEvent.index,
+            confidence: event.confidence,
+            raw: event.raw,
           });
+
+          this.emit(wakeEvent);
         },
       });
 
@@ -79,6 +91,7 @@ export class SherpaWasmKeywordEngine implements KeywordEngine {
       this.runtime = null;
       const message = error instanceof Error ? error.message : String(error);
       console.error('[aga:sherpa-wasm-keyword] failed', error);
+      emitWakeDebug({ type: 'error', provider: 'sherpa-wasm', message, raw: error });
       this.emit({
         type: 'error',
         provider: 'sherpa-wasm',

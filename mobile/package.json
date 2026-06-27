@@ -13,8 +13,9 @@
   "dependencies": {
     "@react-native-voice/voice": "^3.2.4",
     "expo": "latest",
+    "expo-av": "^16.0.8",
     "expo-clipboard": "~56.0.4",
-    "expo-file-system": "~56.0.8",
+    "expo-file-system": "^56.0.8",
     "expo-notifications": "~56.0.18",
     "expo-router": "latest",
     "expo-secure-store": "~56.0.4",

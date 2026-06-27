@@ -36,7 +36,7 @@ function modeNumber(mode: AgaMode) {
 
 function getGlView() {
   try {
-    // Optional in managed/dev builds. A production relic APK should include expo-gl;
+    // Optional in managed/dev builds. A production AGA APK should include expo-gl;
     // older/web builds fall back to the SVG angel without crashing.
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     return require('expo-gl')?.GLView ?? null;
@@ -148,7 +148,7 @@ export const TactileRelicAngel = memo(function TactileRelicAngel({
       };
       draw();
     } catch (error) {
-      console.warn?.('[aga:tactile-relic] GL angel failed; SVG fallback will be used next mount.', error);
+      console.warn?.('[aga:tactile-AGA] GL angel failed; SVG fallback will be used next mount.', error);
     }
     return () => cancelAnimationFrame(frame);
   };

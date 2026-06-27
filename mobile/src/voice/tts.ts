@@ -1,6 +1,22 @@
 import { Platform } from 'react-native';
 import { measureAsync, measureMark } from '../observability/measure';
 
+async function agaV13TryBrowserAudioTts(text: string, options?: any) {
+  // aga:v13-browser-audio-tts
+  if (typeof window === 'undefined') return false;
+  const requested = String((process as any)?.env?.EXPO_PUBLIC_AGA_SHORT_TTS_PROVIDER || (process as any)?.env?.EXPO_PUBLIC_AGA_TTS_PROVIDER || '').toLowerCase();
+  if (!/elevenlabs|openai/.test(requested)) return false;
+  if (!browserAudioTtsAvailable(requested.includes('openai') ? 'openai' : 'elevenlabs')) return false;
+  await speakWithBrowserAudioTts(text, {
+    provider: requested.includes('openai') ? 'openai' : 'elevenlabs',
+    emotion: options?.emotion,
+  });
+  return true;
+}
+
+
+import { speakWithBrowserAudioTts, browserAudioTtsAvailable } from './browserAudioTts';
+
 declare function require(name: string): any;
 
 type TtsProvider = 'elevenlabs' | 'openai' | 'expo-speech' | 'web-speech' | 'none' | 'auto';

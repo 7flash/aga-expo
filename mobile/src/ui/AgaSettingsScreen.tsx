@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { SafeAreaView, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { loadPreferences, type Preferences } from '../db/localStore';
 import { EmbossedPanel, GaugeStatus, MechanicalSwitch, RotarySelector, TactileButton } from './tactile/TactilePrimitives';
-import { tactileRelic as relic } from './tactile/tokens';
+import { tactileRelic as AGA } from './tactile/tokens';
 
 const NO_POINTER_EVENTS = { pointerEvents: 'none' as const } as any;
 
@@ -13,7 +13,7 @@ function listenDetent(mode?: string | null) {
 }
 
 /**
- * Voice-only relic settings surface.
+ * Voice-only AGA settings surface.
  *
  * No direct editing widgets, sliders, or manual touch affordances. The device
  * is behind glass; this screen only displays the state of the physical-looking
@@ -40,7 +40,7 @@ export function AgaSettingsScreen() {
   return (
     <SafeAreaView style={[styles.root, NO_POINTER_EVENTS]}>
       <ScrollView style={NO_POINTER_EVENTS as any} contentContainerStyle={styles.content}>
-        <Text style={styles.kicker}>TACTILE NEURAL RELIC</Text>
+        <Text style={styles.kicker}>VOICE WAKE CONSOLE</Text>
         <Text style={styles.title}>Voice-only mechanical control bay</Text>
         <Text style={styles.subtitle}>This unit is behind glass. Say “AGA settings”, “AGA choose one”, “AGA change voice”, or update remote config. The controls below are rendered as tactile hardware, but they are not touch targets.</Text>
 
@@ -82,15 +82,15 @@ export function AgaSettingsScreen() {
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#000' },
   content: { padding: 22, gap: 16 },
-  kicker: { color: relic.colors.amber, fontSize: 11, fontWeight: '900', letterSpacing: 2.9, textTransform: 'uppercase' },
-  title: { color: relic.colors.coolWhite, fontSize: 32, fontWeight: '900', letterSpacing: 0.4 },
-  subtitle: { color: relic.colors.engraved, fontSize: 15, lineHeight: 22, maxWidth: 780, fontWeight: '700' },
+  kicker: { color: AGA.colors.amber, fontSize: 11, fontWeight: '900', letterSpacing: 2.9, textTransform: 'uppercase' },
+  title: { color: AGA.colors.coolWhite, fontSize: 32, fontWeight: '900', letterSpacing: 0.4 },
+  subtitle: { color: AGA.colors.engraved, fontSize: 15, lineHeight: 22, maxWidth: 780, fontWeight: '700' },
   gauges: { flexDirection: 'row', gap: 10, flexWrap: 'wrap' },
   panel: { marginTop: 4 },
   hardwareGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, alignItems: 'stretch' },
   rotary: { width: 155 },
   grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
-  command: { color: relic.colors.coolWhite, fontSize: 15, lineHeight: 25, fontWeight: '800' },
+  command: { color: AGA.colors.coolWhite, fontSize: 15, lineHeight: 25, fontWeight: '800' },
 });
 
 export default AgaSettingsScreen;

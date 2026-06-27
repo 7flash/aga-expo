@@ -8,7 +8,7 @@ void main() {
 `;
 
 /**
- * Tactile Neural Relic shader.
+ * Voice Wake Console shader.
  *
  * Emissive-on-black for behind-glass projection, but not clean/glassmorphic.
  * The angel is mounted inside a worn mechanical neural housing: deep gunmetal,
@@ -104,7 +104,7 @@ void main() {
   float mechBuzz = 0.0028 * sin(t * 74.0) * (audio + interact * 0.7);
   p.x += mechBuzz;
 
-  // Deep physical backing: large raised relic panel with recessed center bay.
+  // Deep physical backing: large raised AGA panel with recessed center bay.
   float deckOuter = 1.0 - smoothstep(0.0, 0.018, sdBox(p, vec2(0.92, 0.78), 0.18));
   float deckInner = 1.0 - smoothstep(0.0, 0.018, sdBox(p, vec2(0.66, 0.53), 0.12));
   float deck = sat(deckOuter - deckInner * 0.78);

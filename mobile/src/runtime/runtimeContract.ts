@@ -30,8 +30,8 @@ export function getRuntimeContractIssues(): RuntimeContractIssue[] {
     issues.push({ severity: 'error', code: 'tts.openai_missing', message: 'OpenAI TTS is selected but no API key or TTS gateway URL is configured.' });
   }
 
-  if (f.displayMode !== 'tactile_relic') {
-    issues.push({ severity: 'warning', code: 'display.not_tactile_relic', message: `Display mode is ${f.displayMode}. The current product direction is tactile_relic.` });
+  if (f.displayMode !== 'tactile_AGA') {
+    issues.push({ severity: 'warning', code: 'display.not_tactile_AGA', message: `Display mode is ${f.displayMode}. The current product direction is tactile_AGA.` });
   }
 
   if (!f.pureDisplay) {

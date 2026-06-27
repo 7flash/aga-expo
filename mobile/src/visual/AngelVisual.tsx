@@ -25,7 +25,7 @@ function envFlag(name: string, fallback = false) {
 /**
  * Single avatar surface selector.
  *
- * `tactile_relic` is the behind-glass production aesthetic: GPU-driven,
+ * `tactile_AGA` is the behind-glass production aesthetic: GPU-driven,
  * physical/mechanical, worn, neuromorphic, and display-only. The older SVG Zen
  * avatar and the earlier hologram shader remain compatibility fallbacks.
  */
@@ -36,7 +36,7 @@ export function AngelVisual(props: Props) {
   const mirror = envFlag('EXPO_PUBLIC_AGA_HOLOGRAM_MIRROR', false);
   const lowPower = envFlag('EXPO_PUBLIC_AGA_LOW_POWER_VISUALS', false);
 
-  if (!forceSvg && (displayMode === 'tactile_relic' || engine === 'tactile_relic' || engine === 'relic_gl')) {
+  if (!forceSvg && (displayMode === 'tactile_AGA' || engine === 'tactile_AGA' || engine === 'AGA_gl')) {
     return <TactileRelicAngel {...props} mirror={mirror} lowPower={lowPower} />;
   }
 

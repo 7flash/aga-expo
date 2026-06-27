@@ -17,7 +17,7 @@ export const colors = {
 };
 
 /**
- * Tactile Neural Relic material system.
+ * Voice Wake Console material system.
  *
  * These tokens intentionally avoid soft translucent card language. They
  * describe physical, mechanical, slightly worn controls projected behind glass:

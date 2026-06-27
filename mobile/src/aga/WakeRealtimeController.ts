@@ -16,6 +16,8 @@ import { measureAsync, measureMark } from '../observability/measure';
 import type { RealtimeSnapshot } from '../realtime/RealtimeSession';
 import type { AgaMode } from './turn';
 
+import { registerWakeRealtimeControllerBrowserSink } from './browserWakeRealtimeControllerSink';
+
 type Listener = (snapshot: RealtimeSnapshot) => void;
 
 type VoiceSessionLike = {
@@ -138,6 +140,14 @@ export class WakeRealtimeController {
   }
 
   async start() {
+    // Browser/dev bridge: post-wake transcript must enter the real controller,
+    // not a parallel Gemini/direct fallback.
+    try {
+      registerWakeRealtimeControllerBrowserSink(this as any);
+    } catch (error) {
+      console.warn('[aga:wakeRealtime] failed to register browser text sink', error);
+    }
+
     return measureAsync('wakeRealtime.keyword.start', async () => {
       if (this.started) return;
       this.started = true;

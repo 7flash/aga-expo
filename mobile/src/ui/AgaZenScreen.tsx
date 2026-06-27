@@ -15,7 +15,6 @@ import { AmbientPlayer } from './AmbientPlayer';
 import { YouTubePlayer } from './YouTubePlayer';
 import { colors, radius, spacing } from './theme';
 import { AGA_APP_VERSION } from '../config/appVersion';
-
 function envFlag(name: string, fallback = false) {
   const raw = String(process.env?.[name] ?? '').trim().toLowerCase();
   if (!raw) return fallback;
@@ -216,7 +215,7 @@ export function AgaZenScreen() {
             </View>
           }
         />
-      </View>
+</View>
       )}
 
       {media?.type === 'ambient' && (

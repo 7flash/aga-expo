@@ -12,7 +12,7 @@ import {
   RotarySelector,
   TactileButton,
 } from './tactile/TactilePrimitives';
-import { glowForMode, tactileRelic as relic } from './tactile/tokens';
+import { glowForMode, tactileRelic as AGA } from './tactile/tokens';
 
 const NO_POINTER_EVENTS = { pointerEvents: 'none' as const } as any;
 
@@ -38,7 +38,7 @@ function recentPlates(messages: any[]) {
 }
 
 /**
- * Tactile Neural Relic kiosk surface.
+ * Voice Wake Console kiosk surface.
  *
  * No touch handlers, no text inputs, no router chrome, no soft translucent card aesthetic.
  * This is a physical-looking neuromorphic control deck projected behind glass.
@@ -62,7 +62,7 @@ export const AgaPureDisplayScreen = memo(function AgaPureDisplayScreen() {
   return (
     <View style={[styles.root, NO_POINTER_EVENTS]}>
       <View style={styles.deepVoid} />
-      <View style={styles.relicDeck}>
+      <View style={styles.AGADeck}>
         <View style={styles.deckPatina} />
         <View style={styles.deckBevel} />
         <View style={styles.deckGrain} />
@@ -127,10 +127,10 @@ export const AgaPureDisplayScreen = memo(function AgaPureDisplayScreen() {
       ) : (
         <EmbossedPanel title="wake console" mode={mode as any} active={mode !== 'idle'} wear={wear} style={styles.choicePanel}>
           <View style={styles.wakeRow}>
-            <TactileButton index="AGA" label="wake word" sublabel="Say “AGA” to energize the relic core" active={mode === 'listening' || rawMode === 'awake'} mode="listening" wear={wear} style={styles.wakeButton} />
+            <TactileButton index="AGA" label="wake word" sublabel="Say “AGA” to wake AGA" active={mode === 'listening' || rawMode === 'awake'} mode="listening" wear={wear} style={styles.wakeButton} />
             <View style={styles.wakeCopyBox}>
-              <Text style={styles.wakeTitle}>TACTILE NEURAL RELIC</Text>
-              <Text style={styles.wakeCopy}>Voice commands mechanically actuate the projected deck: switches throw, buttons depress, traces fire, and learned pathways develop patina.</Text>
+              <Text style={styles.wakeTitle}>VOICE MIC CONSOLE</Text>
+              <Text style={styles.wakeCopy}>Microphone is live. The waveform shows audio. Wake keywords trigger AGA; full words appear after wake through STT.</Text>
             </View>
           </View>
         </EmbossedPanel>
@@ -144,7 +144,7 @@ export const AgaPureDisplayScreen = memo(function AgaPureDisplayScreen() {
 
       <View style={styles.holographicOverlay} />
       <View style={styles.scanlineOverlay} />
-    </View>
+</View>
   );
 });
 
@@ -153,7 +153,7 @@ const cornerRivet = {
   width: 10,
   height: 10,
   borderRadius: 10,
-  backgroundColor: relic.colors.wornEdge,
+  backgroundColor: AGA.colors.wornEdge,
   shadowColor: '#000',
   shadowOpacity: 0.9,
   shadowRadius: 8,
@@ -162,8 +162,8 @@ const cornerRivet = {
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
   deepVoid: { ...StyleSheet.absoluteFillObject, backgroundColor: '#000' },
-  relicDeck: { position: 'absolute', width: '94%', height: '90%', borderRadius: 34, backgroundColor: relic.colors.panelBase, borderWidth: 1, borderColor: '#203235', shadowColor: '#000', shadowOpacity: 0.96, shadowRadius: 34, overflow: 'hidden' },
-  deckPatina: { ...StyleSheet.absoluteFillObject, backgroundColor: relic.colors.oxidizedCopper, opacity: 0.045 },
+  AGADeck: { position: 'absolute', width: '94%', height: '90%', borderRadius: 34, backgroundColor: AGA.colors.panelBase, borderWidth: 1, borderColor: '#203235', shadowColor: '#000', shadowOpacity: 0.96, shadowRadius: 34, overflow: 'hidden' },
+  deckPatina: { ...StyleSheet.absoluteFillObject, backgroundColor: AGA.colors.oxidizedCopper, opacity: 0.045 },
   deckBevel: { ...StyleSheet.absoluteFillObject, borderRadius: 34, borderTopWidth: 3, borderLeftWidth: 2, borderTopColor: 'rgba(255,255,255,0.10)', borderLeftColor: 'rgba(255,255,255,0.05)', borderBottomWidth: 8, borderRightWidth: 6, borderBottomColor: 'rgba(0,0,0,0.82)', borderRightColor: 'rgba(0,0,0,0.66)' },
   deckGrain: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(255,255,255,0.55)', opacity: 0.025 },
   cornerRivetA: { ...cornerRivet, top: 18, left: 18 },
@@ -179,7 +179,7 @@ const styles = StyleSheet.create({
   topRail: { position: 'absolute', top: 22, left: 24, right: 24, flexDirection: 'row', gap: 10, alignItems: 'stretch' },
   flexGauge: { flex: 1 },
   ledBox: { borderRadius: 15, padding: 10, minWidth: 130, backgroundColor: '#0d1516', borderWidth: 1, borderColor: '#26383a' },
-  ledLabel: { color: relic.colors.engraved, fontSize: 9, fontWeight: '900', letterSpacing: 1.3, textTransform: 'uppercase', marginBottom: 8 },
+  ledLabel: { color: AGA.colors.engraved, fontSize: 9, fontWeight: '900', letterSpacing: 1.3, textTransform: 'uppercase', marginBottom: 8 },
   coreBay: { alignItems: 'center', justifyContent: 'center', marginTop: -18 },
   coreAura: { position: 'absolute', width: 340, height: 340, borderRadius: 340, shadowOpacity: 0.32, shadowRadius: 44 },
   sideControlsLeft: { position: 'absolute', left: 24, top: 112, width: 178 },
@@ -191,8 +191,8 @@ const styles = StyleSheet.create({
   wakeRow: { flexDirection: 'row', gap: 14, alignItems: 'stretch' },
   wakeButton: { width: 190 },
   wakeCopyBox: { flex: 1, justifyContent: 'center', paddingRight: 8 },
-  wakeTitle: { color: relic.colors.amber, fontSize: 12, fontWeight: '900', letterSpacing: 2.2, textTransform: 'uppercase', marginBottom: 6 },
-  wakeCopy: { color: relic.colors.engraved, fontSize: 14, lineHeight: 20, fontWeight: '700' },
+  wakeTitle: { color: AGA.colors.amber, fontSize: 12, fontWeight: '900', letterSpacing: 2.2, textTransform: 'uppercase', marginBottom: 6 },
+  wakeCopy: { color: AGA.colors.engraved, fontSize: 14, lineHeight: 20, fontWeight: '700' },
   messagePanel: { position: 'absolute', right: 24, bottom: 186, width: 310, maxHeight: 230 },
   messageGap: { marginTop: 10 },
   holographicOverlay: { ...StyleSheet.absoluteFillObject, borderWidth: 1, borderColor: 'rgba(72,240,255,0.045)', transform: [{ translateY: -1 }] },

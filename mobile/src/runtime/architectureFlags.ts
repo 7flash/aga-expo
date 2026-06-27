@@ -1,7 +1,7 @@
 export type WakeEngineKind = 'porcupine' | 'android_speech_fallback' | 'disabled';
 export type ShortTtsProvider = 'elevenlabs' | 'openai' | 'system' | 'silent';
 export type LiveEscalationMode = 'never' | 'manual' | 'auto' | 'always';
-export type DisplayMode = 'tactile_relic' | 'hologram' | 'zen' | 'debug';
+export type DisplayMode = 'tactile_AGA' | 'hologram' | 'zen' | 'debug';
 
 function env(name: string, fallback = '') {
   return String(process.env[name] ?? fallback).trim();
@@ -20,7 +20,7 @@ export const AGA_ARCHITECTURE_FLAGS = Object.freeze({
   wakeEngine: oneOf<WakeEngineKind>(env('EXPO_PUBLIC_AGA_WAKE_ENGINE', 'porcupine'), ['porcupine', 'android_speech_fallback', 'disabled'], 'porcupine'),
   shortTtsProvider: oneOf<ShortTtsProvider>(env('EXPO_PUBLIC_AGA_SHORT_TTS_PROVIDER', 'elevenlabs'), ['elevenlabs', 'openai', 'system', 'silent'], 'elevenlabs'),
   liveEscalation: oneOf<LiveEscalationMode>(env('EXPO_PUBLIC_AGA_LIVE_ESCALATION', 'auto'), ['never', 'manual', 'auto', 'always'], 'auto'),
-  displayMode: oneOf<DisplayMode>(env('EXPO_PUBLIC_AGA_DISPLAY_MODE', 'tactile_relic'), ['tactile_relic', 'hologram', 'zen', 'debug'], 'tactile_relic'),
+  displayMode: oneOf<DisplayMode>(env('EXPO_PUBLIC_AGA_DISPLAY_MODE', 'tactile_AGA'), ['tactile_AGA', 'hologram', 'zen', 'debug'], 'tactile_AGA'),
   allowDirectKeys: flag('EXPO_PUBLIC_AGA_ALLOW_DIRECT_KEYS', true),
   deterministicGuidedSessions: flag('EXPO_PUBLIC_AGA_DETERMINISTIC_GUIDED', true),
   emergencySystemTts: flag('EXPO_PUBLIC_AGA_EMERGENCY_SYSTEM_TTS', true),

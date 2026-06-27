@@ -1,0 +1,43 @@
+{
+  "generatedAt": "2026-06-26T23:23:28.963Z",
+  "groups": [
+    {
+      "id": "aga",
+      "phrases": [
+        "aga",
+        "ahga",
+        "agga",
+        "a ga",
+        "hey aga",
+        "okay aga",
+        "ok aga",
+        "hello aga",
+        "wake aga",
+        "guardian",
+        "angel"
+      ]
+    },
+    {
+      "id": "stop",
+      "phrases": [
+        "stop",
+        "cancel",
+        "abort",
+        "quiet"
+      ]
+    },
+    {
+      "id": "pause",
+      "phrases": [
+        "pause",
+        "wait",
+        "hold"
+      ]
+    }
+  ],
+  "tokenized": false,
+  "browserWakeFallback": true,
+  "reason": "text2token did not create output",
+  "nativeKeywords": "assets/kws-model/keywords.txt",
+  "webKeywords": "public/sherpa/kws-model/keywords.txt"
+}
