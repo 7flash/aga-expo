@@ -32,7 +32,7 @@ export interface VoiceTransport {
   start(): Promise<void> | void;
   stop(): Promise<void> | void;
   subscribe(listener: VoiceTransportListener): () => void;
-  replay?(text: string): Promise<void> | void;
+  replay(text: string): Promise<void> | void;
   closeMedia?(): Promise<void> | void;
   onMediaEvent?(event: string): void;
   rearmMic?(): Promise<void> | void;

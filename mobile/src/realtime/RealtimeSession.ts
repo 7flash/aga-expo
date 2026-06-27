@@ -33,6 +33,7 @@ import { maybeApplyOtaUpdate, nativeUpdateMessage } from '../updates/updateManag
 import { agaEngineDiagnostics, isOpenAiRealtimeBlocked } from '../aga/engine';
 import { localControlIntent } from '../aga/localControls';
 import { hasWakePrefix, stripWakePrefix } from '../aga/text';
+import type { VoiceTransport } from '../voice/VoiceTransport';
 
 const REALTIME_MODEL =
   process.env.EXPO_PUBLIC_AGA_REALTIME_MODEL ||
@@ -287,7 +288,8 @@ export function shouldUseRealtimeSession() {
   return !!(env('EXPO_PUBLIC_OPENAI_API_KEY') || env('EXPO_PUBLIC_AGA_REALTIME_TOKEN_URL') || env('EXPO_PUBLIC_AGA_REALTIME_SDP_URL'));
 }
 
-export class RealtimeSession {
+export class RealtimeSession implements VoiceTransport {
+  readonly name = 'openai-realtime';
   private listeners = new Set<Listener>();
   private pc: any | null = null;
   private dc: any | null = null;

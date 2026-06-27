@@ -1,3 +1,4 @@
+import { AGA_CONFIG } from '../config/agaConfig';
 import { createWakeEngine, type WakeEngine, type WakeEngineEvent } from '../voice/wakeEngine';
 import { createCapabilityRunner } from './capabilityRunner';
 import { parseVoiceMenuCommand } from './voiceFirstMenuCommands';
@@ -15,31 +16,16 @@ import { initializeLocalStore, listMessages, listPendingReminders, loadPreferenc
 import { normalizeSpeech } from './text';
 import { agaEngineDiagnostics, getAgaEngine } from './engine';
 import { measureAsync, measureMark } from '../observability/measure';
-import type { RealtimeSnapshot } from '../realtime/RealtimeSession';
+import type { VoiceTransport, VoiceTransportSnapshot } from '../voice/VoiceTransport';
 import type { AgaMode } from './turn';
-
 import { registerWakeRealtimeControllerBrowserSink } from './browserWakeRealtimeControllerSink';
+
+type RealtimeSnapshot = VoiceTransportSnapshot;
 
 type Listener = (snapshot: RealtimeSnapshot) => void;
 
-type VoiceSessionLike = {
-  start(): Promise<void> | void;
-  stop(): Promise<void> | void;
-  subscribe(listener: (snapshot: RealtimeSnapshot) => void): () => void;
-  replay(text: string): void;
-  closeMedia?(): void;
-  onMediaEvent?(event: string): void;
-  rearmMic?(): void;
-};
-
 function env(name: string) {
   return process.env?.[name] ?? '';
-}
-
-function envFlag(name: string, fallback: boolean) {
-  const raw = env(name).trim().toLowerCase();
-  if (!raw) return fallback;
-  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
 }
 
 function numberEnv(name: string, fallback: number) {
@@ -52,7 +38,7 @@ function selectedEngine() {
 }
 
 function postWakeReply() {
-  return env('EXPO_PUBLIC_AGA_POST_WAKE_REPLY') || 'Yes?';
+  return AGA_CONFIG.wake.postWakeReply || 'Yes?';
 }
 
 function wakeRepairHint(message: string) {
@@ -96,7 +82,7 @@ export class WakeRealtimeController {
   private listeners = new Set<Listener>();
   private wakeEngine: WakeEngine | null = null;
   private wakeUnsubscribe: (() => void) | null = null;
-  private realtime: VoiceSessionLike | null = null;
+  private realtime: VoiceTransport | null = null;
   private realtimeUnsubscribe: (() => void) | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private prefs: Preferences | null = null;
@@ -157,7 +143,7 @@ export class WakeRealtimeController {
       await initializeLocalStore();
       this.prefs = await loadPreferences();
       this.ensureCapabilities();
-      if (envFlag('EXPO_PUBLIC_AGA_CLEAR_TRANSIENT_ON_BOOT', true)) {
+      if (AGA_CONFIG.brain.clearTransientOnBoot) {
         await startNewConversationSession('app_boot', { clearTranscript: true, endActiveSession: false }).catch(() => undefined);
       }
       await this.refresh();
@@ -330,7 +316,7 @@ ${hint.detail}` : ''}`,
     await logEvent('wake.accepted', `${source}:${text || 'keyword_only'}`).catch(() => undefined);
     this.resolvingPostWake = false;
     this.publish({ interim: '', heardText: 'keyword detected: aga', speechStatus: 'wake detected — opening command ear', mode: 'awake' } as any);
-    if (envFlag('EXPO_PUBLIC_AGA_POST_WAKE_TTS_ACK', true)) {
+    if (AGA_CONFIG.wake.postWakeTtsAck) {
       void speakShortReply(postWakeReply(), 'warm').catch(() => undefined);
     }
 
@@ -525,7 +511,7 @@ ${hint.detail}` : ''}`,
     await this.cancelShortAudioTurn('live_session').catch(() => undefined);
     await this.stopPostWakeCommandWindow('live_session');
     await this.stopWakeScout('live_session');
-    if (envFlag('EXPO_PUBLIC_AGA_FRESH_CONTEXT_PER_WAKE', true)) {
+    if (AGA_CONFIG.brain.freshContextPerWake) {
       await startNewConversationSession('wake_activation', { clearTranscript: true, endActiveSession: false }).catch(() => undefined);
     }
     const aec = await enterTier3DuplexAudio(`live:${selectedEngine()}`).catch((error) => ({ ok: false, message: error instanceof Error ? error.message : String(error) }));
@@ -615,7 +601,7 @@ ${hint.detail}` : ''}`,
     if (engine) await logEvent('post_wake_command.stop', reason).catch(() => undefined);
   }
 
-  private async createSelectedVoiceSession(): Promise<VoiceSessionLike> {
+  private async createSelectedVoiceSession(): Promise<VoiceTransport> {
     const engine = selectedEngine();
     if (engine === 'gemini') {
       const mod = await import('../gemini/GeminiLiveSession');
@@ -625,7 +611,7 @@ ${hint.detail}` : ''}`,
       const mod = await import('../realtime/RealtimeSession');
       return new mod.RealtimeSession({ onTurnDone: () => this.armIdleTimer() } as any);
     }
-    const mod = await import('./LocalTransport');
+    const mod = await import('../voice/LocalTransport');
     return new mod.LocalTransport({ onTurnDone: () => this.armIdleTimer() } as any);
   }
 

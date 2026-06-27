@@ -1,4 +1,5 @@
 import { Platform } from 'react-native';
+import { AGA_CONFIG } from '../config/agaConfig';
 import { SherpaWasmKeywordEngine } from './sherpaWasmKeywordEngine';
 
 export type WakeKeywordProvider =
@@ -32,15 +33,8 @@ export interface KeywordEngine {
 
 export type WakeEngine = KeywordEngine;
 
-function env(name: string, fallback = '') {
-  return String((process as any)?.env?.[name] ?? fallback).trim();
-}
-
 function wakeKeywords() {
-  return env('EXPO_PUBLIC_AGA_SHERPA_WAKE_KEYWORDS', 'aga,stop,pause')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
+  return AGA_CONFIG.wake.sherpaKeywords.length ? [...AGA_CONFIG.wake.sherpaKeywords] : ['aga', 'stop', 'pause'];
 }
 
 class UnavailableWakeEngine implements WakeEngine {
@@ -190,34 +184,40 @@ class PorcupinePlaceholderEngine implements WakeEngine {
 }
 
 function createWebWakeEngine() {
-  const browserEngine = env('EXPO_PUBLIC_AGA_BROWSER_KEYWORD_ENGINE', env('EXPO_PUBLIC_AGA_KEYWORD_ENGINE', 'sherpa_wasm')).toLowerCase();
-  const allowDev = env('EXPO_PUBLIC_AGA_ALLOW_DEV_KEYWORD_INJECTOR', '0') === '1';
+  const browserEngine = AGA_CONFIG.wake.browserEngine;
+  const allowDev = AGA_CONFIG.wake.allowDevKeywordInjector;
 
-  if (browserEngine === 'sherpa_wasm' || browserEngine === 'sherpa-wasm' || browserEngine === 'sherpa' || browserEngine === '') {
+  if (browserEngine === 'sherpa_wasm' || browserEngine === 'sherpa' || browserEngine === 'sherpa_native') {
     return new SherpaWasmKeywordEngine();
   }
 
-  if (browserEngine === 'dev' || browserEngine === 'dev_injector') {
+  if (browserEngine === 'dev') {
     if (!allowDev) {
       return new UnavailableWakeEngine('Dev keyword injector requested but EXPO_PUBLIC_AGA_ALLOW_DEV_KEYWORD_INJECTOR=1 is not set.', 'dev');
     }
     return new DevKeywordEngine();
   }
 
+  if (browserEngine === 'disabled') {
+    return new UnavailableWakeEngine('Wake engine disabled by config.', 'unavailable');
+  }
+
+  if (browserEngine === 'porcupine') return new PorcupinePlaceholderEngine();
+
   return new UnavailableWakeEngine(`Unsupported browser keyword engine: ${browserEngine}. Use sherpa_wasm.`, 'unavailable');
 }
 
 function createNativeWakeEngine() {
-  const nativeEngine = env('EXPO_PUBLIC_AGA_KEYWORD_ENGINE', env('EXPO_PUBLIC_AGA_WAKE_ENGINE', 'sherpa')).toLowerCase();
+  const nativeEngine = AGA_CONFIG.wake.engine;
+  const allowDev = AGA_CONFIG.wake.allowDevKeywordInjector;
 
-  if (nativeEngine === 'sherpa' || nativeEngine === 'sherpa_native' || nativeEngine === 'sherpa-native') {
+  if (nativeEngine === 'sherpa' || nativeEngine === 'sherpa_native' || nativeEngine === 'sherpa_wasm') {
     return new SherpaNativePlaceholderEngine();
   }
 
   if (nativeEngine === 'porcupine') return new PorcupinePlaceholderEngine();
-
-  const allowDev = env('EXPO_PUBLIC_AGA_ALLOW_DEV_KEYWORD_INJECTOR', '0') === '1';
   if (nativeEngine === 'dev' && allowDev) return new DevKeywordEngine();
+  if (nativeEngine === 'disabled') return new UnavailableWakeEngine('Wake engine disabled by config.', 'unavailable');
 
   return new UnavailableWakeEngine(`Unsupported native keyword engine: ${nativeEngine}. Use sherpa or porcupine.`, 'unavailable');
 }

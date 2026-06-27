@@ -1,4 +1,5 @@
 import type { AgaMode } from '../aga/turn';
+import type { VoiceTransport } from '../voice/VoiceTransport';
 import type { RealtimeSnapshot } from '../realtime/RealtimeSession';
 import type { YouTubeResult } from '../media/youtube';
 import type { AmbientResult } from '../media/ambient';
@@ -237,7 +238,8 @@ function canUseLiveForTextFallbackRace() {
   return transport === 'hybrid' || transport === 'auto' || envFlag('EXPO_PUBLIC_AGA_GEMINI_TEXT_RACE_FALLBACK', true);
 }
 
-export class GeminiLiveSession {
+export class GeminiLiveSession implements VoiceTransport {
+  readonly name = 'gemini-live';
   private listeners = new Set<Listener>();
   private ws: any | null = null;
   private prefs: Preferences | null = null;

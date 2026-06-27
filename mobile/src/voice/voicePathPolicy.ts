@@ -1,12 +1,10 @@
+import { AGA_CONFIG } from '../config/agaConfig';
+
 export type VoicePathDecision =
   | { path: 'local_control'; reason: string }
   | { path: 'deterministic_guided'; reason: string }
   | { path: 'short_stt_gpt5_tools_tts'; reason: string }
   | { path: 'live_session'; reason: string };
-
-function env(name: string) {
-  return process.env?.[name] ?? '';
-}
 
 const LOCAL_CONTROL_PATTERNS = [
   /\b(stop|quiet|cancel|shush|hush|pause|resume|continue|repeat options|close menu|back)\b/i,
@@ -37,7 +35,7 @@ const EXPLICIT_LIVE_PATTERNS = [
 ];
 
 function livePolicy() {
-  return String(env('EXPO_PUBLIC_AGA_LIVE_SESSION_POLICY') || 'casual_by_default').toLowerCase();
+  return AGA_CONFIG.brain.liveSessionPolicy;
 }
 
 export function decideVoicePath(text: string): VoicePathDecision {

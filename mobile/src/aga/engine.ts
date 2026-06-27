@@ -1,4 +1,6 @@
-export type AgaEngine = 'gemini' | 'openai' | 'local';
+import { AGA_CONFIG, type AgaLiveEngine } from '../config/agaConfig';
+
+export type AgaEngine = AgaLiveEngine;
 
 type EngineDecision = {
   engine: AgaEngine;
@@ -32,15 +34,16 @@ function decisionFrom(name: string): EngineDecision | null {
 }
 
 /**
- * Canonical engine selector.
+ * Canonical live engine selector.
  *
- * EXPO_PUBLIC_AGA_ENGINE is the highest-priority switch. If it says gemini,
- * older env flags such as EXPO_PUBLIC_AGA_REALTIME_DIRECT=1 or a stale
- * EXPO_PUBLIC_AGA_PROVIDER=openai must not start OpenAI Realtime.
+ * AGA_CONFIG is the canonical parsed env surface. The legacy env fallbacks below
+ * are kept only for older installs that have not migrated yet.
  */
 export function getAgaEngineDecision(): EngineDecision {
-  return decisionFrom('EXPO_PUBLIC_AGA_ENGINE')
-    ?? decisionFrom('EXPO_PUBLIC_AGA_RUNTIME_ENGINE')
+  const configured = AGA_CONFIG.brain.liveEngine;
+  if (configured) return { engine: configured, source: 'AGA_CONFIG.brain.liveEngine', raw: env('EXPO_PUBLIC_AGA_ENGINE') || configured };
+
+  return decisionFrom('EXPO_PUBLIC_AGA_RUNTIME_ENGINE')
     ?? decisionFrom('EXPO_PUBLIC_AGA_BRAIN_PROVIDER')
     ?? decisionFrom('EXPO_PUBLIC_AGA_PROVIDER')
     ?? decisionFrom('EXPO_PUBLIC_AGA_VOICE_ENGINE')
@@ -66,7 +69,7 @@ export function isLocalEngine() {
 }
 
 export function isOpenAiRealtimeBlocked() {
-  if (envFlag('EXPO_PUBLIC_AGA_DISABLE_OPENAI', false)) return true;
+  if (AGA_CONFIG.brain.disableOpenAi) return true;
   return getAgaEngine() !== 'openai';
 }
 
@@ -94,5 +97,6 @@ export function agaEngineDiagnostics() {
     hasRealtimeTokenUrl: !!env('EXPO_PUBLIC_AGA_REALTIME_TOKEN_URL'),
     openAiRealtimeBlocked: isOpenAiRealtimeBlocked(),
     openAiModuleShouldLoad: shouldLoadOpenAiRealtimeModule(),
+    liveSessionPolicy: AGA_CONFIG.brain.liveSessionPolicy,
   };
 }

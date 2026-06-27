@@ -1,4 +1,4 @@
-import { AGA_ARCHITECTURE_FLAGS, describeArchitectureFlags } from './architectureFlags';
+import { AGA_CONFIG, summarizeAgaConfig } from '../config/agaConfig';
 
 export type RuntimeContractIssue = {
   severity: 'info' | 'warning' | 'error';
@@ -6,43 +6,47 @@ export type RuntimeContractIssue = {
   message: string;
 };
 
-function has(name: string) {
-  return !!String(process.env[name] ?? '').trim();
-}
-
 export function getRuntimeContractIssues(): RuntimeContractIssue[] {
   const issues: RuntimeContractIssue[] = [];
-  const f = AGA_ARCHITECTURE_FLAGS;
+  const config = AGA_CONFIG;
 
-  if (f.wakeEngine === 'porcupine') {
-    issues.push({
-      severity: 'warning',
-      code: 'wake.legacy_porcupine',
-      message: 'Porcupine is configured as a fallback. Production appliance mode should use Sherpa KWS for aga/stop/pause.',
-    });
+  if (config.wake.engine === 'disabled') {
+    issues.push({ severity: 'error', code: 'wake.disabled', message: 'Wake engine is disabled. A no-touch appliance needs Sherpa KWS for wake/control words.' });
   }
 
-  if (f.wakeEngine === 'disabled') {
-    issues.push({ severity: 'error', code: 'wake.disabled', message: 'Wake engine is disabled. A no-touch appliance needs Sherpa KWS.' });
+  if (config.wake.engine === 'porcupine') {
+    issues.push({ severity: 'warning', code: 'wake.legacy_porcupine', message: 'Porcupine is configured as the primary wake engine. Production appliance mode should use Sherpa KWS, with Porcupine only as fallback.' });
   }
 
-  if (f.shortTtsProvider === 'elevenlabs' && !has('EXPO_PUBLIC_AGA_TTS_GATEWAY_URL') && !has('EXPO_PUBLIC_ELEVENLABS_API_KEY')) {
-    issues.push({ severity: 'error', code: 'tts.elevenlabs_missing', message: 'ElevenLabs is selected but no API key or TTS gateway URL is configured.' });
+  if (/sherpa/.test(config.wake.engine) && !config.wake.sherpaModelDir) {
+    issues.push({ severity: 'error', code: 'wake.sherpa_assets_missing', message: 'Sherpa is selected but no Sherpa model directory is configured.' });
   }
 
-  if (f.shortTtsProvider === 'openai' && !has('EXPO_PUBLIC_AGA_TTS_GATEWAY_URL') && !has('EXPO_PUBLIC_OPENAI_API_KEY')) {
-    issues.push({ severity: 'error', code: 'tts.openai_missing', message: 'OpenAI TTS is selected but no API key or TTS gateway URL is configured.' });
+  if (/sherpa/.test(config.wake.engine) && config.wake.sherpaKeywords.length < 1) {
+    issues.push({ severity: 'error', code: 'wake.no_keywords', message: 'Sherpa is selected but no wake/control keywords are configured.' });
   }
 
-  if (!['true_hologram', 'tactile_relic', 'tactile_aga'].includes(f.displayMode)) {
-    issues.push({ severity: 'warning', code: 'display.not_holographic', message: `Display mode is ${f.displayMode}. Behind-glass builds should use true_hologram or tactile_relic.` });
+  if (config.tts.provider === 'elevenlabs' && !config.tts.gatewayUrl && !config.tts.elevenLabsApiKeyPresent) {
+    issues.push({ severity: 'error', code: 'tts.elevenlabs_missing', message: 'ElevenLabs is selected but no TTS gateway URL or ElevenLabs key is configured.' });
   }
 
-  if (!f.pureDisplay) {
+  if (config.tts.provider === 'openai' && !config.tts.gatewayUrl && !config.tts.openAiApiKeyPresent) {
+    issues.push({ severity: 'error', code: 'tts.openai_missing', message: 'OpenAI TTS is selected but no TTS gateway URL or OpenAI key is configured.' });
+  }
+
+  if (!config.security.allowDirectKeys && (config.tts.elevenLabsApiKeyPresent || config.tts.openAiApiKeyPresent)) {
+    issues.push({ severity: 'warning', code: 'security.public_keys_present', message: 'Direct EXPO_PUBLIC API keys are present while direct keys are disabled. Production builds should use secureSecrets or gateway endpoints.' });
+  }
+
+  if (!['true_hologram', 'tactile_relic', 'tactile_aga'].includes(config.display.mode)) {
+    issues.push({ severity: 'warning', code: 'display.not_holographic', message: `Display mode is ${config.display.mode}. Behind-glass builds should use true_hologram or tactile_relic.` });
+  }
+
+  if (!config.display.pureDisplay) {
     issues.push({ severity: 'warning', code: 'display.touch_allowed', message: 'Pure display mode is disabled. Behind-glass builds should avoid touch-only UI.' });
   }
 
-  if (!f.deterministicGuidedSessions) {
+  if (!config.appliance.deterministicGuidedSessions) {
     issues.push({ severity: 'warning', code: 'guided.model_paced', message: 'Deterministic guided sessions are disabled. Hypnosis/breathing pacing may drift.' });
   }
 
@@ -53,7 +57,7 @@ export function summarizeRuntimeContract() {
   const issues = getRuntimeContractIssues();
   const errors = issues.filter((i) => i.severity === 'error').length;
   const warnings = issues.filter((i) => i.severity === 'warning').length;
-  return `AGA runtime contract: ${describeArchitectureFlags()}. ${errors} errors, ${warnings} warnings.`;
+  return `AGA runtime contract: ${summarizeAgaConfig()}. ${errors} errors, ${warnings} warnings.`;
 }
 
 export function assertRuntimeContract() {
