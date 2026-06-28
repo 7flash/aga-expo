@@ -1,120 +1,95 @@
-export type VoiceTurnPhase =
-  | 'idle'
-  | 'wake_listening'
-  | 'awake'
-  | 'capturing_user'
-  | 'transcribing'
-  | 'routing'
-  | 'tool_running'
-  | 'thinking'
-  | 'speaking'
-  | 'live_session'
-  | 'guided_session'
-  | 'media'
-  | 'recovering'
-  | 'error';
+import type { VoicePhase, VoiceTranscriptLine } from './voiceTurnMachine';
 
-export type TranscriptLine = {
-  id: string;
-  role: 'user' | 'assistant' | 'system' | 'tool';
-  text: string;
-  createdAt?: string;
-  source?: string;
-};
+export type TurnPhase = VoicePhase;
+export type TranscriptLine = VoiceTranscriptLine;
 
-function clean(text: unknown) {
-  return String(text ?? '').replace(/\s+/g, ' ').trim();
+function clean(value: unknown) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim();
 }
 
-function textOf(message: any) {
-  return clean(message?.content ?? message?.text ?? message?.message ?? message?.transcript ?? '');
+function phaseFromLegacySnapshot(snapshot: any): TurnPhase {
+  const mode = String(snapshot?.mode || '').toLowerCase();
+  const status = clean(snapshot?.speechStatus).toLowerCase();
+  const session = clean(snapshot?.sessionLabel).toLowerCase();
+  if (snapshot?.error) return 'error';
+  if (mode === 'sleeping') return 'sleeping';
+  if (mode === 'awake') return 'wake_detected';
+  if (mode === 'listening') return /hearing|post-wake|command/.test(status) ? 'capturing_user' : 'wake_listening';
+  if (mode === 'thinking') return /tool|checking|routing/.test(status) ? 'tool_call' : 'thinking';
+  if (mode === 'speaking') return 'speaking';
+  if (mode === 'recovering') return 'recovering';
+  if (mode === 'media') return 'media';
+  if (session) return 'guided_session';
+  return 'wake_listening';
 }
 
-export function normalizeVoiceTurnPhase(snapshot: any): VoiceTurnPhase {
-  const mode = clean(snapshot?.mode).toLowerCase().replace(/_/g, '-');
-  const speech = clean(snapshot?.speechStatus).toLowerCase();
-  const tts = clean(snapshot?.ttsStatus).toLowerCase();
-
-  if (snapshot?.error || /error|failed|unavailable/.test(speech)) return 'error';
-  if (/recover/.test(mode) || /recover/.test(speech)) return 'recovering';
-  if (/speak|talking|playing tts/.test(mode) || /speaking|tts/.test(speech) || /speaking/.test(tts)) return 'speaking';
-  if (/transcrib/.test(mode) || /transcrib/.test(speech)) return 'transcribing';
-  if (/captur|record/.test(mode) || /captur|record/.test(speech)) return 'capturing_user';
-  if (/awake|wake detected/.test(mode) || /wake detected/.test(speech)) return 'awake';
-  if (/live|duplex|agent/.test(mode) || /live session|agent connected/.test(speech)) return 'live_session';
-  if (snapshot?.sessionLabel && /guided|breath|hypnosis|meditation|conflict|body scan/i.test(String(snapshot.sessionLabel))) return 'guided_session';
-  if (/tool/.test(mode) || /tool/.test(speech)) return 'tool_running';
-  if (/think|reason|route|routing|connect/.test(mode) || /thinking|routing|connecting|sent to/.test(speech)) return 'thinking';
-  if (snapshot?.activeMedia) return 'media';
-  if (/listen|wake-listening|sleep/.test(mode) || /listening/.test(speech)) return 'wake_listening';
-  return 'idle';
+export function currentTurnPhase(snapshot: any): TurnPhase {
+  return snapshot?.voiceTurn?.phase || snapshot?.turnPhase || phaseFromLegacySnapshot(snapshot);
 }
 
-export function turnPhaseLabel(phase: VoiceTurnPhase) {
+export function isMicOpenForUser(snapshot: any, allowBargeIn = false) {
+  const voiceTurn = snapshot?.voiceTurn;
+  if (voiceTurn) return !!voiceTurn.canAcceptUserSpeech || (allowBargeIn && voiceTurn.phase === 'speaking');
+  const phase = currentTurnPhase(snapshot);
+  if (allowBargeIn && phase === 'speaking') return true;
+  return ['wake_listening', 'capturing_user', 'guided_session', 'live_session'].includes(phase);
+}
+
+export function turnPhaseLabel(phase: TurnPhase) {
   switch (phase) {
-    case 'wake_listening': return 'Your turn: say AGA or speak';
-    case 'awake': return 'AGA heard you';
+    case 'booting': return 'Starting AGA';
+    case 'sleeping': return 'Sleeping';
+    case 'wake_listening': return 'Your turn';
+    case 'wake_detected': return 'Wake detected';
     case 'capturing_user': return 'Listening to you';
     case 'transcribing': return 'Understanding your words';
-    case 'routing': return 'Choosing what to do';
-    case 'tool_running': return 'Running a tool';
-    case 'thinking': return 'Thinking';
-    case 'speaking': return 'AGA is speaking — mic paused';
-    case 'live_session': return 'Live conversation';
+    case 'thinking': return 'AGA is thinking';
+    case 'tool_call': return 'AGA is using a tool';
+    case 'speaking': return 'AGA is speaking';
     case 'guided_session': return 'Guided session';
-    case 'media': return 'Media mode';
+    case 'live_session': return 'Live conversation';
+    case 'media': return 'Media playing';
     case 'recovering': return 'Recovering';
     case 'error': return 'Needs attention';
-    default: return 'Idle';
+    default: return 'AGA';
   }
 }
 
-export function turnPhaseHint(phase: VoiceTurnPhase) {
+export function turnPhaseHint(phase: TurnPhase) {
   switch (phase) {
-    case 'wake_listening': return 'Microphone is open for wake / next user turn.';
-    case 'capturing_user': return 'Speak now. AGA will stop listening when you pause.';
-    case 'transcribing': return 'Audio capture is closed while speech is converted to text.';
-    case 'thinking': return 'Do not listen yet. Wait until response is ready.';
-    case 'tool_running': return 'Tool is running. Mic stays closed unless stop/pause is detected locally.';
-    case 'speaking': return 'Normal wake/capture is blocked so AGA does not answer itself.';
-    case 'live_session': return 'Continuous mode is active; interruption policy depends on live engine settings.';
-    case 'guided_session': return 'Session controls: pause, resume, repeat, skip, deeper, end.';
-    case 'error': return 'Show this error in one place; do not duplicate debug panels.';
-    default: return 'Waiting.';
+    case 'wake_listening': return 'Mic is open. Speak naturally.';
+    case 'wake_detected': return 'AGA heard the wake signal and is opening the command ear.';
+    case 'capturing_user': return 'Keep speaking. AGA is capturing this turn.';
+    case 'transcribing': return 'Mic is paused while AGA converts speech to text.';
+    case 'thinking': return 'Mic is paused while AGA decides what to do.';
+    case 'tool_call': return 'Mic is paused while AGA checks a tool or setting.';
+    case 'speaking': return 'Mic is paused so AGA does not hear itself.';
+    case 'guided_session': return 'Follow the spoken guidance. Say stop, pause, repeat, deeper, or next.';
+    case 'live_session': return 'Live conversation is active.';
+    case 'media': return 'Say pause, resume, stop, quieter, or louder.';
+    case 'recovering': return 'AGA is resetting the voice path.';
+    case 'error': return 'Check the error text, then restart the voice path.';
+    case 'sleeping': return 'Wake path is inactive.';
+    default: return '';
   }
 }
 
-export function shouldShowMicOpen(phase: VoiceTurnPhase, allowBargeIn = false) {
-  if (phase === 'speaking') return !!allowBargeIn;
-  return phase === 'wake_listening' || phase === 'capturing_user' || phase === 'live_session';
-}
+export function transcriptFromSnapshot(snapshot: any, max = 80): TranscriptLine[] {
+  const canonical = snapshot?.voiceTurn?.transcript;
+  if (Array.isArray(canonical) && canonical.length) return canonical.slice(-max);
 
-export function transcriptFromSnapshot(snapshot: any, max = 40): TranscriptLine[] {
   const rows: TranscriptLine[] = [];
   const messages = Array.isArray(snapshot?.messages) ? snapshot.messages : [];
   for (let i = 0; i < messages.length; i += 1) {
-    const m = messages[i];
-    const text = textOf(m);
+    const message = messages[i];
+    const role = ['user', 'assistant', 'tool', 'system'].includes(String(message?.role)) ? message.role : 'system';
+    const text = clean(message?.content);
     if (!text) continue;
-    const roleRaw = clean(m?.role).toLowerCase();
-    const role = roleRaw === 'user' || roleRaw === 'assistant' || roleRaw === 'tool' ? roleRaw : 'system';
-    rows.push({
-      id: clean(m?.id || m?.createdAt || `${role}-${i}-${text.slice(0, 24)}`),
-      role: role as TranscriptLine['role'],
-      text,
-      createdAt: clean(m?.createdAt || m?.at || ''),
-      source: clean(m?.source || ''),
-    });
+    rows.push({ id: `message_${i}`, turnId: `legacy_${i}`, role, text, createdAt: message?.createdAt || '', final: true, source: 'messages' });
   }
-
-  const interim = clean(snapshot?.interim || snapshot?.heardText || snapshot?.partialTranscript || '');
-  if (interim) rows.push({ id: `interim-${Date.now()}`, role: 'user', text: interim, source: 'interim' });
-
-  const seen = new Set<string>();
-  return rows.filter((row) => {
-    const key = `${row.role}:${row.text}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  }).slice(-max);
+  const interim = clean(snapshot?.interim);
+  if (interim) rows.push({ id: 'interim', turnId: 'legacy_interim', role: 'user', text: interim, createdAt: new Date().toISOString(), final: false, source: 'interim' });
+  const heard = clean(snapshot?.heardText);
+  if (heard && !rows.some((row) => row.text === heard)) rows.push({ id: 'heard', turnId: 'legacy_heard', role: 'user', text: heard, createdAt: new Date().toISOString(), final: true, source: 'heardText' });
+  return rows.slice(-max);
 }
