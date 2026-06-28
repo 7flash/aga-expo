@@ -1,5 +1,6 @@
 import type { ShortUtteranceAudio } from '../shortUtteranceRecorder';
 import type { BrowserApplianceListener, BrowserWakeLayer } from './types';
+import { shouldBlockUserCapture, captureBlockedMs } from '../speakListenGate';
 
 function env(name: string, fallback = '') {
   return String(process.env?.[name] ?? fallback);
@@ -166,7 +167,11 @@ export class VolumeThresholdWakeLayer implements BrowserWakeLayer {
     this.listener?.({ type: 'audio-level', rms, peak });
 
     const now = Date.now();
-    if (now >= this.mutedUntil && this.state === 'armed') this.detectWake(now, rms);
+    if (shouldBlockUserCapture()) {
+      this.aboveSince = 0;
+      if (this.state === 'recording') void this.finishUtterance('assistant_output_started');
+      this.listener?.({ type: 'status', mode: 'wake-listening', message: `Capture blocked while AGA is speaking (${Math.round(captureBlockedMs())}ms).` });
+    } else if (now >= this.mutedUntil && this.state === 'armed') this.detectWake(now, rms);
     if (this.state === 'recording') void this.detectUtteranceEnd(now, rms);
 
     this.frame = requestAnimationFrame(this.tick);
@@ -190,7 +195,7 @@ export class VolumeThresholdWakeLayer implements BrowserWakeLayer {
     this.active = this.rolling.filter((chunk) => chunk.at >= cutoff);
     this.state = 'recording';
     this.listener?.({ type: 'wake', provider: this.name, rms, confidence: Math.min(1, rms / Math.max(this.options.threshold, 0.001)) });
-    this.listener?.({ type: 'status', mode: 'capturing', message: 'Speech detected; capturing utterance.' });
+    this.listener?.({ type: 'status', mode: 'capturing', message: 'Speech detected; capturing user utterance. Mic will close before AGA speaks.' });
   }
 
   private async detectUtteranceEnd(now: number, rms: number) {

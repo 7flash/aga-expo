@@ -7,6 +7,7 @@ import { ElevenLabsLiveAgentLayer, NoopLiveAgentLayer } from './liveAgentLayer';
 import { OpenAiSttLayer } from './openAiSttLayer';
 import { SherpaWasmWakeLayer } from './sherpaWasmWakeLayer';
 import { VolumeThresholdWakeLayer } from './volumeThresholdWakeLayer';
+import { blockCapture, shouldBlockUserCapture } from '../speakListenGate';
 
 function env(name: string, fallback = '') {
   return String(process.env?.[name] ?? fallback);
@@ -85,6 +86,10 @@ export class BrowserVoiceAppliance {
   }
 
   private handleWakeEvent(event: BrowserApplianceEvent) {
+    if ((event.type === 'wake' || event.type === 'utterance') && shouldBlockUserCapture()) {
+      this.emit({ type: 'status', mode: 'wake-listening', message: 'Ignored mic input because AGA is speaking.' });
+      return;
+    }
     this.emit(event);
     if (event.type === 'wake') {
       this.emit({ type: 'status', mode: 'awake', message: 'Wake detected.' });
@@ -99,7 +104,8 @@ export class BrowserVoiceAppliance {
     this.processing = true;
     try {
       this.wake.mute?.(2500);
-      this.emit({ type: 'status', mode: 'transcribing', message: 'Transcribing with OpenAI STT.' });
+      blockCapture(12000, 'post_wake_processing');
+      this.emit({ type: 'status', mode: 'transcribing', message: 'Your turn ended. Transcribing with OpenAI STT.' });
       const text = clean(await this.stt.transcribe(audio));
       if (!text) {
         this.emit({ type: 'status', mode: 'wake-listening', message: 'No speech recognized.' });
@@ -145,9 +151,10 @@ export class BrowserVoiceAppliance {
 
   private async speak(text: string, emotion: string) {
     this.wake.mute?.(Math.max(2500, text.length * 90));
-    this.emit({ type: 'status', mode: 'speaking', message: 'Speaking response.' });
+    blockCapture(Math.max(2500, text.length * 90), 'assistant_speaking');
+    this.emit({ type: 'status', mode: 'speaking', message: 'AGA is speaking. Normal wake/capture is paused.' });
     await this.tts.speak(text, { emotion });
-    this.emit({ type: 'status', mode: 'wake-listening', message: 'Back to wake listening.' });
+    this.emit({ type: 'status', mode: 'wake-listening', message: 'Back to wake listening. Your turn.' });
   }
 
   private async handleError(error: unknown) {
