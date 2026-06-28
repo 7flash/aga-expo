@@ -190,7 +190,7 @@ function normalizeKeywordResult(result: any, manifest: WakeAliasManifest | null)
 }
 
 function looksRawKeywordFile(text: string) {
-  return /\b(hey|hi|hello|yo|ok|okay|yes|go|start|wake|listen|aga|guardian|angel|stop|cancel|abort|quiet|pause|wait|hold)\bs+@/i.test(text);
+  return /\b(hey|hi|hello|yo|ok|okay|yes|go|start|wake|listen|aga|guardian|angel|stop|cancel|abort|quiet|pause|wait|hold)\s+@/i.test(text);
 }
 
 function createConfig(paths: typeof PRELOADED_PATH_SETS[number], expectedSampleRate: number, keywordsText: string) {
@@ -264,9 +264,15 @@ function startAudioWakeFallbackLoop(
   reason: string,
 ) {
   emitStatus(options, `using browser audio wake fallback: ${reason}`);
+  emitWakeDebug({
+    type: 'status',
+    provider: 'web-audio-wake',
+    message: `fallback threshold=${Number((process as any)?.env?.EXPO_PUBLIC_AGA_WEB_AUDIO_WAKE_RMS || 0.018)} holdMs=${Number((process as any)?.env?.EXPO_PUBLIC_AGA_WEB_AUDIO_WAKE_HOLD_MS || 650)} cooldownMs=${Number((process as any)?.env?.EXPO_PUBLIC_AGA_WEB_AUDIO_WAKE_COOLDOWN_MS || 4500)}`,
+  });
   let stopped = false;
   let frames = 0;
   let lastAudioDebugAt = 0;
+  let zeroGain: GainNode | null = null;
   let aboveSince = 0;
   let lastWakeAt = 0;
   const threshold = Number((process as any)?.env?.EXPO_PUBLIC_AGA_WEB_AUDIO_WAKE_RMS || 0.018);
@@ -274,14 +280,15 @@ function startAudioWakeFallbackLoop(
   const cooldownMs = Number((process as any)?.env?.EXPO_PUBLIC_AGA_WEB_AUDIO_WAKE_COOLDOWN_MS || 4500);
 
   processor.onaudioprocess = (event) => {
-    if ((globalThis as any)?.window?.__AGA_POST_WAKE_ACTIVE || (globalThis as any).__AGA_POST_WAKE_ACTIVE) return;
     if (stopped) return;
+    if ((globalThis as any)?.window?.__AGA_POST_WAKE_ACTIVE || (globalThis as any).__AGA_POST_WAKE_ACTIVE) return;
+    if (browserVoiceShouldIgnoreWake()) return;
     let samples = new Float32Array(event.inputBuffer.getChannelData(0));
     samples = downsampleBuffer(samples, audioContext.sampleRate, expectedSampleRate);
     frames += 1;
     const stats = audioStats(samples);
     const now = Date.now();
-    if (now - lastAudioDebugAt > 120) {
+    if (now - lastAudioDebugAt > 750) {
       lastAudioDebugAt = now;
       emitWakeDebug({ type: 'audio', provider: 'web-audio-wake', rms: stats.rms, peak: stats.peak, frames });
     }
@@ -291,6 +298,7 @@ function startAudioWakeFallbackLoop(
         lastWakeAt = now;
         aboveSince = 0;
         const wake = { id: 'aga', phrase: 'aga', confidence: Math.min(1, stats.rms / Math.max(0.001, threshold)), raw: { fallback: true, rms: stats.rms, peak: stats.peak, reason } };
+        markWakeDetected('web audio wake fallback');
         emitWakeDebug({ type: 'keyword', provider: 'web-audio-wake', keyword: 'aga', confidence: wake.confidence, raw: wake.raw });
         options.onKeyword(wake);
       }
@@ -299,12 +307,20 @@ function startAudioWakeFallbackLoop(
     }
   };
   source.connect(processor);
-  processor.connect(audioContext.destination);
+  // ScriptProcessor must be connected to run in older browsers, but routing the
+  // microphone graph directly to destination can create accidental monitor audio
+  // in web preview. Use a silent gain node instead.
+  zeroGain = audioContext.createGain();
+  zeroGain.gain.value = 0;
+  processor.connect(zeroGain);
+  zeroGain.connect(audioContext.destination);
   emitStatus(options, 'listening');
   return {
     stop: async () => {
       stopped = true;
       try { processor.disconnect(); } catch {}
+      try { zeroGain?.disconnect(); } catch {}
+      zeroGain = null;
       try { source.disconnect(); } catch {}
       for (const track of mediaStream.getTracks()) track.stop();
       try { await audioContext.close(); } catch {}
@@ -329,13 +345,15 @@ function startSherpaDecodeLoop(
   let stream: any = recognizer.createStream();
   let frames = 0;
   let lastAudioDebugAt = 0;
+  let zeroGain: GainNode | null = null;
   processor.onaudioprocess = (event) => {
     if (stopped) return;
+    if (browserVoiceShouldIgnoreWake()) return;
     let samples = new Float32Array(event.inputBuffer.getChannelData(0));
     samples = downsampleBuffer(samples, audioContext.sampleRate, expectedSampleRate);
     frames += 1;
     const now = Date.now();
-    if (now - lastAudioDebugAt > 160) {
+    if (now - lastAudioDebugAt > 750) {
       lastAudioDebugAt = now;
       const stats = audioStats(samples);
       emitWakeDebug({ type: 'audio', provider: 'sherpa-wasm', rms: stats.rms, peak: stats.peak, frames });
@@ -346,6 +364,7 @@ function startSherpaDecodeLoop(
       const result = recognizer.getResult(stream);
       if (result?.keyword && String(result.keyword).length > 0) {
         const normalized = normalizeKeywordResult(result, manifest);
+        markWakeDetected('sherpa wasm keyword');
         emitWakeDebug({ type: 'keyword', provider: 'sherpa-wasm', keyword: normalized.phrase, confidence: normalized.confidence, raw: result });
         options.onKeyword(normalized);
         recognizer.reset(stream);
@@ -355,12 +374,20 @@ function startSherpaDecodeLoop(
     }
   };
   source.connect(processor);
-  processor.connect(audioContext.destination);
+  // ScriptProcessor must be connected to run in older browsers, but routing the
+  // microphone graph directly to destination can create accidental monitor audio
+  // in web preview. Use a silent gain node instead.
+  zeroGain = audioContext.createGain();
+  zeroGain.gain.value = 0;
+  processor.connect(zeroGain);
+  zeroGain.connect(audioContext.destination);
   emitStatus(options, 'listening');
   return {
     stop: async () => {
       stopped = true;
       try { processor.disconnect(); } catch {}
+      try { zeroGain?.disconnect(); } catch {}
+      zeroGain = null;
       try { source.disconnect(); } catch {}
       try { stream?.free?.(); } catch {}
       try { recognizer?.free?.(); } catch {}

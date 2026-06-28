@@ -178,6 +178,10 @@ function cacheKeyFor(text: string, opts: ElevenLabsSpeakOptions): VoiceCacheKey 
 }
 
 async function playUri(uri: string) {
+  if (Platform.OS === 'web') {
+    await playBrowserBlob(await fetch(uri).then((res) => res.blob()).catch(() => new Blob([], { type: 'audio/mpeg' })));
+    return;
+  }
   const Audio = await importAudio();
   if (!Audio?.Sound?.createAsync) throw new Error('expo-av is required for expressive TTS playback.');
   await currentSound?.unloadAsync?.().catch?.(() => undefined);
@@ -195,7 +199,54 @@ async function playUri(uri: string) {
   });
 }
 
+async function playBrowserBlob(blob: Blob) {
+  if (typeof window === 'undefined' || typeof Audio === 'undefined' || typeof URL === 'undefined') {
+    throw new Error('Browser audio playback is unavailable.');
+  }
+  const url = URL.createObjectURL(blob);
+  const audio = new Audio(url);
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      audio.onended = null;
+      audio.onerror = null;
+      audio.oncanplaythrough = null;
+      try { URL.revokeObjectURL(url); } catch {}
+      if (typeof window !== 'undefined') (window as any).__AGA_TTS_ACTIVE = false;
+    };
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    };
+    const fail = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error('Browser audio playback failed.'));
+    };
+    audio.onended = done;
+    audio.onerror = fail;
+    audio.oncanplaythrough = () => audio.play().catch(fail);
+    audio.preload = 'auto';
+    if (typeof window !== 'undefined') (window as any).__AGA_TTS_ACTIVE = true;
+    setTimeout(() => audio.play().catch(fail), 120);
+    setTimeout(done, 60000);
+  });
+}
+
+async function playBrowserArrayBuffer(buffer: ArrayBuffer, outputFormat = 'mp3_44100_128') {
+  const mime = /pcm|wav/i.test(outputFormat) ? 'audio/wav' : 'audio/mpeg';
+  await playBrowserBlob(new Blob([buffer], { type: mime }));
+}
+
 async function playBytes(buffer: ArrayBuffer, key: VoiceCacheKey) {
+  if (Platform.OS === 'web') {
+    diagnostics.transport = isTtsGatewayConfigured() ? 'gateway' : 'direct-http';
+    await playBrowserArrayBuffer(buffer, key.outputFormat);
+    return;
+  }
   const native = nativeChunkPlayer();
   const base64 = toBase64(new Uint8Array(buffer));
   if (native?.playBase64Chunk) {
@@ -335,6 +386,7 @@ export async function speakWithElevenLabs(text: string, opts: ElevenLabsSpeakOpt
 }
 
 export async function prefetchElevenLabsAudio(text: string, opts: ElevenLabsSpeakOptions = {}) {
+  if (Platform.OS === 'web') return null;
   const clean = String(text || '').replace(/\s+/g, ' ').trim();
   if (!clean || !(await isElevenLabsAvailable())) return null;
   const key = cacheKeyFor(clean, { ...opts, emotion: opts.emotion || 'guided' });

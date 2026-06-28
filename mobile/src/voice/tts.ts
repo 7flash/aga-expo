@@ -1,22 +1,8 @@
 import { Platform } from 'react-native';
 import { measureAsync, measureMark } from '../observability/measure';
 import { speakWithElevenLabs as speakWithCachedElevenLabs, stopElevenLabsSpeech } from './elevenLabsTts';
+import { speakWithBrowserAudioTts, browserAudioTtsAvailable, stopBrowserAudioTts } from './browserAudioTts';
 
-async function agaV13TryBrowserAudioTts(text: string, options?: any) {
-  // aga:v13-browser-audio-tts
-  if (typeof window === 'undefined') return false;
-  const requested = String((process as any)?.env?.EXPO_PUBLIC_AGA_SHORT_TTS_PROVIDER || (process as any)?.env?.EXPO_PUBLIC_AGA_TTS_PROVIDER || '').toLowerCase();
-  if (!/elevenlabs|openai/.test(requested)) return false;
-  if (!browserAudioTtsAvailable(requested.includes('openai') ? 'openai' : 'elevenlabs')) return false;
-  await speakWithBrowserAudioTts(text, {
-    provider: requested.includes('openai') ? 'openai' : 'elevenlabs',
-    emotion: options?.emotion,
-  });
-  return true;
-}
-
-
-import { speakWithBrowserAudioTts, browserAudioTtsAvailable } from './browserAudioTts';
 
 declare function require(name: string): any;
 
@@ -65,6 +51,28 @@ function stabilityForEmotion(emotion: TtsEmotion) {
   return 0.56;
 }
 
+function browserProviderFor(candidate: TtsProvider): 'elevenlabs' | 'openai' | null {
+  if (Platform.OS !== 'web') return null;
+  if (candidate === 'elevenlabs') return 'elevenlabs';
+  if (candidate === 'openai') return 'openai';
+  if (candidate === 'auto') {
+    if (browserAudioTtsAvailable('elevenlabs')) return 'elevenlabs';
+    if (browserAudioTtsAvailable('openai')) return 'openai';
+  }
+  return null;
+}
+
+async function speakWithBrowserProvider(text: string, candidate: TtsProvider, opts: SpeakOptions) {
+  const browserProvider = browserProviderFor(candidate);
+  if (!browserProvider || !browserAudioTtsAvailable(browserProvider)) return false;
+  await speakWithBrowserAudioTts(text, {
+    provider: browserProvider,
+    emotion: opts.emotion,
+    voiceId: browserProvider === 'elevenlabs' ? voiceIdForEmotion(opts.emotion || 'warm') : openAiVoiceForEmotion(opts.emotion || 'warm'),
+  });
+  return true;
+}
+
 async function playBase64Mp3(base64: string) {
   const req = (0, eval)('typeof require !== "undefined" ? require : null');
   const FileSystem = req?.('expo-file-system');
@@ -95,6 +103,7 @@ async function responseArrayBufferToBase64(response: Response) {
 }
 
 export async function stopTts() {
+  stopBrowserAudioTts();
   await stopElevenLabsSpeech().catch(() => undefined);
   const root: any = globalThis as any;
   try { root?.speechSynthesis?.cancel?.(); } catch { /* ignore */ }
@@ -200,7 +209,11 @@ export async function speakText(text: string, opts: SpeakOptions = {}) {
     let lastError = '';
     for (const candidate of order) {
       try {
-        if (candidate === 'elevenlabs') {
+        if (await speakWithBrowserProvider(clean, candidate, opts)) {
+          // Browser preview must play API audio through an HTMLAudioElement.
+          // The native expo-av/file-system path is intentionally skipped on web.
+        }
+        else if (candidate === 'elevenlabs') {
           const ok = await speakWithCachedElevenLabs(clean, { emotion: opts.emotion || 'warm', cacheKey: opts.cacheKey, onError: opts.onError });
           if (!ok) await speakWithDirectElevenLabs(clean, opts);
         }

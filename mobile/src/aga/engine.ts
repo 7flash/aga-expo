@@ -18,6 +18,18 @@ function envFlag(name: string, fallback = false) {
   return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
 }
 
+function hasElevenLabsAgentConfig() {
+  return !!(env('EXPO_PUBLIC_ELEVENLABS_AGENT_ID') || env('EXPO_PUBLIC_ELEVENLABS_AGENT_SIGNED_URL_ENDPOINT') || env('EXPO_PUBLIC_AGA_ELEVENLABS_AGENT_SIGNED_URL_ENDPOINT'));
+}
+
+function hasGeminiConfig() {
+  return !!(env('EXPO_PUBLIC_GEMINI_API_KEY') || env('EXPO_PUBLIC_GOOGLE_API_KEY'));
+}
+
+function hasOpenAiRealtimeConfig() {
+  return !!(env('EXPO_PUBLIC_OPENAI_API_KEY') || env('EXPO_PUBLIC_AGA_REALTIME_TOKEN_URL') || env('EXPO_PUBLIC_AGA_REALTIME_SDP_URL'));
+}
+
 function parseEngine(raw: string): AgaEngine | null {
   const value = String(raw || '').trim().toLowerCase();
   if (!value) return null;
@@ -42,16 +54,24 @@ function decisionFrom(name: string): EngineDecision | null {
  */
 export function getAgaEngineDecision(): EngineDecision {
   const configured = AGA_CONFIG.brain.liveEngine;
-  if (configured) return { engine: configured, source: 'AGA_CONFIG.brain.liveEngine', raw: env('EXPO_PUBLIC_AGA_ENGINE') || configured };
+  if (configured) {
+    const raw = env('EXPO_PUBLIC_AGA_ENGINE') || configured;
+    if (configured === 'elevenlabs_agent' && !hasElevenLabsAgentConfig()) {
+      if (hasGeminiConfig()) return { engine: 'gemini', source: 'fallback:elevenlabs_agent_missing_config', raw };
+      if (hasOpenAiRealtimeConfig()) return { engine: 'openai', source: 'fallback:elevenlabs_agent_missing_config', raw };
+      return { engine: 'local', source: 'fallback:elevenlabs_agent_missing_config', raw };
+    }
+    return { engine: configured, source: 'AGA_CONFIG.brain.liveEngine', raw };
+  }
 
   return decisionFrom('EXPO_PUBLIC_AGA_RUNTIME_ENGINE')
     ?? decisionFrom('EXPO_PUBLIC_AGA_BRAIN_PROVIDER')
     ?? decisionFrom('EXPO_PUBLIC_AGA_PROVIDER')
     ?? decisionFrom('EXPO_PUBLIC_AGA_VOICE_ENGINE')
     ?? (() => {
-      const hasElevenLabsAgent = !!(env('EXPO_PUBLIC_ELEVENLABS_AGENT_ID') || env('EXPO_PUBLIC_ELEVENLABS_AGENT_SIGNED_URL_ENDPOINT') || env('EXPO_PUBLIC_AGA_ELEVENLABS_AGENT_SIGNED_URL_ENDPOINT'));
-      const hasGemini = !!(env('EXPO_PUBLIC_GEMINI_API_KEY') || env('EXPO_PUBLIC_GOOGLE_API_KEY'));
-      const hasOpenAI = !!(env('EXPO_PUBLIC_OPENAI_API_KEY') || env('EXPO_PUBLIC_AGA_REALTIME_TOKEN_URL') || env('EXPO_PUBLIC_AGA_REALTIME_SDP_URL'));
+      const hasElevenLabsAgent = hasElevenLabsAgentConfig();
+      const hasGemini = hasGeminiConfig();
+      const hasOpenAI = hasOpenAiRealtimeConfig();
       if (hasElevenLabsAgent) return { engine: 'elevenlabs_agent', source: 'auto:elevenlabs_agent_configured', raw: null } as EngineDecision;
       if (hasGemini && !hasOpenAI) return { engine: 'gemini', source: 'auto:gemini_key_without_openai', raw: null } as EngineDecision;
       if (envFlag('EXPO_PUBLIC_AGA_PREFER_GEMINI', false) && hasGemini) return { engine: 'gemini', source: 'EXPO_PUBLIC_AGA_PREFER_GEMINI', raw: '1' } as EngineDecision;
@@ -99,8 +119,8 @@ export function agaEngineDiagnostics() {
     EXPO_PUBLIC_AGA_PROVIDER: env('EXPO_PUBLIC_AGA_PROVIDER') || null,
     EXPO_PUBLIC_AGA_BRAIN_PROVIDER: env('EXPO_PUBLIC_AGA_BRAIN_PROVIDER') || null,
     EXPO_PUBLIC_AGA_DISABLE_OPENAI: env('EXPO_PUBLIC_AGA_DISABLE_OPENAI') || null,
-    hasElevenLabsAgent: !!(env('EXPO_PUBLIC_ELEVENLABS_AGENT_ID') || env('EXPO_PUBLIC_ELEVENLABS_AGENT_SIGNED_URL_ENDPOINT') || env('EXPO_PUBLIC_AGA_ELEVENLABS_AGENT_SIGNED_URL_ENDPOINT')),
-    hasGeminiKey: !!(env('EXPO_PUBLIC_GEMINI_API_KEY') || env('EXPO_PUBLIC_GOOGLE_API_KEY')),
+    hasElevenLabsAgent: hasElevenLabsAgentConfig(),
+    hasGeminiKey: hasGeminiConfig(),
     hasOpenAiKey: !!env('EXPO_PUBLIC_OPENAI_API_KEY'),
     hasRealtimeTokenUrl: !!env('EXPO_PUBLIC_AGA_REALTIME_TOKEN_URL'),
     openAiRealtimeBlocked: isOpenAiRealtimeBlocked(),

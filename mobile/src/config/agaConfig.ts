@@ -87,7 +87,11 @@ export const AGA_CONFIG = Object.freeze({
     sherpaModelDir: rawEnv('EXPO_PUBLIC_AGA_SHERPA_MODEL_DIR', 'assets/kws-model'),
     sherpaWasmModelUrl: rawEnv('EXPO_PUBLIC_AGA_SHERPA_WASM_MODEL_URL', '/sherpa/kws-model'),
     postWakeCommandWindowMs: numberEnv('EXPO_PUBLIC_AGA_POST_WAKE_COMMAND_WINDOW_MS', 8000),
-    postWakeTtsAck: flag('EXPO_PUBLIC_AGA_POST_WAKE_TTS_ACK', true),
+    // Default off for the browser/appliance wake loop. A spoken "Yes?" costs
+    // several seconds on Web Speech, can overlap with the user's command, and can
+    // retrigger RMS wake fallback. Enable explicitly only after echo suppression is
+    // proven on the target build.
+    postWakeTtsAck: flag('EXPO_PUBLIC_AGA_POST_WAKE_TTS_ACK', false),
     postWakeReply: rawEnv('EXPO_PUBLIC_AGA_POST_WAKE_REPLY', 'Yes?'),
   }),
   brain: Object.freeze({
