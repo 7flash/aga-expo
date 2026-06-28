@@ -34,7 +34,7 @@ const GENERATIVE_SHORT_PATTERNS = [
 
 const EXPLICIT_LIVE_PATTERNS = [
   /\b(live session|live mode|open mic|hands free|hands-free|duplex|stay with me|keep listening|conversation mode)\b/i,
-  /\b(lets? practice|practice english|language tutor|role play with me|talk with me continuously)\b/i,
+  /\b(let'?s practice|practice english|language tutor|role play with me|talk with me continuously)\b/i,
   /\b(interactive guided|guide me interactively|continuous conversation)\b/i,
 ];
 
@@ -49,7 +49,8 @@ function wordCount(text: string) {
 }
 
 function isShortQuestion(text: string) {
-  return /\?$/.test(text.trim()) || /^(what|who|when|where|why|how|is|are|can|could|should|do|does|did)\b/i.test(text.trim());
+  const clean = text.trim();
+  return /\?$/.test(clean) || /^(what|who|when|where|why|how|is|are|can|could|should|do|does|did)\b/i.test(clean);
 }
 
 function livePolicy() {
@@ -64,15 +65,13 @@ export function decideVoicePath(text: string): VoicePathDecision {
   if (DIRECT_TOOL_PATTERNS.some((re) => re.test(clean))) return { path: 'short_stt_gpt5_tools_tts', reason: 'direct_tool_or_setting_request' };
   if (GENERATIVE_SHORT_PATTERNS.some((re) => re.test(clean))) return { path: 'short_stt_gpt5_tools_tts', reason: 'generate_then_tts' };
   if (livePolicy() !== 'never' && EXPLICIT_LIVE_PATTERNS.some((re) => re.test(clean))) return { path: 'live_session', reason: 'explicit_live_phrase' };
+
   const policy = livePolicy();
   if (policy === 'always') return { path: 'live_session', reason: 'policy_always_live_session' };
   if (policy === 'most_requests' && !isShortQuestion(clean)) return { path: 'live_session', reason: 'policy_most_requests_live_session' };
-  if (policy === 'casual_by_default' && CASUAL_LIVE_PATTERNS.some((re) => re.test(clean))) {
-    return { path: 'live_session', reason: 'casual_conversation_phrase' };
-  }
-  if (policy === 'casual_by_default' && wordCount(clean) > 14 && !isShortQuestion(clean)) {
-    return { path: 'live_session', reason: 'long_open_ended_casual_request' };
-  }
+  if (policy === 'casual_by_default' && CASUAL_LIVE_PATTERNS.some((re) => re.test(clean))) return { path: 'live_session', reason: 'casual_conversation_phrase' };
+  if (policy === 'casual_by_default' && wordCount(clean) > 14 && !isShortQuestion(clean)) return { path: 'live_session', reason: 'long_open_ended_casual_request' };
+
   return { path: 'short_stt_gpt5_tools_tts', reason: 'default_short_reasoning_path' };
 }
 

@@ -28,7 +28,7 @@ function inferLocalActions(text: string): AgaAction[] {
   if (/\b(resume|continue)\b/.test(clean)) actions.push(action('media_resume'));
   if (/\b(reset context|start over|new session|fresh session|clear context)\b/.test(clean)) actions.push(action('reset_conversation'));
   if (/\b(open|show)\b.*\b(settings|menu|options)\b|^\s*(settings|menu|options)\s*$/.test(clean)) actions.push(action('open_settings'));
-  if (/\b(play|open|show|search)\b.*\b(youtube|video|music|song)\b/.test(clean)) actions.push(action('play_youtube', { query: text }));
+  if (/\b(play|open|show|search|pull up)\b.*\b(youtube|video|music|song)\b/.test(clean)) actions.push(action('play_youtube', { query: text }));
 
   return actions;
 }
@@ -49,7 +49,7 @@ export function parseVoiceCommand(text: string, wakePhrase = 'aga'): ParsedComma
   const clean = normalizeSpeech(stripWakePrefix(rawText, wakePhrase) || rawText);
   const actions = inferLocalActions(clean);
 
-  return {
+  return sanitizeTurn({
     rawText,
     text: clean,
     speech: '',
@@ -57,5 +57,5 @@ export function parseVoiceCommand(text: string, wakePhrase = 'aga'): ParsedComma
     actions: actions.length ? actions : [{ type: 'chat', text: clean }],
     handledLocally: actions.length > 0,
     woke,
-  };
+  } as ParsedCommand) as ParsedCommand;
 }
