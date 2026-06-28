@@ -114,6 +114,8 @@ export class WakeRealtimeController {
   private shortAudioTurn: ShortReasoningAudioTurn | null = null;
   private shortAudioReason: string | null = null;
   private resolvingPostWake = false;
+  private lastHandledTurnText = '';
+  private lastHandledTurnAt = 0;
 
   private snapshot: RealtimeSnapshot = {
     ready: false,
@@ -369,6 +371,16 @@ ${hint.detail}` : ''}`,
   }
 
   private async handleTurnText(text: string, source: 'wake' | 'replay' | 'command_window') {
+    const normalized = normalizeSpeech(text).toLowerCase();
+    const now = Date.now();
+    if (normalized && normalized === this.lastHandledTurnText && now - this.lastHandledTurnAt < 6500) {
+      await logEvent('turn.duplicate_ignored', `${source}:${text.slice(0, 120)}`).catch(() => undefined);
+      this.publish({ interim: '', heardText: text, speechStatus: 'duplicate voice turn ignored' } as any);
+      return;
+    }
+    this.lastHandledTurnText = normalized;
+    this.lastHandledTurnAt = now;
+
     await this.stopPostWakeCommandWindow('turn_text').catch(() => undefined);
     await this.cancelShortAudioTurn('text_arrived').catch(() => undefined);
     this.publish({ heardText: text, interim: text, speechStatus: source === 'replay' ? `replay: ${text.slice(0, 54)}` : `heard: ${text.slice(0, 54)}` } as any);

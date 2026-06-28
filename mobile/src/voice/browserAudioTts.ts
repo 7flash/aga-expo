@@ -1,5 +1,5 @@
 import { measureAsync } from '../observability/measure';
-import { markSpeaking, markIdle, muteWakeFor, noteReply } from './browserVoiceActivityState';
+import { markSpeaking, markTtsDone, muteWakeFor, noteReply } from './browserVoiceActivityState';
 
 export type BrowserAudioTtsProvider = 'elevenlabs' | 'openai';
 
@@ -20,6 +20,22 @@ function isWeb() {
 
 function clean(text: string) {
   return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+function estimatedPlaybackMs(text: string) {
+  const chars = clean(text).length;
+  // Browser blob audio can lose the `ended` event in Expo web/Hermes preview.
+  // Use a voice-length estimate as the safety timer instead of a fixed 60s,
+  // otherwise a one-sentence answer keeps AGA in SPEAKING for a full minute.
+  return Math.max(1400, Math.min(22000, Math.round(900 + chars * 58)));
+}
+
+function playbackTimeoutMs(audio: HTMLAudioElement, spokenText: string) {
+  const duration = Number(audio.duration);
+  if (Number.isFinite(duration) && duration > 0) {
+    return Math.max(1200, Math.min(30000, Math.round(duration * 1000 + 1200)));
+  }
+  return estimatedPlaybackMs(spokenText) + 1600;
 }
 
 let activeAudio: HTMLAudioElement | null = null;
@@ -61,17 +77,34 @@ async function playBlob(blob: Blob, spokenText: string) {
     (window as any).__AGA_TTS_ACTIVE = true;
   }
 
+  const estimatedMs = estimatedPlaybackMs(spokenText);
+
   noteReply(spokenText);
-  markSpeaking('tts playback', 45000);
-  muteWakeFor(45000, 'mute wake during TTS');
+  markSpeaking('tts playback', estimatedMs + 2200);
+  muteWakeFor(estimatedMs + 2800, 'mute wake during TTS');
 
   await new Promise<void>((resolve, reject) => {
     let settled = false;
+    let started = false;
+    let safetyTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const clearSafetyTimer = () => {
+      if (safetyTimer) clearTimeout(safetyTimer);
+      safetyTimer = null;
+    };
+
+    const armSafetyTimer = () => {
+      clearSafetyTimer();
+      safetyTimer = setTimeout(done, playbackTimeoutMs(audio, spokenText));
+    };
 
     const cleanup = () => {
+      clearSafetyTimer();
       audio.onended = null;
       audio.onerror = null;
       audio.oncanplaythrough = null;
+      audio.onloadedmetadata = null;
+      audio.ontimeupdate = null;
       audio.onpause = null;
     };
 
@@ -93,7 +126,7 @@ async function playBlob(blob: Blob, spokenText: string) {
       // Keep wake muted briefly so the microphone does not catch the tail of
       // speaker output and immediately start another command.
       muteWakeFor(1800, 'post TTS tail mute');
-      markIdle('tts done');
+      markTtsDone('browser audio tts done');
       resolve();
     };
 
@@ -107,27 +140,32 @@ async function playBlob(blob: Blob, spokenText: string) {
       }
 
       muteWakeFor(1200, 'tts failed tail mute');
-      markIdle('tts failed');
+      markTtsDone('browser audio tts failed');
       reject(new Error('Browser audio playback failed.'));
     };
 
     audio.onended = done;
     audio.onerror = fail;
+    audio.onloadedmetadata = armSafetyTimer;
+    audio.ontimeupdate = () => {
+      const duration = Number(audio.duration);
+      if (Number.isFinite(duration) && duration > 0 && audio.currentTime >= duration - 0.05) done();
+    };
     audio.onpause = () => {
       if (audio.currentTime > 0 && audio.ended) done();
     };
 
     const start = () => {
-      audio.play().catch(fail);
+      if (started || settled) return;
+      started = true;
+      armSafetyTimer();
+      audio.play().then(armSafetyTimer).catch(fail);
     };
 
     audio.oncanplaythrough = start;
 
     // Some browsers never fire canplaythrough reliably for blob MP3.
     setTimeout(start, 120);
-
-    // Safety: prevent permanent speaking state if onended is lost.
-    setTimeout(done, 60000);
   });
 }
 

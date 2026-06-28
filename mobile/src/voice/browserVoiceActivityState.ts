@@ -20,8 +20,8 @@ export type BrowserVoiceState = {
   lastReply: string;
 };
 
-const KEY = '__AGA_BROWSER_VOICE_STATE_V16';
-const LEGACY_KEY = '__AGA_BROWSER_VOICE_STATE_V15';
+const KEY = '__AGA_BROWSER_VOICE_STATE_V17';
+const LEGACY_KEY = '__AGA_BROWSER_VOICE_STATE_V16';
 
 function now() {
   return Date.now();
@@ -158,9 +158,11 @@ export function markIdle(reason = 'idle') {
   state.updatedAt = now();
   state.commandActiveUntil = 0;
   state.thinkingActiveUntil = 0;
+  state.speakingActiveUntil = 0;
 
   if (typeof window !== 'undefined') {
     (window as any).__AGA_POST_WAKE_ACTIVE = false;
+    (window as any).__AGA_TTS_ACTIVE = false;
   }
 
   publish();
