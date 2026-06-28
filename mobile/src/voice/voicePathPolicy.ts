@@ -21,6 +21,10 @@ const DIRECT_TOOL_PATTERNS = [
   /\b(play|open|show|search|pull up)\b.*\b(youtube|video|music|song|ambient)\b/i,
   /\b(change|switch|choose|set|open|show)\b.*\b(voice|settings|personality|persona|language|listening|sensitivity)\b/i,
   /\b(remind me|set a reminder|remember this|forget everything|start over|new session)\b/i,
+  /\b(what(?:'s| is) the time|what time is it|current time|tell me the time|time now)\b/i,
+  /\b(what(?:'s| is) today'?s date|what date is it|current date|what day is it|day today)\b/i,
+  /\b(weather|temperature|forecast|rain|wind|humidity|how hot|how cold)\b/i,
+  /\b(how many|calculate|convert|timer|alarm|schedule|calendar)\b/i,
 ];
 
 const GENERATIVE_SHORT_PATTERNS = [
@@ -34,6 +38,20 @@ const EXPLICIT_LIVE_PATTERNS = [
   /\b(interactive guided|guide me interactively|continuous conversation)\b/i,
 ];
 
+const CASUAL_LIVE_PATTERNS = [
+  /\b(let'?s talk|talk to me|chat with me|keep me company|hang out with me|stay with me)\b/i,
+  /\b(i want to talk|can we talk|can we chat|i need to talk|i feel lonely)\b/i,
+  /\b(how are you|what do you think|tell me about yourself)\b/i,
+];
+
+function wordCount(text: string) {
+  return String(text || '').trim().split(/\s+/).filter(Boolean).length;
+}
+
+function isShortQuestion(text: string) {
+  return /\?$/.test(text.trim()) || /^(what|who|when|where|why|how|is|are|can|could|should|do|does|did)\b/i.test(text.trim());
+}
+
 function livePolicy() {
   return AGA_CONFIG.brain.liveSessionPolicy;
 }
@@ -46,8 +64,14 @@ export function decideVoicePath(text: string): VoicePathDecision {
   if (DIRECT_TOOL_PATTERNS.some((re) => re.test(clean))) return { path: 'short_stt_gpt5_tools_tts', reason: 'direct_tool_or_setting_request' };
   if (GENERATIVE_SHORT_PATTERNS.some((re) => re.test(clean))) return { path: 'short_stt_gpt5_tools_tts', reason: 'generate_then_tts' };
   if (livePolicy() !== 'never' && EXPLICIT_LIVE_PATTERNS.some((re) => re.test(clean))) return { path: 'live_session', reason: 'explicit_live_phrase' };
-  if (livePolicy() === 'always' || livePolicy() === 'casual_by_default' || livePolicy() === 'most_requests') {
-    return { path: 'live_session', reason: 'casual_default_live_session' };
+  const policy = livePolicy();
+  if (policy === 'always') return { path: 'live_session', reason: 'policy_always_live_session' };
+  if (policy === 'most_requests' && !isShortQuestion(clean)) return { path: 'live_session', reason: 'policy_most_requests_live_session' };
+  if (policy === 'casual_by_default' && CASUAL_LIVE_PATTERNS.some((re) => re.test(clean))) {
+    return { path: 'live_session', reason: 'casual_conversation_phrase' };
+  }
+  if (policy === 'casual_by_default' && wordCount(clean) > 14 && !isShortQuestion(clean)) {
+    return { path: 'live_session', reason: 'long_open_ended_casual_request' };
   }
   return { path: 'short_stt_gpt5_tools_tts', reason: 'default_short_reasoning_path' };
 }

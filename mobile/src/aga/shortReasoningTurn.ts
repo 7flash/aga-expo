@@ -3,7 +3,7 @@ import { transcribeWithOpenAI } from '../ai/openaiStt';
 import { createShortUtteranceRecorder, shortUtteranceCaptureMs, type ShortUtteranceRecorder } from '../voice/shortUtteranceRecorder';
 import { speakShortReply } from '../voice/speechOut';
 import { subconsciousRecall } from '../memory/subconsciousRag';
-import { logEvent, type Preferences } from '../db/localStore';
+import { addMessage, logEvent, type Preferences } from '../db/localStore';
 import type { JsonObject } from './capabilityRegistry';
 
 export type ShortReasoningTurnContext = {
@@ -40,6 +40,7 @@ export async function answerShortTextWithGpt5(text: string, ctx: ShortReasoningT
   const recall = await subconsciousRecall(clean).catch(() => null);
   const memories = recall?.memories?.map((m: any) => String(m.text || m)) || [];
   await logEvent('turn.gpt5_tools.start', clean.slice(0, 240)).catch(() => undefined);
+  await addMessage('user', clean).catch(() => undefined);
   const reply = await runGpt5ToolTurn({
     text: clean,
     prefs: ctx.getPrefs(),
@@ -49,6 +50,7 @@ export async function answerShortTextWithGpt5(text: string, ctx: ShortReasoningT
   const spoken = truncateForVoice(reply, clean);
   ctx.publish?.({ mode: 'speaking', speechStatus: spoken.slice(0, 96), interim: '', heardText: clean });
   await speakShortReply(spoken, 'warm');
+  await addMessage('assistant', spoken).catch(() => undefined);
   await logEvent('turn.gpt5_tools.reply', spoken.slice(0, 240)).catch(() => undefined);
   return spoken;
 }

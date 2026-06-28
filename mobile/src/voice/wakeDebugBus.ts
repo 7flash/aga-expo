@@ -240,6 +240,7 @@ function startBrowserWakeUi() {
     .aga-wake-primary { color: #ffd06e; font-size: 15px; font-weight: 950; margin-bottom: 5px; }
     .aga-wake-detail { color: #bdf8ff; font-size: 12px; font-weight: 850; margin-top: 2px; }
     .aga-wake-transcript { color: #ffffff; font-size: 13px; font-weight: 900; margin-top: 4px; }
+    .aga-wake-reply { color: #ffd06e; font-size: 13px; font-weight: 950; margin-top: 4px; }
     .aga-wake-error { color: #ff6b83; font-size: 12px; font-weight: 900; margin-top: 4px; }
   `;
   document.head.appendChild(style);
@@ -257,6 +258,7 @@ function startBrowserWakeUi() {
     <div class="aga-wake-detail" data-aga-wake-stats>no mic frames yet</div>
     <div class="aga-wake-detail" data-aga-wake-keyword>wake trigger starts command capture; full words appear after wake/STT</div>
     <div class="aga-wake-transcript" data-aga-wake-transcript style="display:none"></div>
+    <div class="aga-wake-reply" data-aga-wake-reply style="display:none"></div>
     <div class="aga-wake-error" data-aga-wake-error style="display:none"></div>
   `;
 
@@ -321,7 +323,10 @@ function startBrowserWakeUi() {
       : 'no mic frames yet';
 
     const keyword = root.querySelector('[data-aga-wake-keyword]') as HTMLElement;
-    if (lastKeyword && t - lastKeyword.at < 14000) {
+    if (phase) {
+      const reason = state.reason ? ` · ${state.reason}` : '';
+      keyword.textContent = `${phase.toLowerCase()}${reason}`;
+    } else if (lastKeyword && t - lastKeyword.at < 14000) {
       keyword.textContent = `wake detected · ${phase === 'COMMAND WINDOW' ? 'say your command now' : 'ready'}`;
     } else {
       keyword.textContent = 'sustained voice wakes AGA; full words appear after wake/STT';
@@ -335,6 +340,14 @@ function startBrowserWakeUi() {
       transcript.textContent = `heard: ${transcriptText}`;
     } else {
       transcript.style.display = 'none';
+    }
+
+    const reply = root.querySelector('[data-aga-wake-reply]') as HTMLElement;
+    if (state.lastReply) {
+      reply.style.display = 'block';
+      reply.textContent = `AGA: ${state.lastReply.slice(0, 150)}`;
+    } else {
+      reply.style.display = 'none';
     }
 
     const err = root.querySelector('[data-aga-wake-error]') as HTMLElement;
@@ -357,14 +370,14 @@ function scrubOldText() {
 
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
   const replacements: Array<[RegExp, string]> = [
-    [/Current Sherpa vocab cannot encode HEY\/AGA\. Speak clearly to wake browser preview\./g, CLEAN_HINT],
-    [/Current Sherpa vocabulary cannot encode HEY\/AGA\. Speak clearly to wake browser preview\./g, CLEAN_HINT],
+    [/Current Sherpa vocab cannot encode HEY\/AGA. Speak clearly to wake browser preview./g, CLEAN_HINT],
+    [/Current Sherpa vocabulary cannot encode HEY\/AGA. Speak clearly to wake browser preview./g, CLEAN_HINT],
     [/TACTILE NEURAL RELIC/g, 'VOICE WAKE CONSOLE'],
     [/Tactile Neural Relic/g, 'Voice Wake Console'],
     [/tactile neural relic/g, 'voice wake console'],
     [/relic core/g, 'AGA'],
     [/develop patina/g, 'show live mic activity'],
-    [/Voice commands mechanically actuate[^.]+\./g, 'Microphone is live. Wake trigger starts AGA; full words appear after wake.'],
+    [/Voice commands mechanically actuate[^.]+./g, 'Microphone is live. Wake trigger starts AGA; full words appear after wake.'],
   ];
 
   let node: Node | null;

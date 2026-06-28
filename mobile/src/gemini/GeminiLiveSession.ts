@@ -624,8 +624,8 @@ export class GeminiLiveSession implements VoiceTransport {
       const inline = part?.inlineData ?? part?.inline_data;
       const mime = String(inline?.mimeType ?? inline?.mime_type ?? '');
       const data = inline?.data;
-      if (data && /audio/pcm/i.test(mime)) {
-        const match = mime.match(/rate=(d+)/i);
+      if (data && /audio\/pcm/i.test(mime)) {
+        const match = mime.match(/rate=(\d+)/i);
         return { data: String(data), rate: match ? Number(match[1]) || 24000 : 24000 };
       }
     }

@@ -7,18 +7,20 @@ import { createPostWakeCommandEngine, postWakeWindowMs } from '../voice/postWake
 import { speakShortReply, stopSpeaking } from '../voice/speechOut';
 import { enterTier3DuplexAudio, exitTier3DuplexAudio, ensureWakeForegroundService, releaseWakeForegroundService, tier3AudioDiagnostics } from '../voice/tier3DuplexAudio';
 import { classifyTurnForVoicePath } from '../voice/liveEscalation';
+import { decideVoicePath, type VoicePathDecision } from '../voice/voicePathPolicy';
 import { canonicalWakePhrase } from '../voice/wakePhraseAliases';
 import { localControlIntent } from './localControls';
 import { answerShortTextWithGpt5, ShortReasoningAudioTurn } from './shortReasoningTurn';
 import { DeterministicGuidedRunner } from '../sessions/deterministicGuidedRunner';
 import { guidedKindFromText } from '../sessions/guidedPhaseScripts';
-import { initializeLocalStore, listMessages, listPendingReminders, loadPreferences, logEvent, startNewConversationSession, type Preferences } from '../db/localStore';
+import { addMessage, initializeLocalStore, listMessages, listPendingReminders, loadPreferences, logEvent, startNewConversationSession, type Preferences } from '../db/localStore';
 import { normalizeSpeech } from './text';
-import { agaEngineDiagnostics, getAgaEngine } from './engine';
+import { agaEngineDiagnostics, getAgaEngine, getAgaEngineDecision } from './engine';
 import { measureAsync, measureMark } from '../observability/measure';
 import type { VoiceTransport, VoiceTransportSnapshot } from '../voice/VoiceTransport';
 import type { AgaMode } from './turn';
 import { registerWakeRealtimeControllerBrowserSink } from './browserWakeRealtimeControllerSink';
+import { markCommandActive, markThinking, markLiveSessionActive, extendLiveSession, markLiveSessionDone, muteWakeFor } from '../voice/browserVoiceActivityState';
 
 type RealtimeSnapshot = VoiceTransportSnapshot;
 
@@ -39,6 +41,23 @@ function selectedEngine() {
 
 function postWakeReply() {
   return AGA_CONFIG.wake.postWakeReply || 'Yes?';
+}
+
+function routeSpeechStatus(decision: VoicePathDecision) {
+  if (decision.path === 'local_control') return 'routing: local voice control';
+  if (decision.path === 'deterministic_guided') return 'routing: guided voice session';
+  if (decision.path === 'live_session') return 'routing: live conversation transport';
+  if (decision.reason === 'direct_tool_or_setting_request') return 'routing: GPT/tool short answer';
+  if (decision.reason === 'generate_then_tts') return 'routing: generate then speak';
+  return 'routing: short GPT/tool answer';
+}
+
+function isTimeOrDateRequest(text: string) {
+  return /\b(what(?:'s| is) the time|what time is it|current time|tell me the time|time now|what(?:'s| is) today'?s date|what date is it|current date|what day is it|day today)\b/i.test(text);
+}
+
+function isWeatherRequest(text: string) {
+  return /\b(weather|temperature|forecast|rain|wind|humidity|how hot|how cold)\b/i.test(text);
 }
 
 function wakeRepairHint(message: string) {
@@ -220,7 +239,10 @@ export class WakeRealtimeController {
   }
 
   private async startWakeScout(reason: string) {
-    if (!this.started || this.wakeEngine) return;
+    // There is only one active ear. During a live transport session the transport
+    // owns the microphone, so the wake scout must stay off. This prevents the
+    // browser RMS fallback from re-waking on agent/TTS audio and duplicating turns.
+    if (!this.started || this.wakeEngine || this.realtime) return;
     const engine = createWakeEngine();
     this.wakeEngine = engine;
     this.wakeUnsubscribe = engine.subscribe((event) => this.onWakeEvent(event));
@@ -274,6 +296,10 @@ ${hint.detail}` : ''}`,
       return;
     }
     if (event.type !== 'keyword') return;
+    if (this.realtime) {
+      extendLiveSession('wake ignored during live session');
+      return;
+    }
 
     const keyword = String(event.keyword || '').trim();
     const canonical = canonicalWakePhrase(keyword);
@@ -313,7 +339,12 @@ ${hint.detail}` : ''}`,
   }
 
   private async handleWake(text: string, source: string) {
+    if (this.realtime) {
+      extendLiveSession('wake ignored during live session');
+      return;
+    }
     await logEvent('wake.accepted', `${source}:${text || 'keyword_only'}`).catch(() => undefined);
+    markCommandActive(`post wake:${source}`, postWakeWindowMs() + 1500);
     this.resolvingPostWake = false;
     this.publish({ interim: '', heardText: 'keyword detected: aga', speechStatus: 'wake detected — opening command ear', mode: 'awake' } as any);
     if (AGA_CONFIG.wake.postWakeTtsAck) {
@@ -341,6 +372,7 @@ ${hint.detail}` : ''}`,
     await this.stopPostWakeCommandWindow('turn_text').catch(() => undefined);
     await this.cancelShortAudioTurn('text_arrived').catch(() => undefined);
     this.publish({ heardText: text, interim: text, speechStatus: source === 'replay' ? `replay: ${text.slice(0, 54)}` : `heard: ${text.slice(0, 54)}` } as any);
+    markThinking(`turn text:${source}`, 14000);
 
     const activeMenu = (this.snapshot as any).activeChoiceMenu ?? null;
     if (activeMenu?.options?.length) {
@@ -364,7 +396,16 @@ ${hint.detail}` : ''}`,
 
     if (this.guided && await this.guided.acceptUserResponse(text).catch(() => false)) return;
     const kind = guidedKindFromText(text);
+    const decision = decideVoicePath(text);
     const route = classifyTurnForVoicePath(text);
+    this.publish({
+      mode: 'thinking',
+      speechStatus: routeSpeechStatus(decision),
+      heardText: text,
+      voiceCapability: { ...(this.snapshot as any).voiceCapability, lastVoicePath: decision },
+    } as any);
+    markThinking(routeSpeechStatus(decision), 14000);
+
     if (route === 'deterministic_session' && kind) {
       await this.stopRealtime('deterministic_guided');
       await this.stopWakeScout('deterministic_guided');
@@ -433,6 +474,8 @@ ${hint.detail}` : ''}`,
     }
     try {
       const runner = this.ensureCapabilities();
+      if (await this.tryDeterministicUtility(text, runner)) return;
+      this.publish({ mode: 'thinking', speechStatus: 'thinking with GPT/tools', heardText: text } as any);
       await answerShortTextWithGpt5(text, {
         getPrefs: () => this.prefs,
         runCapability: (name, args) => runner.run(name, args),
@@ -445,6 +488,23 @@ ${hint.detail}` : ''}`,
     }
     await this.refresh();
     await this.startWakeScout('short_reasoning_done').catch(() => undefined);
+  }
+
+  private async tryDeterministicUtility(text: string, runner: ReturnType<typeof createCapabilityRunner>) {
+    const tool = isTimeOrDateRequest(text) ? 'get_time' : isWeatherRequest(text) ? 'get_weather' : '';
+    if (!tool) return false;
+
+    this.publish({ mode: 'thinking', speechStatus: tool === 'get_time' ? 'checking time' : 'checking weather', heardText: text } as any);
+    await addMessage('user', text).catch(() => undefined);
+    const response = await runner.run(tool, tool === 'get_time' ? { format: 'spoken' } : {}).catch((error: unknown) => error instanceof Error ? error.message : String(error || 'tool failed'));
+    const spoken = String(response || 'Done.').trim();
+    this.publish({ mode: 'speaking', speechStatus: spoken.slice(0, 96), interim: '', heardText: text } as any);
+    await speakShortReply(spoken, 'warm').catch(() => undefined);
+    await addMessage('assistant', spoken).catch(() => undefined);
+    await logEvent('turn.direct_utility.reply', `${tool}: ${spoken.slice(0, 200)}`).catch(() => undefined);
+    await this.refresh();
+    await this.startWakeScout(`direct_utility_done:${tool}`).catch(() => undefined);
+    return true;
   }
 
   private async startBufferedShortAudio(reason: string) {
@@ -504,6 +564,7 @@ ${hint.detail}` : ''}`,
 
   private async activateLiveSession(initialText: string) {
     if (this.realtime) {
+      extendLiveSession('existing live session replay');
       this.realtime.replay(initialText);
       this.armIdleTimer();
       return;
@@ -511,6 +572,9 @@ ${hint.detail}` : ''}`,
     await this.cancelShortAudioTurn('live_session').catch(() => undefined);
     await this.stopPostWakeCommandWindow('live_session');
     await this.stopWakeScout('live_session');
+    const engineDecision = getAgaEngineDecision();
+    const engineLabel = engineDecision.engine === 'elevenlabs_agent' ? 'ElevenLabs Agent' : engineDecision.engine === 'gemini' ? 'Gemini Live' : engineDecision.engine === 'openai' ? 'OpenAI Realtime' : 'Local voice';
+    markLiveSessionActive(`starting:${engineDecision.engine}`);
     if (AGA_CONFIG.brain.freshContextPerWake) {
       await startNewConversationSession('wake_activation', { clearTranscript: true, endActiveSession: false }).catch(() => undefined);
     }
@@ -519,24 +583,28 @@ ${hint.detail}` : ''}`,
       const message = String((aec as any).message || 'Tier 3 audio safety check failed.');
       this.publish({ mode: 'recovering', speechStatus: 'live audio blocked by echo-safety guard', error: message, voiceCapability: { ...(this.snapshot as any).voiceCapability, tier3Audio: aec, aec: tier3AudioDiagnostics() } } as any);
       await speakShortReply('Live conversation is blocked until echo cancellation is ready. I can still answer short requests.', 'warm').catch(() => undefined);
+      markLiveSessionDone('tier3 audio blocked');
       await this.startWakeScout('tier3_audio_blocked').catch(() => undefined);
       return;
     }
-    this.publish({ mode: 'thinking', speechStatus: `${selectedEngine()} live session starting`, error: null, heardText: initialText, voiceCapability: { ...(this.snapshot as any).voiceCapability, tier3Audio: aec, aec: tier3AudioDiagnostics() } } as any);
+    this.publish({ mode: 'thinking', speechStatus: `${engineLabel} starting`, error: null, heardText: initialText, voiceCapability: { ...(this.snapshot as any).voiceCapability, tier3Audio: aec, aec: tier3AudioDiagnostics(), liveEngineDecision: engineDecision } } as any);
     const session = await this.createSelectedVoiceSession();
     this.realtime = session;
     this.realtimeUnsubscribe = session.subscribe((next) => {
+      extendLiveSession('live transport snapshot');
       this.publish({ ...next, speechStatus: next.speechStatus || 'live session active' });
       this.armIdleTimer();
     });
     try {
       await session.start();
+      extendLiveSession(`active:${selectedEngine()}`);
       session.replay(initialText);
       this.armIdleTimer();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error || 'live session failed');
       this.publish({ mode: 'recovering', speechStatus: 'live session failed; returning to keyword wake', error: message });
       await logEvent('realtime.start.error', message).catch(() => undefined);
+      markLiveSessionDone('live start failed');
       await this.stopRealtime('start_error').catch(() => undefined);
       await this.startWakeScout('live_start_failed').catch(() => undefined);
     }
@@ -553,6 +621,8 @@ ${hint.detail}` : ''}`,
   }
 
   private async openPostWakeCommandWindow(source: string) {
+    if (this.realtime) return false;
+    markCommandActive(`post wake window:${source}`, postWakeWindowMs() + 1500);
     await this.stopWakeScout('post_wake_command');
     await this.stopPostWakeCommandWindow('replace').catch(() => undefined);
     const engine = createPostWakeCommandEngine({
@@ -598,6 +668,7 @@ ${hint.detail}` : ''}`,
     const engine = this.postWakeCommand;
     this.postWakeCommand = null;
     if (engine) await Promise.resolve(engine.stop()).catch(() => undefined);
+    if (engine) muteWakeFor(900, `post wake stopped:${reason}`);
     if (engine) await logEvent('post_wake_command.stop', reason).catch(() => undefined);
   }
 
@@ -628,6 +699,7 @@ ${hint.detail}` : ''}`,
     this.realtimeUnsubscribe?.();
     this.realtimeUnsubscribe = null;
     if (session) await Promise.resolve(session.stop()).catch(() => undefined);
+    markLiveSessionDone(`realtime stopped:${reason}`);
     await exitTier3DuplexAudio(reason).catch(() => undefined);
     await logEvent('realtime.sleep', reason).catch(() => undefined);
     await this.refresh();

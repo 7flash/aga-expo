@@ -118,6 +118,7 @@ let sqliteAvailable = false;
 let lastPersistenceError: string | null = null;
 let storageBackend: 'sqlite-relational' | 'memory-fallback' = 'memory-fallback';
 let currentPrefs: Preferences = { ...DEFAULT_PREFS };
+let memoryFtsAvailable: boolean | null = null;
 
 function isoNow() {
   return new Date().toISOString();
@@ -502,6 +503,30 @@ function ftsQuery(query: string) {
   return query.trim().split(/\s+/).filter(Boolean).map((part) => `${part.replace(/["']/g, '')}*`).join(' ');
 }
 
+function likePattern(query: string) {
+  return `%${query.replace(/[\%_]/g, '')}%`;
+}
+
+async function hasMemoryFtsTable() {
+  if (memoryFtsAvailable != null) return memoryFtsAvailable;
+  try {
+    const row = await first<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'memory_facts_fts' LIMIT 1",
+    );
+    memoryFtsAvailable = !!row?.name;
+  } catch {
+    memoryFtsAvailable = false;
+  }
+  return memoryFtsAvailable;
+}
+
+async function searchMemoriesLike(q: string, limit: number) {
+  return all<{ id: number; text: string; createdAt: string; kind: string; source: string; confidence: number }>(
+    'SELECT id, text, createdAt, kind, source, confidence FROM memory_facts WHERE text LIKE ? OR kind LIKE ? ORDER BY pinned DESC, updatedAt DESC LIMIT ?',
+    [likePattern(q), likePattern(q), limit],
+  );
+}
+
 export async function searchMemories(query?: string, limit = 8) {
   await ensureReady();
   const q = query?.trim();
@@ -513,20 +538,22 @@ export async function searchMemories(query?: string, limit = 8) {
       .reverse();
   }
   if (q) {
-    try {
-      return await all<{ id: number; text: string; createdAt: string; kind: string; source: string; confidence: number }>(
-        `SELECT mf.id, mf.text, mf.createdAt, mf.kind, mf.source, mf.confidence
-           FROM memory_facts_fts fts
-           JOIN memory_facts mf ON mf.id = fts.rowid
-          WHERE memory_facts_fts MATCH ?
-          ORDER BY bm25(memory_facts_fts), mf.pinned DESC, mf.updatedAt DESC
-          LIMIT ?`,
-        [ftsQuery(q), limit],
-      );
-    } catch {
-      const like = `%${q.replace(/[%_]/g, '')}%`;
-      return all('SELECT id, text, createdAt, kind, source, confidence FROM memory_facts WHERE text LIKE ? ORDER BY pinned DESC, updatedAt DESC LIMIT ?', [like, limit]);
+    if (await hasMemoryFtsTable()) {
+      try {
+        return await all<{ id: number; text: string; createdAt: string; kind: string; source: string; confidence: number }>(
+          `SELECT mf.id, mf.text, mf.createdAt, mf.kind, mf.source, mf.confidence
+             FROM memory_facts_fts fts
+             JOIN memory_facts mf ON mf.id = fts.rowid
+            WHERE memory_facts_fts MATCH ?
+            ORDER BY bm25(memory_facts_fts), mf.pinned DESC, mf.updatedAt DESC
+            LIMIT ?`,
+          [ftsQuery(q), limit],
+        );
+      } catch {
+        memoryFtsAvailable = false;
+      }
     }
+    return searchMemoriesLike(q, limit);
   }
   return all('SELECT id, text, createdAt, kind, source, confidence FROM memory_facts ORDER BY pinned DESC, updatedAt DESC LIMIT ?', [limit]);
 }

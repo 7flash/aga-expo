@@ -282,8 +282,10 @@ async function ensureMemoryFts(db: any) {
         SELECT id, text, kind FROM memory_facts
         WHERE id NOT IN (SELECT rowid FROM memory_facts_fts);
     `);
-  } catch (error) {
-    // Some Android SQLite builds omit FTS5. Search falls back to indexed LIKE.
-    console.warn?.('[aga:migrate] FTS5 unavailable; memory recall will use LIKE fallback.', error);
+  } catch {
+    // Some browser/Android SQLite builds omit FTS5. This is not fatal;
+    // localStore.searchMemories checks for the virtual table and uses indexed LIKE
+    // without throwing or spamming the console on every boot.
+    (globalThis as any).__AGA_SQLITE_FTS5_AVAILABLE = false;
   }
 }
