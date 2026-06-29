@@ -1,3 +1,6 @@
-import AgaIndexRoute from '../routes/AgaIndexRoute';
+import React from 'react';
+import AgaAngelApplianceScreen from '../ui/AgaAngelApplianceScreen';
 
-export default AgaIndexRoute;
+export default function Index() {
+  return <AgaAngelApplianceScreen />;
+}
