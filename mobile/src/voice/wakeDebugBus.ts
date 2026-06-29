@@ -1,243 +1,79 @@
-import {
-  browserVoicePhaseLabel,
-  browserVoiceShouldIgnoreWake,
-  markWakeDetected,
-} from './browserVoiceActivityState';
 import { publishVoiceTelemetry } from './voiceTelemetryStore';
+import { runExclusiveVoiceTurn } from './exclusiveVoiceTurn';
 
 export type WakeDebugEvent =
-  | { type: 'status'; provider?: string; message: string; at: number }
-  | { type: 'audio'; provider?: string; rms: number; peak: number; frames: number; at: number }
-  | { type: 'keyword'; provider?: string; keyword: string; index?: number; confidence?: number; raw?: unknown; at: number }
-  | { type: 'transcript'; provider?: string; text: string; phase: 'post-wake' | 'stt' | 'live' | 'debug'; raw?: unknown; at: number }
-  | { type: 'error'; provider?: string; message: string; raw?: unknown; at: number };
+  | { type: 'status'; provider?: string; message: string; at?: number; raw?: unknown }
+  | { type: 'audio'; provider?: string; rms: number; peak: number; frames: number; at?: number; raw?: unknown }
+  | { type: 'keyword'; provider?: string; keyword: string; index?: number; confidence?: number; raw?: unknown; at?: number }
+  | { type: 'transcript'; provider?: string; text: string; phase: 'post-wake' | 'stt' | 'live' | 'debug'; raw?: unknown; at?: number }
+  | { type: 'error'; provider?: string; message: string; raw?: unknown; at?: number };
 
 type Listener = (event: WakeDebugEvent) => void;
 
 const listeners = new Set<Listener>();
 const recent: WakeDebugEvent[] = [];
+let lastFinalTranscript = '';
+let lastFinalAt = 0;
 
-let bridgePromise: Promise<void> | null = null;
-let lastAudio: Extract<WakeDebugEvent, { type: 'audio' }> | null = null;
-let audioGateLoudSince = 0;
-let audioGateLastWakeAt = 0;
-let audioGateLastStatusAt = 0;
+function now() { return Date.now(); }
 
-function now() {
-  return Date.now();
-}
+function normalize(text: unknown) { return String(text ?? '').replace(/\s+/g, ' ').trim(); }
 
-function numEnv(name: string, fallback: number) {
-  const value = Number((process as any)?.env?.[name]);
-  return Number.isFinite(value) && value > 0 ? value : fallback;
-}
-
-function flagEnv(name: string, fallback = true) {
-  const raw = String((process as any)?.env?.[name] ?? '').trim().toLowerCase();
-  if (!raw) return fallback;
-  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
-}
-
-function dispatchBrowserEvent(name: string, detail: unknown) {
-  if (typeof window === 'undefined') return;
-  try {
-    window.dispatchEvent(new CustomEvent(name, { detail }));
-  } catch {}
-}
-
-function bootBrowserBridge() {
-  if (typeof window === 'undefined') return Promise.resolve();
-
-  if (!bridgePromise) {
-    bridgePromise = import('./browserWakeToTranscriptBridge')
-      .then((mod) => {
-        mod.ensureBrowserWakeToTranscriptBridge?.();
-      })
-      .catch((error) => {
-        console.warn('[aga:wake-debug] failed to boot browser wake transcript bridge', error);
-      });
-  }
-
-  return bridgePromise;
-}
-
-function telemetryPhaseFromBrowserState() {
-  const label = browserVoicePhaseLabel();
-  if (label === 'COMMAND WINDOW') return 'command_window' as const;
-  if (label === 'THINKING') return 'thinking' as const;
-  if (label === 'SPEAKING') return 'speaking' as const;
-  return undefined;
-}
-
-function publishFromWakeEvent(event: WakeDebugEvent) {
-  const phase = telemetryPhaseFromBrowserState();
-  const provider = event.provider || 'wake-debug';
+export function emitWakeDebug(input: Omit<WakeDebugEvent, 'at'> & { at?: number }) {
+  const event = { ...input, at: input.at ?? now() } as WakeDebugEvent;
+  recent.unshift(event);
+  while (recent.length > 200) recent.pop();
 
   if (event.type === 'audio') {
     publishVoiceTelemetry({
       at: event.at,
-      phase: phase ?? 'hearing_audio',
-      provider,
-      wakeEngine: provider,
+      phase: 'hearing_audio',
+      provider: event.provider || 'wake',
+      wakeEngine: event.provider || 'unknown',
       rms: event.rms,
       peak: event.peak,
       frames: event.frames,
-      micOpen: !browserVoiceShouldIgnoreWake(),
-      assistantSpeaking: phase === 'speaking',
-      commandWindowActive: phase === 'command_window',
-      status: phase === 'speaking'
-        ? 'AGA is speaking — mic paused'
-        : phase === 'command_window'
-          ? 'Command window active'
-          : 'Mic live',
+      audioLevel: Math.max(0, Math.min(1, Math.max(event.rms * 12, event.peak * 4))),
+      status: 'mic audio',
     });
-    return;
-  }
-
-  if (event.type === 'keyword') {
+  } else if (event.type === 'keyword') {
+    const fallback = !!(event.raw as any)?.fallback;
     publishVoiceTelemetry({
       at: event.at,
       phase: 'wake_detected',
-      provider,
-      wakeEngine: provider,
+      provider: event.provider || 'wake',
+      wakeEngine: fallback ? 'volume' : event.provider || 'unknown',
       wakeKeyword: event.keyword,
-      wakeConfidence: event.confidence ?? 0,
+      wakeConfidence: event.confidence ?? (fallback ? 0.25 : 1),
       commandWindowActive: true,
-      status: `Wake detected: ${event.keyword}`,
+      micOpen: true,
+      canAcceptUserSpeech: true,
+      status: fallback
+        ? `fallback wake: ${event.keyword} — not real keyword spotting`
+        : `wake keyword: ${event.keyword}`,
       raw: event.raw,
     });
-    return;
-  }
-
-  if (event.type === 'transcript') {
+  } else if (event.type === 'transcript') {
     publishVoiceTelemetry({
       at: event.at,
-      phase: event.phase === 'live' ? 'live_session' : event.phase === 'stt' ? 'transcribing' : phase ?? 'capturing_user',
-      provider,
+      phase: event.phase === 'stt' || event.phase === 'post-wake' ? 'transcribing' : 'live_session',
+      provider: event.provider || 'transcript',
       transcript: event.text,
-      sttText: event.phase === 'stt' ? event.text : undefined,
-      commandWindowActive: phase === 'command_window',
-      status: event.phase === 'stt' ? 'Transcribed user speech' : 'Heard user speech',
+      sttText: event.phase === 'stt' || event.phase === 'post-wake' ? event.text : undefined,
+      status: `transcript: ${event.text}`,
       raw: event.raw,
     });
-    return;
+  } else if (event.type === 'error') {
+    publishVoiceTelemetry({ at: event.at, phase: 'error', provider: event.provider || 'wake', error: event.message, status: event.message, raw: event.raw });
+  } else if (event.type === 'status') {
+    publishVoiceTelemetry({ at: event.at, provider: event.provider || 'wake', status: event.message, raw: event.raw });
   }
-
-  if (event.type === 'status') {
-    publishVoiceTelemetry({
-      at: event.at,
-      phase: phase ?? 'wake_listening',
-      provider,
-      status: event.message,
-    });
-    return;
-  }
-
-  if (event.type === 'error') {
-    publishVoiceTelemetry({
-      at: event.at,
-      phase: 'error',
-      provider,
-      error: event.message,
-      status: event.message,
-      raw: event.raw,
-    });
-  }
-}
-
-function autoWakeFromAudio(event: Extract<WakeDebugEvent, { type: 'audio' }>) {
-  if (typeof window === 'undefined') return;
-  if (!flagEnv('EXPO_PUBLIC_AGA_WEB_AUDIO_WAKE_FALLBACK', true)) return;
-
-  const t = now();
-  const threshold = numEnv('EXPO_PUBLIC_AGA_WEB_AUDIO_WAKE_RMS', 0.028);
-  const peakThreshold = numEnv('EXPO_PUBLIC_AGA_WEB_AUDIO_WAKE_PEAK', 0.18);
-  const holdMs = numEnv('EXPO_PUBLIC_AGA_WEB_AUDIO_WAKE_HOLD_MS', 420);
-  const cooldownMs = numEnv('EXPO_PUBLIC_AGA_WEB_AUDIO_WAKE_COOLDOWN_MS', 6500);
-  const loud = event.rms >= threshold || event.peak >= peakThreshold;
-
-  if (!loud) {
-    audioGateLoudSince = 0;
-    return;
-  }
-
-  if (!audioGateLoudSince) audioGateLoudSince = t;
-
-  if (browserVoiceShouldIgnoreWake()) {
-    if (t - audioGateLastStatusAt > 1600) {
-      audioGateLastStatusAt = t;
-      push({
-        type: 'status',
-        provider: 'wake-debug-audio-gate',
-        message: 'audio wake muted while AGA is listening/thinking/speaking',
-        at: t,
-      });
-    }
-    return;
-  }
-
-  if (t - audioGateLoudSince < holdMs) return;
-  if (t - audioGateLastWakeAt < cooldownMs) return;
-
-  audioGateLastWakeAt = t;
-  audioGateLoudSince = 0;
-
-  const confidence = Math.max(
-    0.1,
-    Math.min(1, Math.max(event.rms / Math.max(0.001, threshold), event.peak / Math.max(0.001, peakThreshold)) / 3),
-  );
-
-  markWakeDetected('browser audio gate');
-
-  push({
-    type: 'keyword',
-    provider: 'wake-debug-audio-gate',
-    keyword: 'aga',
-    confidence,
-    raw: {
-      rms: event.rms,
-      peak: event.peak,
-      frames: event.frames,
-      note: 'browser preview uses sustained audio wake until Sherpa KWS is confirmed in wake-lab',
-    },
-    at: t,
-  });
-}
-
-function push(event: WakeDebugEvent) {
-  recent.push(event);
-  if (recent.length > 180) recent.shift();
-
-  if (event.type === 'audio') {
-    lastAudio = event;
-    autoWakeFromAudio(event);
-  }
-
-  if (event.type === 'keyword') {
-    bootBrowserBridge().then(() => {
-      dispatchBrowserEvent('aga:wakeKeyword', event);
-      setTimeout(() => dispatchBrowserEvent('aga:wakeKeyword', event), 120);
-    });
-  }
-
-  if (event.type === 'transcript') {
-    dispatchBrowserEvent('aga:wakeTranscript', event);
-  }
-
-  publishFromWakeEvent(event);
-  dispatchBrowserEvent('aga:wakeDebug', event);
 
   for (const listener of Array.from(listeners)) {
-    try {
-      listener(event);
-    } catch (error) {
-      console.warn('[aga:wake-debug] listener failed', error);
-    }
+    try { listener(event); } catch {}
   }
-}
 
-export function emitWakeDebug(event: Omit<WakeDebugEvent, 'at'> & { at?: number }) {
-  push({ ...event, at: event.at || now() } as WakeDebugEvent);
+  return event;
 }
 
 export function subscribeWakeDebug(listener: Listener) {
@@ -249,30 +85,32 @@ export function getRecentWakeDebugEvents() {
   return recent.slice();
 }
 
-export function getLastWakeAudioEvent() {
-  return lastAudio;
-}
-
-declare global {
-  interface Window {
-    __AGA_WAKE_DEBUG?: () => WakeDebugEvent[];
-    __AGA_FORCE_AUDIO_WAKE?: () => void;
+/**
+ * Final transcript entrypoint for browser wake/STT. It intentionally runs the same
+ * exclusive executor used by the labs and main screen. Do not call GPT/TTS/tools
+ * directly from wake bridges anymore.
+ */
+export async function submitWakeFinalTranscript(textInput: unknown, raw?: unknown) {
+  const text = normalize(textInput);
+  if (!text) return false;
+  const at = now();
+  if (text === lastFinalTranscript && at - lastFinalAt < 1500) {
+    emitWakeDebug({ type: 'status', provider: 'post-wake', message: `deduped final transcript: ${text}`, raw });
+    return false;
   }
+  lastFinalTranscript = text;
+  lastFinalAt = at;
+  emitWakeDebug({ type: 'transcript', provider: 'post-wake', text, phase: 'post-wake', raw });
+  await runExclusiveVoiceTurn(text, { source: 'post-wake', forceRoute: 'auto' });
+  return true;
 }
 
-if (typeof window !== 'undefined') {
-  window.__AGA_WAKE_DEBUG = getRecentWakeDebugEvents;
-  window.__AGA_FORCE_AUDIO_WAKE = () => {
-    push({
-      type: 'keyword',
-      provider: 'manual',
-      keyword: 'aga',
-      confidence: 1,
-      raw: { manual: true },
-      at: now(),
-    });
-  };
-
-  // Important: this module no longer injects a floating fixed-position UI.
-  // Wake waveform/status is rendered by React through voiceTelemetryStore.
+/**
+ * Legacy compatibility for old code that expected a browser UI starter.
+ * It no longer creates a floating DOM overlay. Waveform is rendered by React
+ * from voiceTelemetryStore.
+ */
+export function startBrowserWakeUi() {
+  emitWakeDebug({ type: 'status', provider: 'wake-ui', message: 'wake UI overlay disabled; telemetry is integrated into main cockpit' });
+  return () => {};
 }

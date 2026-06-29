@@ -1,7 +1,8 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, ScrollView, StyleSheet, Text, View } from 'react-native';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { getVoiceTelemetrySnapshot, subscribeVoiceTelemetry, type VoiceTelemetrySnapshot } from '../voice/voiceTelemetryStore';
-import { colors, radius, spacing } from './theme';
+import { getTurnLogs, subscribeTurnLogs, type TurnLogEntry } from '../voice/turnLogStore';
+import { runExclusiveVoiceTurn } from '../voice/exclusiveVoiceTurn';
 
 type Props = {
   mode?: string;
@@ -15,24 +16,29 @@ type Props = {
   activeMedia?: any;
   audioLevel?: number;
   voiceTurn?: any;
+  showDebug?: boolean;
 };
 
-function useVoiceTelemetry() {
+function useTelemetry() {
   const [snapshot, setSnapshot] = useState<VoiceTelemetrySnapshot>(() => getVoiceTelemetrySnapshot());
   useEffect(() => subscribeVoiceTelemetry(setSnapshot), []);
   return snapshot;
 }
 
-function normalizePhase(props: Props, telemetry: VoiceTelemetrySnapshot) {
-  const voiceTurn = props.voiceTurn;
-  const phase = String(voiceTurn?.phase || telemetry.phase || props.mode || 'wake_listening');
+function useLogs() {
+  const [logs, setLogs] = useState<TurnLogEntry[]>(() => getTurnLogs());
+  useEffect(() => subscribeTurnLogs(setLogs), []);
+  return logs;
+}
+
+function phaseFrom(props: Props, telemetry: VoiceTelemetrySnapshot) {
   if (props.error || telemetry.error) return 'error';
-  if (phase === 'speaking' || props.mode === 'speaking' || telemetry.assistantSpeaking) return 'speaking';
+  const phase = String(props.voiceTurn?.phase || telemetry.phase || props.mode || 'wake_listening');
+  if (telemetry.assistantSpeaking || phase === 'speaking') return 'speaking';
   if (phase === 'live_session' || props.mode === 'live' || props.mode === 'live_session') return 'live_session';
   if (props.activeChoiceMenu) return 'voice_menu';
-  if (props.activeMedia && props.mode === 'media') return 'media';
   if (props.interim || telemetry.transcript) return telemetry.commandWindowActive ? 'command_window' : 'capturing_user';
-  if (['thinking', 'tool_call', 'transcribing'].includes(phase)) return phase;
+  if (['thinking', 'tool_call', 'transcribing', 'guided_session', 'media', 'error'].includes(phase)) return phase;
   return 'wake_listening';
 }
 
@@ -45,6 +51,7 @@ function phaseLabel(phase: string) {
     case 'capturing_user': return 'LISTENING TO YOU';
     case 'command_window': return 'COMMAND WINDOW';
     case 'live_session': return 'LIVE CONVERSATION';
+    case 'guided_session': return 'GUIDED SESSION';
     case 'voice_menu': return 'VOICE MENU';
     case 'media': return 'MEDIA';
     case 'error': return 'NEEDS ATTENTION';
@@ -52,217 +59,169 @@ function phaseLabel(phase: string) {
   }
 }
 
-function phaseSubtitle(phase: string, props: Props, telemetry: VoiceTelemetrySnapshot) {
+function phaseSubtitle(phase: string, telemetry: VoiceTelemetrySnapshot) {
   if (phase === 'speaking') return 'Mic paused so AGA does not hear its own voice.';
-  if (phase === 'thinking') return 'Mic paused while AGA decides the next action.';
-  if (phase === 'tool_call') return 'Running one selected tool for this turn.';
+  if (phase === 'thinking') return 'Mic paused while AGA chooses exactly one route.';
+  if (phase === 'tool_call') return 'Running the selected tool for this turn only.';
   if (phase === 'transcribing') return 'Converting speech to text.';
   if (phase === 'capturing_user') return 'Keep speaking naturally.';
   if (phase === 'command_window') return 'Say the command now.';
   if (phase === 'live_session') return 'Back-and-forth mode. Say stop to end.';
-  if (phase === 'voice_menu') return 'Say one, two, A, B, or the option name.';
-  if (phase === 'media') return 'Voice media controls are active.';
-  if (phase === 'error') return String(props.error || telemetry.error || 'Something failed. Say try again.');
-  return telemetry.wakeEngine === 'sherpa_wasm'
-    ? 'Waiting for AGA wake detection.'
-    : 'Mic is open. Speak to wake AGA.';
+  if (phase === 'guided_session') return 'Guided skill is active. Say stop anytime.';
+  if (phase === 'voice_menu') return 'Say the number, letter, or option name.';
+  if (phase === 'error') return telemetry.error || 'Something needs recovery.';
+  return 'Mic open. AGA is waiting for you.';
 }
 
-function normalizeMessages(messages: any[] = [], interim?: string, telemetry?: VoiceTelemetrySnapshot) {
-  const rows = messages.slice(-30).map((message, index) => ({
-    id: String(message.id || message.createdAt || index),
-    role: String(message.role || 'system'),
-    text: String(message.content || message.text || message.message || '').trim(),
-    at: message.createdAt || message.at || '',
-    pending: false,
-  })).filter((row) => row.text);
-
-  const heard = String(interim || telemetry?.transcript || telemetry?.sttText || '').trim();
-  if (heard) {
-    rows.push({ id: 'current-interim', role: 'user', text: heard, at: '', pending: true });
-  }
-
-  const reply = String(telemetry?.reply || '').trim();
-  if (reply && !rows.some((row) => row.role === 'assistant' && row.text === reply)) {
-    rows.push({ id: 'telemetry-reply', role: 'assistant', text: reply, at: '', pending: false });
-  }
-
-  return rows.slice(-24);
+function micLabel(telemetry: VoiceTelemetrySnapshot) {
+  if (telemetry.assistantSpeaking) return 'MIC PAUSED';
+  if (!telemetry.micOpen || !telemetry.canAcceptUserSpeech) return 'MIC CLOSED';
+  return 'MIC OPEN';
 }
 
-function Bar({ value, index }: { value: number; index: number }) {
-  const h = 8 + Math.round(value * (18 + (index % 6) * 6));
-  return <View style={[styles.waveBar, { height: h, opacity: 0.32 + Math.min(1, value + 0.25) * 0.68 }]} />;
-}
-
-function IntegratedWaveform({ telemetry, audioLevel, phase }: { telemetry: VoiceTelemetrySnapshot; audioLevel?: number; phase: string }) {
-  const tick = useRef(new Animated.Value(0)).current;
-  const level = Math.max(0, Math.min(1, typeof audioLevel === 'number' && audioLevel > 0 ? audioLevel : telemetry.audioLevel));
-
-  useEffect(() => {
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(tick, { toValue: 1, duration: 900, useNativeDriver: false }),
-        Animated.timing(tick, { toValue: 0, duration: 900, useNativeDriver: false }),
-      ]),
-    );
-    loop.start();
-    return () => loop.stop();
-  }, [tick]);
-
-  const values = useMemo(() => {
-    const base = phase === 'speaking' ? 0.55 : phase === 'thinking' ? 0.28 : level;
-    return Array.from({ length: 40 }, (_, i) => {
-      const wave = Math.sin((i / 40) * Math.PI * 2 + Date.now() / 260) * 0.5 + 0.5;
-      const pulse = Math.sin((i / 40) * Math.PI * 6 - Date.now() / 380) * 0.5 + 0.5;
-      return Math.max(0.08, Math.min(1, base * 0.78 + wave * 0.12 + pulse * 0.10));
-    });
-  }, [level, phase, telemetry.at]);
-
+function Waveform({ telemetry }: { telemetry: VoiceTelemetrySnapshot }) {
+  const bars = telemetry.waveform && telemetry.waveform.length ? telemetry.waveform : Array.from({ length: 48 }, () => telemetry.audioLevel || 0.03);
   return (
-    <View style={styles.waveShell}>
+    <View style={styles.waveWrap}>
       <View style={styles.waveHeader}>
-        <Text style={styles.waveTitle}>VOICE WAVEFORM</Text>
-        <Text style={styles.waveMeta}>{telemetry.wakeEngine || telemetry.provider || 'wake'} · rms {(telemetry.rms * 100).toFixed(1)} · peak {(telemetry.peak * 100).toFixed(1)}</Text>
+        <Text style={styles.kicker}>WAVEFORM</Text>
+        <Text style={styles.smallMono}>rms {telemetry.rms.toFixed(3)} · peak {telemetry.peak.toFixed(3)}</Text>
       </View>
-      <View style={styles.waveBars}>{values.map((value, index) => <Bar key={index} value={value} index={index} />)}</View>
-      <View style={styles.levelRail}><View style={[styles.levelFill, { width: `${Math.round(level * 100)}%` }]} /></View>
-      {!!telemetry.wakeKeyword && (
-        <Text style={styles.wakeLine}>wake: {telemetry.wakeKeyword} {telemetry.wakeConfidence ? `· ${(telemetry.wakeConfidence * 100).toFixed(0)}%` : ''}</Text>
-      )}
-      {!!telemetry.status && <Text style={styles.telemetryStatus}>{telemetry.status}</Text>}
+      <View style={styles.waveBars}>
+        {bars.slice(-48).map((value, index) => {
+          const height = 8 + Math.round(Math.max(0.02, value) * 52);
+          return <View key={`${index}-${height}`} style={[styles.waveBar, { height }]} />;
+        })}
+      </View>
     </View>
   );
 }
 
-function Transcript({ rows }: { rows: ReturnType<typeof normalizeMessages> }) {
+function Transcript({ logs }: { logs: TurnLogEntry[] }) {
+  const shown = logs.filter((l) => ['received', 'route_decided', 'tool_executed', 'short_gpt_done', 'live_started', 'tts_started', 'error'].includes(l.stage)).slice(0, 18);
   return (
-    <View style={styles.transcriptShell}>
-      <Text style={styles.transcriptTitle}>RECENT TRANSCRIPT</Text>
-      <ScrollView showsVerticalScrollIndicator contentContainerStyle={styles.transcriptContent}>
-        {rows.length ? rows.map((row) => (
-          <View key={row.id} style={[styles.turnRow, row.role === 'assistant' ? styles.assistantRow : styles.userRow]}>
-            <Text style={styles.turnRole}>{row.role === 'assistant' ? 'AGA' : row.role.toUpperCase()}{row.pending ? ' · LIVE' : ''}</Text>
-            <Text style={styles.turnText}>{row.text}</Text>
+    <View style={styles.transcriptBox}>
+      <Text style={styles.sectionTitle}>Recent turn transcript</Text>
+      <ScrollView style={styles.transcriptScroll} nestedScrollEnabled>
+        {shown.length === 0 ? <Text style={styles.dim}>No turns yet.</Text> : shown.map((entry) => (
+          <View key={entry.id} style={styles.logRow}>
+            <Text style={styles.logMeta}>{new Date(entry.at).toLocaleTimeString()} · {entry.turnId.split('_').slice(-2).join('_')} · {entry.stage}</Text>
+            <Text style={styles.logText}>{entry.toolName ? `[${entry.toolName}] ` : ''}{entry.text || entry.route || ''}</Text>
           </View>
-        )) : (
-          <View style={styles.emptyTranscript}>
-            <Text style={styles.emptyTranscriptTitle}>No turns yet</Text>
-            <Text style={styles.emptyTranscriptText}>Speak to wake AGA. Full turns will stay here in one place.</Text>
-          </View>
-        )}
+        ))}
       </ScrollView>
     </View>
   );
 }
 
-function MenuPanel({ menu }: { menu: any }) {
-  if (!menu) return null;
-  return (
-    <View style={styles.menuPanel}>
-      <Text style={styles.menuTitle}>{menu.title || 'Voice menu'}</Text>
-      {!!menu.subtitle && <Text style={styles.menuSubtitle}>{menu.subtitle}</Text>}
-      {(menu.options || []).slice(0, 8).map((option: any) => (
-        <View key={option.key || option.label} style={styles.menuOption}>
-          <Text style={styles.menuKey}>{option.key}</Text>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.menuLabel}>{option.label}</Text>
-            {!!option.description && <Text style={styles.menuDescription}>{option.description}</Text>}
-          </View>
-        </View>
-      ))}
-      <Text style={styles.menuFooter}>Choose by voice.</Text>
-    </View>
-  );
-}
-
 export function AgaUnifiedConsole(props: Props) {
-  const telemetry = useVoiceTelemetry();
-  const phase = normalizePhase(props, telemetry);
-  const rows = normalizeMessages(props.messages, props.interim, telemetry);
-  const micLabel = telemetry.canAcceptUserSpeech && phase !== 'speaking' ? 'MIC OPEN' : 'MIC PAUSED';
+  const telemetry = useTelemetry();
+  const logs = useLogs();
+  const phase = phaseFrom(props, telemetry);
+  const label = phaseLabel(phase);
+  const subtitle = phaseSubtitle(phase, telemetry);
+  const directStatus = telemetry.status || props.speechStatus || props.ttsStatus || 'ready';
+  const wakeFallback = telemetry.wakeEngine === 'volume' || /fallback/i.test(directStatus);
+
+  const latestUserText = useMemo(() => logs.find((l) => l.stage === 'received')?.text || telemetry.transcript || props.interim || '', [logs, telemetry.transcript, props.interim]);
 
   return (
-    <View pointerEvents="box-none" style={styles.consoleRoot}>
-      <View style={[styles.turnBanner, phase === 'speaking' && styles.turnBannerSpeaking, phase === 'error' && styles.turnBannerError]}>
-        <View style={styles.turnHeaderRow}>
-          <Text style={styles.phaseLabel}>{phaseLabel(phase)}</Text>
-          <Text style={[styles.micBadge, telemetry.canAcceptUserSpeech ? styles.micOpen : styles.micPaused]}>{micLabel}</Text>
+    <View style={styles.root}>
+      <View style={styles.banner}>
+        <View style={styles.bannerText}>
+          <Text style={styles.kicker}>AGA TURN</Text>
+          <Text style={styles.title}>{label}</Text>
+          <Text style={styles.subtitle}>{subtitle}</Text>
         </View>
-        <Text style={styles.phaseSubtitle}>{phaseSubtitle(phase, props, telemetry)}</Text>
-        {!!props.sessionLabel && <Text style={styles.sessionLine}>session: {props.sessionLabel}</Text>}
+        <View style={[styles.micPill, telemetry.micOpen && !telemetry.assistantSpeaking ? styles.micOpen : styles.micClosed]}>
+          <Text style={styles.micPillText}>{micLabel(telemetry)}</Text>
+        </View>
       </View>
 
-      <View style={styles.middleGrid}>
-        <IntegratedWaveform telemetry={telemetry} audioLevel={props.audioLevel} phase={phase} />
-        <MenuPanel menu={props.activeChoiceMenu} />
+      <View style={styles.grid}>
+        <View style={styles.visualCard}>
+          <View style={[styles.orb, phase === 'speaking' && styles.orbSpeaking, phase === 'live_session' && styles.orbLive]}>
+            <Text style={styles.angel}>◡̈</Text>
+            <View style={[styles.halo, { opacity: Math.max(0.18, telemetry.audioLevel) }]} />
+          </View>
+          <Text style={styles.statusText}>{directStatus}</Text>
+          {latestUserText ? <Text style={styles.latestText}>heard: {latestUserText}</Text> : null}
+        </View>
+
+        <View style={styles.telemetryCard}>
+          <Text style={styles.sectionTitle}>Wake engine</Text>
+          <Text style={styles.statusLine}>engine: {telemetry.wakeEngine}</Text>
+          <Text style={styles.statusLine}>provider: {telemetry.provider}</Text>
+          <Text style={styles.statusLine}>command window: {telemetry.commandWindowActive ? 'yes' : 'no'}</Text>
+          <Text style={styles.statusLine}>confidence: {telemetry.wakeConfidence.toFixed(2)} {telemetry.wakeKeyword ? `(${telemetry.wakeKeyword})` : ''}</Text>
+          {wakeFallback ? <Text style={styles.warning}>Sherpa fallback/volume mode — not real keyword spotting.</Text> : null}
+        </View>
       </View>
 
-      <Transcript rows={rows} />
+      <Waveform telemetry={telemetry} />
+
+      {props.activeChoiceMenu ? (
+        <View style={styles.menuBox}>
+          <Text style={styles.sectionTitle}>{props.activeChoiceMenu.title || 'Voice menu'}</Text>
+          {(props.activeChoiceMenu.options || []).slice(0, 8).map((option: any) => (
+            <Text key={option.key || option.label} style={styles.menuOption}>{option.key || ''}. {option.label || String(option)}</Text>
+          ))}
+        </View>
+      ) : null}
+
+      <Transcript logs={logs} />
+
+      {props.showDebug ? (
+        <View style={styles.debugButtons}>
+          <Pressable style={styles.debugButton} onPress={() => runExclusiveVoiceTurn('what time is it', { source: 'debug_button' })}><Text style={styles.debugButtonText}>test time</Text></Pressable>
+          <Pressable style={styles.debugButton} onPress={() => runExclusiveVoiceTurn('open youtube calm music', { source: 'debug_button' })}><Text style={styles.debugButtonText}>test youtube</Text></Pressable>
+          <Pressable style={styles.debugButton} onPress={() => runExclusiveVoiceTurn('start live conversation', { source: 'debug_button' })}><Text style={styles.debugButtonText}>test live</Text></Pressable>
+        </View>
+      ) : null}
     </View>
   );
 }
 
-const GLASS = 'rgba(0, 15, 18, 0.72)';
-const LINE = 'rgba(101, 245, 255, 0.34)';
+export default AgaUnifiedConsole;
 
 const styles = StyleSheet.create({
-  consoleRoot: {
-    position: 'absolute',
-    left: spacing.md,
-    right: spacing.md,
-    top: spacing.md,
-    bottom: spacing.md,
-    zIndex: 30,
-    justifyContent: 'space-between',
-  },
-  turnBanner: {
-    borderRadius: 22,
-    borderWidth: 1,
-    borderColor: LINE,
-    backgroundColor: GLASS,
-    padding: spacing.md,
-    shadowColor: colors.cyan,
-    shadowOpacity: 0.25,
-    shadowRadius: 16,
-  },
-  turnBannerSpeaking: { borderColor: 'rgba(255, 208, 110, 0.65)' },
-  turnBannerError: { borderColor: 'rgba(255, 107, 131, 0.8)' },
-  turnHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.sm },
-  phaseLabel: { color: '#dfffff', fontSize: 22, fontWeight: '950', letterSpacing: 2.2 },
-  phaseSubtitle: { color: 'rgba(220,255,255,0.78)', fontSize: 13, fontWeight: '800', marginTop: 6 },
-  sessionLine: { color: '#ffd06e', fontSize: 11, fontWeight: '900', marginTop: 4, textTransform: 'uppercase', letterSpacing: 1.2 },
-  micBadge: { overflow: 'hidden', borderRadius: radius.pill, paddingHorizontal: 12, paddingVertical: 7, fontSize: 11, fontWeight: '950', letterSpacing: 1.2 },
-  micOpen: { backgroundColor: '#5df5ff', color: '#031416' },
-  micPaused: { backgroundColor: '#ffd06e', color: '#151006' },
-  middleGrid: { flex: 1, justifyContent: 'flex-end', gap: spacing.sm, marginVertical: spacing.sm },
-  waveShell: { borderRadius: 22, borderWidth: 1, borderColor: LINE, backgroundColor: GLASS, padding: spacing.md },
-  waveHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.sm, marginBottom: spacing.sm },
-  waveTitle: { color: '#5df5ff', fontSize: 11, fontWeight: '950', letterSpacing: 2.4 },
-  waveMeta: { color: 'rgba(220,255,255,0.62)', fontSize: 10, fontWeight: '800' },
-  waveBars: { height: 70, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 4 },
-  waveBar: { flex: 1, maxWidth: 7, minWidth: 3, borderRadius: 999, backgroundColor: '#5df5ff', shadowColor: '#5df5ff', shadowOpacity: 0.8, shadowRadius: 8 },
-  levelRail: { height: 7, borderRadius: 999, backgroundColor: 'rgba(120,220,230,0.17)', marginTop: spacing.sm, overflow: 'hidden' },
-  levelFill: { height: '100%', borderRadius: 999, backgroundColor: '#5df5ff' },
-  wakeLine: { color: '#ffd06e', fontSize: 12, fontWeight: '950', marginTop: 7 },
-  telemetryStatus: { color: 'rgba(220,255,255,0.76)', fontSize: 11, fontWeight: '800', marginTop: 4 },
-  menuPanel: { borderRadius: 22, borderWidth: 1, borderColor: 'rgba(255,208,110,0.45)', backgroundColor: 'rgba(16, 12, 2, 0.76)', padding: spacing.md },
-  menuTitle: { color: '#fff7df', fontSize: 17, fontWeight: '950', textAlign: 'center' },
-  menuSubtitle: { color: 'rgba(255,247,223,0.75)', fontSize: 12, fontWeight: '800', textAlign: 'center', marginTop: 4, marginBottom: 8 },
-  menuOption: { flexDirection: 'row', gap: spacing.sm, alignItems: 'center', paddingVertical: 5 },
-  menuKey: { width: 30, height: 30, borderRadius: 15, overflow: 'hidden', textAlign: 'center', lineHeight: 30, color: '#100b02', backgroundColor: '#ffd06e', fontWeight: '950' },
-  menuLabel: { color: '#fff7df', fontSize: 13, fontWeight: '950' },
-  menuDescription: { color: 'rgba(255,247,223,0.62)', fontSize: 11, fontWeight: '750' },
-  menuFooter: { color: 'rgba(255,247,223,0.62)', textAlign: 'center', fontSize: 11, fontWeight: '850', marginTop: 6 },
-  transcriptShell: { height: '32%', minHeight: 210, borderRadius: 22, borderWidth: 1, borderColor: LINE, backgroundColor: 'rgba(0, 10, 12, 0.82)', overflow: 'hidden' },
-  transcriptTitle: { color: '#5df5ff', fontSize: 11, fontWeight: '950', letterSpacing: 2.4, paddingHorizontal: spacing.md, paddingTop: spacing.md, paddingBottom: 4 },
-  transcriptContent: { padding: spacing.md, paddingTop: 4, gap: spacing.sm },
-  turnRow: { borderRadius: 14, padding: spacing.sm, borderWidth: 1 },
-  userRow: { backgroundColor: 'rgba(93,245,255,0.10)', borderColor: 'rgba(93,245,255,0.24)' },
-  assistantRow: { backgroundColor: 'rgba(255,208,110,0.10)', borderColor: 'rgba(255,208,110,0.24)' },
-  turnRole: { color: '#5df5ff', fontSize: 9, fontWeight: '950', letterSpacing: 1.7, marginBottom: 4 },
-  turnText: { color: '#f4ffff', fontSize: 13, lineHeight: 18, fontWeight: '800' },
-  emptyTranscript: { alignItems: 'center', justifyContent: 'center', minHeight: 120 },
-  emptyTranscriptTitle: { color: '#eaffff', fontSize: 18, fontWeight: '950' },
-  emptyTranscriptText: { color: 'rgba(220,255,255,0.65)', marginTop: 6, fontSize: 12, fontWeight: '800', textAlign: 'center' },
+  root: { width: '100%', gap: 14, padding: 16 },
+  banner: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderWidth: 1, borderColor: '#1bdee8', backgroundColor: 'rgba(3,18,22,0.88)', borderRadius: 24, padding: 18, shadowColor: '#00f5ff', shadowOpacity: 0.25, shadowRadius: 18 },
+  bannerText: { flex: 1, paddingRight: 12 },
+  kicker: { color: '#81faff', fontSize: 11, letterSpacing: 2.4, fontWeight: '800', textTransform: 'uppercase' },
+  title: { color: '#f3ffff', fontSize: 34, lineHeight: 38, fontWeight: '900', marginTop: 4 },
+  subtitle: { color: '#b9d9de', fontSize: 15, marginTop: 6 },
+  micPill: { borderRadius: 999, paddingHorizontal: 16, paddingVertical: 12, borderWidth: 1 },
+  micOpen: { borderColor: '#51f6ff', backgroundColor: 'rgba(0,255,240,0.16)' },
+  micClosed: { borderColor: '#ffce68', backgroundColor: 'rgba(255,206,104,0.16)' },
+  micPillText: { color: '#ffffff', fontWeight: '900', fontSize: 13, letterSpacing: 1.3 },
+  grid: { flexDirection: 'row', gap: 14, flexWrap: 'wrap' },
+  visualCard: { flexGrow: 1, flexBasis: 360, minHeight: 260, borderRadius: 28, borderWidth: 1, borderColor: 'rgba(116,250,255,0.32)', backgroundColor: 'rgba(3,12,18,0.76)', alignItems: 'center', justifyContent: 'center', padding: 18 },
+  telemetryCard: { flexGrow: 1, flexBasis: 260, borderRadius: 24, borderWidth: 1, borderColor: 'rgba(116,250,255,0.22)', backgroundColor: 'rgba(3,12,18,0.70)', padding: 18 },
+  orb: { width: 168, height: 168, borderRadius: 84, borderWidth: 1, borderColor: 'rgba(114,246,255,0.52)', backgroundColor: 'rgba(154,255,255,0.12)', alignItems: 'center', justifyContent: 'center' },
+  orbSpeaking: { borderColor: 'rgba(255,220,138,0.8)', backgroundColor: 'rgba(255,220,138,0.18)' },
+  orbLive: { borderColor: 'rgba(168,120,255,0.9)', backgroundColor: 'rgba(168,120,255,0.16)' },
+  angel: { color: '#f5ffff', fontSize: 72, fontWeight: '900' },
+  halo: { position: 'absolute', bottom: 46, width: 86, height: 18, borderRadius: 18, borderWidth: 3, borderColor: '#66faff' },
+  statusText: { color: '#d9ffff', fontWeight: '700', marginTop: 16, textAlign: 'center' },
+  latestText: { color: '#a8cace', marginTop: 8, textAlign: 'center' },
+  sectionTitle: { color: '#f2ffff', fontSize: 18, fontWeight: '900', marginBottom: 10 },
+  statusLine: { color: '#cfe9ed', fontSize: 14, marginBottom: 7 },
+  warning: { color: '#ffcf72', fontWeight: '800', marginTop: 10 },
+  waveWrap: { borderRadius: 24, borderWidth: 1, borderColor: 'rgba(116,250,255,0.26)', backgroundColor: 'rgba(1,10,16,0.82)', padding: 16 },
+  waveHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 },
+  smallMono: { color: '#a9c9cc', fontFamily: 'monospace' as any, fontSize: 12 },
+  waveBars: { height: 72, flexDirection: 'row', alignItems: 'center', gap: 6 },
+  waveBar: { flex: 1, maxWidth: 12, minWidth: 4, borderRadius: 999, backgroundColor: '#5cf8ff', shadowColor: '#5cf8ff', shadowOpacity: 0.75, shadowRadius: 10 },
+  transcriptBox: { borderRadius: 24, borderWidth: 1, borderColor: 'rgba(116,250,255,0.22)', backgroundColor: 'rgba(2,9,14,0.84)', padding: 16, maxHeight: 360 },
+  transcriptScroll: { maxHeight: 280 },
+  dim: { color: '#839ca2' },
+  logRow: { paddingVertical: 9, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.07)' },
+  logMeta: { color: '#7cdde8', fontFamily: 'monospace' as any, fontSize: 11, marginBottom: 3 },
+  logText: { color: '#effcff', fontSize: 14, lineHeight: 20 },
+  menuBox: { borderRadius: 24, borderWidth: 1, borderColor: 'rgba(255,220,138,0.35)', backgroundColor: 'rgba(24,19,4,0.72)', padding: 16 },
+  menuOption: { color: '#ffe3a2', fontSize: 15, marginTop: 5 },
+  debugButtons: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  debugButton: { borderRadius: 999, backgroundColor: '#eaf0ff', paddingHorizontal: 16, paddingVertical: 12 },
+  debugButtonText: { color: '#111827', fontWeight: '900' },
 });

@@ -2,29 +2,9 @@ import type { KeywordEngine, KeywordEngineConfig, WakeEngineEvent } from './wake
 import { startSherpaWasmKwsRuntime } from './sherpaWasmKwsRuntime';
 import { emitWakeDebug } from './wakeDebugBus';
 import { publishVoiceTelemetry } from './voiceTelemetryStore';
+import { getOrStartSherpaRuntime, stopSharedSherpaRuntime } from './sherpaRuntimeSingleton';
 
-type StopHandle = {
-  stop: () => Promise<void>;
-  diagnostics?: unknown;
-  runtimeKind?: string;
-  exportKeys?: string[];
-};
-
-type SharedRuntime = {
-  promise: Promise<StopHandle> | null;
-  runtime: StopHandle | null;
-  starts: number;
-  subscribers: number;
-  keywordsKey: string;
-};
-
-const shared: SharedRuntime = {
-  promise: null,
-  runtime: null,
-  starts: 0,
-  subscribers: 0,
-  keywordsKey: '',
-};
+type RuntimeHandle = { stop?: () => Promise<void> | void; diagnostics?: unknown; runtimeKind?: string; [key: string]: unknown };
 
 function normalizeKeyword(keyword: string) {
   const clean = String(keyword || '').toLowerCase().trim();
@@ -35,158 +15,75 @@ function normalizeKeyword(keyword: string) {
 }
 
 function defaultKeywords(config: KeywordEngineConfig = {}) {
-  return (config.keywords || config.wakeKeywords ||
-    String((process as any)?.env?.EXPO_PUBLIC_AGA_SHERPA_WAKE_KEYWORDS || 'aga,stop,pause')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean));
+  return (config.keywords || config.wakeKeywords || String((process as any)?.env?.EXPO_PUBLIC_AGA_SHERPA_WAKE_KEYWORDS || 'aga,stop,pause')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean));
 }
 
 function keywordKey(keywords: string[]) {
   return keywords.map((k) => k.toLowerCase().trim()).filter(Boolean).sort().join('|');
 }
 
-function globalFlag() {
-  return typeof window !== 'undefined' ? (window as any) : globalThis as any;
-}
-
 export class SherpaWasmKeywordEngine implements KeywordEngine {
   private listeners = new Set<(event: WakeEngineEvent) => void>();
   private running = false;
+  private runtime: RuntimeHandle | null = null;
   private instanceId = `sherpa-wasm-${Math.random().toString(36).slice(2, 8)}`;
 
   async start(config: KeywordEngineConfig = {}) {
     if (this.running) return;
     this.running = true;
-    shared.subscribers += 1;
 
     const keywords = defaultKeywords(config);
     const key = keywordKey(keywords);
-    const root = globalFlag();
 
-    if (root.__AGA_SHERPA_WASM_RUNNING__ && shared.runtime) {
-      this.emit({
-        type: 'status',
-        provider: 'sherpa-wasm',
-        message: `Sherpa WASM already running; attached ${this.instanceId}.`,
-        raw: { subscribers: shared.subscribers, owner: root.__AGA_SHERPA_WASM_RUNNING__ },
-      });
-      return;
-    }
+    this.emit({ type: 'status', provider: 'sherpa-wasm', message: `starting Sherpa WASM singleton (${key || 'no-keywords'})` });
+    publishVoiceTelemetry({ phase: 'wake_listening', wakeEngine: 'sherpa_wasm', provider: 'sherpa-wasm', status: 'starting Sherpa WASM' });
 
     try {
-      this.emit({
-        type: 'status',
-        provider: 'sherpa-wasm',
-        message: `Starting Sherpa WASM KWS once for: ${keywords.join(', ')}`,
-      });
-
-      publishVoiceTelemetry({
-        phase: 'wake_listening',
-        provider: 'sherpa-wasm',
-        wakeEngine: 'sherpa_wasm',
-        status: `Starting Sherpa WASM: ${keywords.join(', ')}`,
-      });
-
-      if (!shared.promise || shared.keywordsKey !== key) {
-        shared.starts += 1;
-        shared.keywordsKey = key;
-        root.__AGA_SHERPA_WASM_RUNNING__ = this.instanceId;
-        root.__AGA_SHERPA_WASM_STARTS__ = shared.starts;
-
-        shared.promise = startSherpaWasmKwsRuntime({
+      this.runtime = await getOrStartSherpaRuntime(key, async () => {
+        return await startSherpaWasmKwsRuntime({
+          ...config,
           keywords,
-          onStatus: (status) => {
+          onAudio: (audio: any) => {
+            emitWakeDebug({ type: 'audio', provider: 'sherpa-wasm', rms: Number(audio.rms || 0), peak: Number(audio.peak || 0), frames: Number(audio.frames || 0), raw: audio });
+          },
+          onKeyword: (keywordEvent: any) => {
+            const keyword = normalizeKeyword(keywordEvent.keyword || keywordEvent.phrase || keywordEvent.id || 'aga');
+            const fallback = !!keywordEvent.fallback || !!keywordEvent.raw?.fallback || /text2token did not create output/i.test(String(keywordEvent.reason || keywordEvent.raw?.reason || ''));
             const event: WakeEngineEvent = {
-              type: 'status',
+              type: 'keyword',
               provider: 'sherpa-wasm',
-              keyword: status,
-              message: status,
-              raw: { status },
-            };
-            emitWakeDebug({ type: 'status', provider: 'sherpa-wasm', message: status, raw: { status } });
+              keyword,
+              confidence: fallback ? 0.25 : Number(keywordEvent.confidence ?? 1),
+              raw: { ...keywordEvent, fallback },
+            } as WakeEngineEvent;
             this.emit(event);
           },
-          onKeyword: (event) => {
-            const keyword = normalizeKeyword(event.phrase || event.id);
-            const index = keywords.findIndex((candidate) => keyword.includes(candidate.toLowerCase()));
-            const wakeEvent: WakeEngineEvent = {
-              type: 'keyword',
-              provider: 'sherpa-wasm',
-              keyword,
-              index: index >= 0 ? index : undefined,
-              confidence: event.confidence,
-              raw: event.raw,
-            };
-
-            emitWakeDebug({
-              type: 'keyword',
-              provider: 'sherpa-wasm',
-              keyword,
-              index: wakeEvent.index,
-              confidence: event.confidence,
-              raw: event.raw,
-            });
-
-            this.emit(wakeEvent);
+          onStatus: (status: any) => {
+            this.emit({ type: 'status', provider: 'sherpa-wasm', message: String(status.message || status.status || status), raw: status });
           },
-        }).then((runtime) => {
-          shared.runtime = runtime;
-          return runtime;
-        });
-      }
-
-      const runtime = await shared.promise;
-      this.emit({
-        type: 'status',
-        provider: 'sherpa-wasm',
-        message: `Sherpa WASM listening (${runtime.runtimeKind || 'runtime'}).`,
-        raw: {
-          singleton: true,
-          starts: shared.starts,
-          subscribers: shared.subscribers,
-          diagnostics: runtime.diagnostics,
-          runtimeKind: runtime.runtimeKind,
-          exportKeys: runtime.exportKeys,
-        },
+          onError: (error: any) => {
+            this.emit({ type: 'error', provider: 'sherpa-wasm', message: error instanceof Error ? error.message : String(error), raw: error });
+          },
+        } as any);
       });
+
+      this.emit({ type: 'status', provider: 'sherpa-wasm', message: `Sherpa WASM attached by ${this.instanceId}`, raw: { runtimeKind: this.runtime.runtimeKind, diagnostics: this.runtime.diagnostics } });
     } catch (error) {
+      this.emit({ type: 'error', provider: 'sherpa-wasm', message: error instanceof Error ? error.message : String(error), raw: error });
       this.running = false;
-      shared.subscribers = Math.max(0, shared.subscribers - 1);
-      shared.promise = null;
-      shared.runtime = null;
-      root.__AGA_SHERPA_WASM_RUNNING__ = null;
-      const message = error instanceof Error ? error.message : String(error);
-      console.error('[aga:sherpa-wasm-keyword] failed', error);
-      emitWakeDebug({ type: 'error', provider: 'sherpa-wasm', message, raw: error });
-      this.emit({ type: 'error', provider: 'sherpa-wasm', message, raw: error });
-      throw new Error(`Sherpa web runtime missing or failed: ${message}`);
+      throw error;
     }
   }
 
   async stop() {
     if (!this.running) return;
     this.running = false;
-    shared.subscribers = Math.max(0, shared.subscribers - 1);
-
-    // Do not stop the shared runtime while another mounted screen/controller uses it.
-    if (shared.subscribers > 0) {
-      this.emit({
-        type: 'status',
-        provider: 'sherpa-wasm',
-        message: `Sherpa WASM kept alive for ${shared.subscribers} subscriber(s).`,
-      });
-      return;
-    }
-
-    const runtime = shared.runtime;
-    shared.runtime = null;
-    shared.promise = null;
-    shared.keywordsKey = '';
-    const root = globalFlag();
-    root.__AGA_SHERPA_WASM_RUNNING__ = null;
-
-    if (runtime) await runtime.stop();
+    // Labs can explicitly stop shared runtime. Main app should normally keep it alive.
+    await stopSharedSherpaRuntime().catch(() => {});
+    this.emit({ type: 'status', provider: 'sherpa-wasm', message: `Sherpa WASM stopped by ${this.instanceId}` });
   }
 
   subscribe(listener: (event: WakeEngineEvent) => void) {
@@ -194,7 +91,40 @@ export class SherpaWasmKeywordEngine implements KeywordEngine {
     return () => this.listeners.delete(listener);
   }
 
+  on(listener: (event: WakeEngineEvent) => void) {
+    return this.subscribe(listener);
+  }
+
   private emit(event: WakeEngineEvent) {
-    for (const listener of Array.from(this.listeners)) listener(event);
+    const raw: any = (event as any).raw;
+    if (event.type === 'keyword') {
+      const fallback = !!raw?.fallback;
+      emitWakeDebug({
+        type: 'keyword',
+        provider: 'sherpa-wasm',
+        keyword: (event as any).keyword || 'aga',
+        confidence: fallback ? 0.25 : (event as any).confidence ?? 1,
+        raw: { ...raw, fallback },
+      });
+      publishVoiceTelemetry({
+        phase: 'wake_detected',
+        wakeEngine: fallback ? 'volume' : 'sherpa_wasm',
+        provider: 'sherpa-wasm',
+        wakeKeyword: (event as any).keyword || 'aga',
+        wakeConfidence: fallback ? 0.25 : (event as any).confidence ?? 1,
+        commandWindowActive: true,
+        micOpen: true,
+        canAcceptUserSpeech: true,
+        status: fallback ? 'Sherpa fallback only — text2token failed' : `Sherpa keyword: ${(event as any).keyword || 'aga'}`,
+      });
+    } else if (event.type === 'status') {
+      emitWakeDebug({ type: 'status', provider: 'sherpa-wasm', message: (event as any).message || 'status', raw });
+    } else if (event.type === 'error') {
+      emitWakeDebug({ type: 'error', provider: 'sherpa-wasm', message: (event as any).message || 'Sherpa error', raw });
+    }
+
+    for (const listener of Array.from(this.listeners)) {
+      try { listener(event); } catch {}
+    }
   }
 }

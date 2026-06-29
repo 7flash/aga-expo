@@ -16,10 +16,10 @@ export type VoiceTelemetryPhase =
   | 'error';
 
 export type VoiceTelemetryEvent = {
-  at: number;
+  at?: number;
   phase?: VoiceTelemetryPhase;
   platform?: 'web' | 'android' | 'ios' | 'unknown';
-  wakeEngine?: string;
+  wakeEngine?: 'volume' | 'sherpa_wasm' | 'sherpa_native' | 'porcupine' | 'disabled' | string;
   provider?: string;
   micOpen?: boolean;
   assistantSpeaking?: boolean;
@@ -39,7 +39,8 @@ export type VoiceTelemetryEvent = {
   raw?: unknown;
 };
 
-export type VoiceTelemetrySnapshot = Required<Pick<VoiceTelemetryEvent, 'at'>> & {
+export type VoiceTelemetrySnapshot = {
+  at: number;
   phase: VoiceTelemetryPhase;
   platform: 'web' | 'android' | 'ios' | 'unknown';
   wakeEngine: string;
@@ -60,17 +61,19 @@ export type VoiceTelemetrySnapshot = Required<Pick<VoiceTelemetryEvent, 'at'>> &
   status: string;
   error: string;
   events: VoiceTelemetryEvent[];
+  waveform: number[];
 };
 
 type Listener = (snapshot: VoiceTelemetrySnapshot) => void;
 
 const listeners = new Set<Listener>();
 const events: VoiceTelemetryEvent[] = [];
+const waveform: number[] = Array.from({ length: 48 }, () => 0);
 
 let snapshot: VoiceTelemetrySnapshot = {
   at: Date.now(),
   phase: 'wake_listening',
-  platform: 'unknown',
+  platform: typeof navigator !== 'undefined' ? 'web' : 'unknown',
   wakeEngine: 'unknown',
   provider: 'unknown',
   micOpen: true,
@@ -86,79 +89,86 @@ let snapshot: VoiceTelemetrySnapshot = {
   transcript: '',
   sttText: '',
   reply: '',
-  status: 'Waiting for voice',
+  status: 'ready',
   error: '',
-  events: [],
+  events,
+  waveform,
 };
 
-function normalizeLevel(rms?: number, peak?: number, audioLevel?: number) {
-  if (typeof audioLevel === 'number' && Number.isFinite(audioLevel)) return Math.max(0, Math.min(1, audioLevel));
-  const r = typeof rms === 'number' && Number.isFinite(rms) ? rms : 0;
-  const p = typeof peak === 'number' && Number.isFinite(peak) ? peak : 0;
-  return Math.max(0, Math.min(1, Math.max(r * 18, p * 4)));
+function clamp01(value: unknown) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(1, n));
 }
 
-function inferPlatform(): VoiceTelemetrySnapshot['platform'] {
-  if (typeof navigator !== 'undefined') return 'web';
-  return 'unknown';
+function inferMicOpen(next: Partial<VoiceTelemetrySnapshot>) {
+  if (typeof next.micOpen === 'boolean') return next.micOpen;
+  if (typeof next.canAcceptUserSpeech === 'boolean') return next.canAcceptUserSpeech;
+  if (typeof next.assistantSpeaking === 'boolean' && next.assistantSpeaking) return false;
+  if (next.phase === 'speaking' || next.phase === 'thinking' || next.phase === 'tool_call' || next.phase === 'transcribing') return false;
+  if (next.phase === 'live_session') return true;
+  return snapshot.micOpen;
 }
 
-function nextFromEvent(event: VoiceTelemetryEvent): VoiceTelemetrySnapshot {
-  const phase = event.phase ?? snapshot.phase;
-  const rms = typeof event.rms === 'number' ? event.rms : snapshot.rms;
-  const peak = typeof event.peak === 'number' ? event.peak : snapshot.peak;
-  const assistantSpeaking = event.assistantSpeaking ?? phase === 'speaking' ?? snapshot.assistantSpeaking;
-  const commandWindowActive = event.commandWindowActive ?? phase === 'command_window' ?? snapshot.commandWindowActive;
-  const micOpen = event.micOpen ?? (!assistantSpeaking && !['thinking', 'tool_call', 'transcribing'].includes(phase));
-  const canAcceptUserSpeech = event.canAcceptUserSpeech ?? (micOpen && !assistantSpeaking && !['thinking', 'tool_call', 'transcribing'].includes(phase));
+function pushWaveValue(value: number) {
+  const clean = clamp01(value);
+  waveform.push(clean);
+  while (waveform.length > 48) waveform.shift();
+}
 
-  return {
+function notify() {
+  for (const listener of Array.from(listeners)) {
+    try { listener(snapshot); } catch {}
+  }
+}
+
+export function publishVoiceTelemetry(event: VoiceTelemetryEvent = {}) {
+  const at = event.at ?? Date.now();
+  const audioLevel = event.audioLevel != null
+    ? clamp01(event.audioLevel)
+    : event.rms != null
+      ? clamp01(Number(event.rms) * 12)
+      : event.peak != null
+        ? clamp01(Number(event.peak) * 5)
+        : snapshot.audioLevel;
+
+  if (event.rms != null || event.peak != null || event.audioLevel != null) pushWaveValue(audioLevel);
+
+  const nextPartial: Partial<VoiceTelemetrySnapshot> = {
     ...snapshot,
-    ...event,
-    at: event.at,
-    phase,
-    platform: event.platform ?? snapshot.platform ?? inferPlatform(),
+    at,
+    phase: event.phase ?? snapshot.phase,
+    platform: event.platform ?? snapshot.platform,
     wakeEngine: event.wakeEngine ?? snapshot.wakeEngine,
     provider: event.provider ?? snapshot.provider,
-    micOpen,
-    assistantSpeaking,
-    commandWindowActive,
-    canAcceptUserSpeech,
-    rms,
-    peak,
-    audioLevel: normalizeLevel(rms, peak, event.audioLevel),
-    frames: typeof event.frames === 'number' ? event.frames : snapshot.frames,
+    assistantSpeaking: event.assistantSpeaking ?? snapshot.assistantSpeaking,
+    commandWindowActive: event.commandWindowActive ?? snapshot.commandWindowActive,
+    canAcceptUserSpeech: event.canAcceptUserSpeech ?? snapshot.canAcceptUserSpeech,
+    rms: event.rms != null ? clamp01(event.rms) : snapshot.rms,
+    peak: event.peak != null ? clamp01(event.peak) : snapshot.peak,
+    audioLevel,
+    frames: event.frames != null ? Number(event.frames) || 0 : snapshot.frames,
     wakeKeyword: event.wakeKeyword ?? snapshot.wakeKeyword,
-    wakeConfidence: typeof event.wakeConfidence === 'number' ? event.wakeConfidence : snapshot.wakeConfidence,
+    wakeConfidence: event.wakeConfidence != null ? clamp01(event.wakeConfidence) : snapshot.wakeConfidence,
     transcript: event.transcript ?? snapshot.transcript,
     sttText: event.sttText ?? snapshot.sttText,
     reply: event.reply ?? snapshot.reply,
     status: event.status ?? snapshot.status,
-    error: event.error ?? (phase === 'error' ? snapshot.error : ''),
-    events: events.slice(-80),
+    error: event.error ?? snapshot.error,
+    waveform,
   };
-}
 
-export function publishVoiceTelemetry(event: Omit<VoiceTelemetryEvent, 'at'> & { at?: number }) {
-  const full: VoiceTelemetryEvent = { ...event, at: event.at ?? Date.now() };
-  events.push(full);
-  if (events.length > 240) events.splice(0, events.length - 240);
-  snapshot = nextFromEvent(full);
-  snapshot.events = events.slice(-80);
+  nextPartial.micOpen = inferMicOpen(nextPartial);
+  nextPartial.canAcceptUserSpeech = event.canAcceptUserSpeech ?? (!nextPartial.assistantSpeaking && nextPartial.micOpen && nextPartial.phase !== 'thinking' && nextPartial.phase !== 'tool_call' && nextPartial.phase !== 'speaking');
 
-  for (const listener of Array.from(listeners)) {
-    try {
-      listener(snapshot);
-    } catch (error) {
-      console.warn('[aga:telemetry] listener failed', error);
-    }
-  }
+  snapshot = nextPartial as VoiceTelemetrySnapshot;
 
-  if (typeof window !== 'undefined') {
-    try {
-      window.dispatchEvent(new CustomEvent('aga:voiceTelemetry', { detail: snapshot }));
-    } catch {}
-  }
+  const storedEvent: VoiceTelemetryEvent = { ...event, at };
+  events.unshift(storedEvent);
+  while (events.length > 150) events.pop();
+
+  notify();
+  return snapshot;
 }
 
 export function getVoiceTelemetrySnapshot() {
@@ -167,16 +177,36 @@ export function getVoiceTelemetrySnapshot() {
 
 export function subscribeVoiceTelemetry(listener: Listener) {
   listeners.add(listener);
-  try { listener(snapshot); } catch {}
+  listener(snapshot);
   return () => listeners.delete(listener);
 }
 
-export function resetVoiceTelemetry(status = 'Waiting for voice') {
-  events.splice(0, events.length);
+export function markAssistantSpeaking(active: boolean, status?: string) {
+  publishVoiceTelemetry({
+    phase: active ? 'speaking' : 'recovering',
+    assistantSpeaking: active,
+    micOpen: !active,
+    canAcceptUserSpeech: !active,
+    status: status ?? (active ? 'AGA speaking — mic paused' : 'speech complete — settling'),
+  });
+}
+
+export function markMicOpen(open: boolean, status?: string) {
+  publishVoiceTelemetry({
+    micOpen: open,
+    canAcceptUserSpeech: open && !snapshot.assistantSpeaking,
+    status: status ?? (open ? 'mic open' : 'mic paused'),
+  });
+}
+
+export function resetVoiceTelemetry() {
+  events.length = 0;
+  waveform.splice(0, waveform.length, ...Array.from({ length: 48 }, () => 0));
   snapshot = {
     ...snapshot,
     at: Date.now(),
     phase: 'wake_listening',
+    provider: 'reset',
     micOpen: true,
     assistantSpeaking: false,
     commandWindowActive: false,
@@ -184,25 +214,15 @@ export function resetVoiceTelemetry(status = 'Waiting for voice') {
     rms: 0,
     peak: 0,
     audioLevel: 0,
-    frames: 0,
     wakeKeyword: '',
     wakeConfidence: 0,
     transcript: '',
     sttText: '',
     reply: '',
-    status,
+    status: 'ready',
     error: '',
-    events: [],
+    events,
+    waveform,
   };
-  for (const listener of Array.from(listeners)) listener(snapshot);
-}
-
-declare global {
-  interface Window {
-    __AGA_VOICE_TELEMETRY?: () => VoiceTelemetrySnapshot;
-  }
-}
-
-if (typeof window !== 'undefined') {
-  window.__AGA_VOICE_TELEMETRY = getVoiceTelemetrySnapshot;
+  notify();
 }
