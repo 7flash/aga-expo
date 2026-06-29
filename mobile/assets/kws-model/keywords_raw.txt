@@ -1,18 +1,13 @@
-aga @aga
-ahga @aga
-agga @aga
-a ga @aga
-hey aga @aga
-okay aga @aga
-ok aga @aga
-hello aga @aga
-wake aga @aga
-guardian @aga
-angel @aga
-stop @stop
-cancel @stop
-abort @stop
-quiet @stop
-pause @pause
-wait @pause
-hold @pause
+HEY GUARDIAN @aga
+HELLO GUARDIAN @aga
+OK GUARDIAN @aga
+WAKE GUARDIAN @aga
+HEY ANGEL @aga
+HELLO ANGEL @aga
+OK ANGEL @aga
+STOP @stop
+CANCEL @stop
+QUIET @stop
+PAUSE @pause
+WAIT @pause
+HOLD @pause

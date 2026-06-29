@@ -1,20 +1,21 @@
 {
-  "generatedAt": "2026-06-26T23:23:28.963Z",
+  "generatedAt": "2026-06-29T17:43:16.803Z",
+  "tokenized": true,
+  "browserWakeFallback": false,
+  "selectedCanonical": "aga",
+  "selectedTrigger": "HEY GUARDIAN",
+  "reason": "text2token succeeded",
   "groups": [
     {
       "id": "aga",
       "phrases": [
-        "aga",
-        "ahga",
-        "agga",
-        "a ga",
-        "hey aga",
-        "okay aga",
-        "ok aga",
-        "hello aga",
-        "wake aga",
-        "guardian",
-        "angel"
+        "hey guardian",
+        "hello guardian",
+        "ok guardian",
+        "wake guardian",
+        "hey angel",
+        "hello angel",
+        "ok angel"
       ]
     },
     {
@@ -22,7 +23,6 @@
       "phrases": [
         "stop",
         "cancel",
-        "abort",
         "quiet"
       ]
     },
@@ -35,9 +35,6 @@
       ]
     }
   ],
-  "tokenized": false,
-  "browserWakeFallback": true,
-  "reason": "text2token did not create output",
   "nativeKeywords": "assets/kws-model/keywords.txt",
   "webKeywords": "public/sherpa/kws-model/keywords.txt"
 }

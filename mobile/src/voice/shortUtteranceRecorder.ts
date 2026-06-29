@@ -22,12 +22,28 @@ function numberEnv(name: string, fallback: number) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+export function shortUtteranceCaptureMs() {
+  return numberEnv('EXPO_PUBLIC_AGA_SHORT_UTTERANCE_MS', 6500);
+}
+
 async function optionalImport(specifier: string): Promise<any | null> {
   try {
     return await (Function('s', 'return import(s)') as any)(specifier);
   } catch {
     return null;
   }
+}
+
+function chooseBrowserMimeType() {
+  const MR = (globalThis as any).MediaRecorder;
+  const preferred = [
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/mp4',
+    'audio/ogg;codecs=opus',
+    'audio/ogg',
+  ];
+  return preferred.find((type) => MR?.isTypeSupported?.(type)) || 'audio/webm';
 }
 
 class WebShortUtteranceRecorder implements ShortUtteranceRecorder {
@@ -38,15 +54,29 @@ class WebShortUtteranceRecorder implements ShortUtteranceRecorder {
   private mimeType = 'audio/webm';
 
   getDiagnostics() {
-    return { provider: 'web-media-recorder', recording: !!this.recorder, mimeType: this.mimeType };
+    return {
+      provider: 'web-media-recorder',
+      recording: !!this.recorder,
+      mimeType: this.mimeType,
+      chunkCount: this.chunks.length,
+      elapsedMs: this.startedAt ? Date.now() - this.startedAt : 0,
+    };
   }
 
   async start() {
     const nav: any = globalThis.navigator;
     if (!nav?.mediaDevices?.getUserMedia) throw new Error('Browser microphone capture is unavailable.');
-    this.stream = await nav.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-    const preferred = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
-    this.mimeType = preferred.find((type) => (globalThis as any).MediaRecorder?.isTypeSupported?.(type)) || 'audio/webm';
+    if (!(globalThis as any).MediaRecorder) throw new Error('MediaRecorder is unavailable in this browser.');
+
+    this.stream = await nav.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        channelCount: 1,
+      },
+    });
+    this.mimeType = chooseBrowserMimeType();
     this.chunks = [];
     this.recorder = new MediaRecorder(this.stream, { mimeType: this.mimeType });
     this.recorder.ondataavailable = (event) => {
@@ -59,19 +89,37 @@ class WebShortUtteranceRecorder implements ShortUtteranceRecorder {
   async stop(): Promise<ShortUtteranceAudio | null> {
     const recorder = this.recorder;
     if (!recorder) return null;
-    const durationMs = Math.max(0, Date.now() - this.startedAt);
+    const elapsed = Math.max(0, Date.now() - this.startedAt);
+
+    // Give the browser enough time to flush at least one useful audio chunk.
+    if (elapsed < 350) await new Promise((resolve) => setTimeout(resolve, 350 - elapsed));
+    try { recorder.requestData?.(); } catch { /* ignore */ }
+
     await new Promise<void>((resolve) => {
-      recorder.onstop = () => resolve();
-      try { recorder.stop(); } catch { resolve(); }
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        resolve();
+      };
+      recorder.onstop = finish;
+      try { recorder.stop(); } catch { finish(); }
+      setTimeout(finish, 1200);
     });
+
+    const durationMs = Math.max(0, Date.now() - this.startedAt);
     this.recorder = null;
     this.stream?.getTracks?.().forEach((track) => track.stop());
     this.stream = null;
     if (!this.chunks.length) return null;
-    return { kind: 'web_blob', blob: new Blob(this.chunks, { type: this.mimeType }), mimeType: this.mimeType, durationMs };
+    const blob = new Blob(this.chunks, { type: this.mimeType });
+    this.chunks = [];
+    if (blob.size < 128) return null;
+    return { kind: 'web_blob', blob, mimeType: this.mimeType, durationMs };
   }
 
   async cancel() {
+    try { this.recorder?.requestData?.(); } catch { /* ignore */ }
     try { this.recorder?.stop(); } catch { /* ignore */ }
     this.recorder = null;
     this.stream?.getTracks?.().forEach((track) => track.stop());
@@ -90,12 +138,17 @@ class NativeOptionalShortUtteranceRecorder implements ShortUtteranceRecorder {
 
   async start() {
     await enterVoiceCommunicationMode({ reason: 'short_utterance_stt', speaker: false }).catch(() => undefined);
-    // This intentionally avoids Android SpeechRecognizer. It is raw audio capture
-    // only, used after wake so OpenAI STT can transcribe the short utterance.
     const mod = await optionalImport('react-native-audio-record') || await optionalImport('expo-av');
     if (mod?.default?.init || mod?.init) {
       const audioRecord = mod.default || mod;
-      audioRecord.init?.({ sampleRate: 16000, channels: 1, bitsPerSample: 16, wavFile: 'aga-short-utterance.wav', audioSource: 7, audioSourceName: 'VOICE_COMMUNICATION' });
+      audioRecord.init?.({
+        sampleRate: 16000,
+        channels: 1,
+        bitsPerSample: 16,
+        wavFile: 'aga-short-utterance.wav',
+        audioSource: 7,
+        audioSourceName: 'VOICE_COMMUNICATION',
+      });
       audioRecord.start?.();
       this.recorder = { kind: 'audio-record', audioRecord };
       this.startedAt = Date.now();
@@ -104,7 +157,8 @@ class NativeOptionalShortUtteranceRecorder implements ShortUtteranceRecorder {
     if (mod?.Audio?.Recording) {
       const recording = new mod.Audio.Recording();
       await mod.Audio.setAudioModeAsync?.({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
-      await recording.prepareToRecordAsync(mod.Audio.RecordingOptionsPresets?.HIGH_QUALITY);
+      const preset = mod.Audio.RecordingOptionsPresets?.HIGH_QUALITY;
+      await recording.prepareToRecordAsync(preset);
       await recording.startAsync();
       this.recorder = { kind: 'expo-av', recording };
       this.startedAt = Date.now();
@@ -142,8 +196,4 @@ class NativeOptionalShortUtteranceRecorder implements ShortUtteranceRecorder {
 export function createShortUtteranceRecorder(): ShortUtteranceRecorder {
   if (Platform.OS === 'web') return new WebShortUtteranceRecorder();
   return new NativeOptionalShortUtteranceRecorder();
-}
-
-export function shortUtteranceCaptureMs() {
-  return numberEnv('EXPO_PUBLIC_AGA_SHORT_UTTERANCE_CAPTURE_MS', 6500);
 }
