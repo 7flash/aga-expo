@@ -1,6 +1,5 @@
-import React from 'react';
-import SherpaInteractiveLabScreen from '../ui/SherpaInteractiveLabScreen';
+import SherpaVerificationLabScreen from '../ui/SherpaVerificationLabScreen';
 
 export default function SherpaLab() {
-  return <SherpaInteractiveLabScreen />;
+  return <SherpaVerificationLabScreen />;
 }

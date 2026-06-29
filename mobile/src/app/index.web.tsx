@@ -1,6 +1,5 @@
-import React from 'react';
-import AgaAngelApplianceScreen from '../ui/AgaAngelApplianceScreen';
+import AgaProductionAngelScreen from '../ui/AgaProductionAngelScreen';
 
 export default function Index() {
-  return <AgaAngelApplianceScreen />;
+  return <AgaProductionAngelScreen />;
 }

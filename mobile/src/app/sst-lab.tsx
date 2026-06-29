@@ -1,2 +1,5 @@
 import SttLabScreen from '../ui/SttLabScreen';
-export default SttLabScreen;
+
+export default function SstLabAlias() {
+  return <SttLabScreen />;
+}
